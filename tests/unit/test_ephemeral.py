@@ -11,7 +11,7 @@ from pytest_databricks_lakeflow.client import Lakeflow
 from pytest_databricks_lakeflow.errors import LakeflowError
 
 from .conftest import FakeCli
-from .fakes import HOST, FakeWorkspaceClient, example_settings
+from .fakes import HOST, FakeWorkspaceClient, example_settings, make_run
 from .test_session import options
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -130,7 +130,8 @@ def test_keep_flags(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fla
     assert fake_ws.jobs.deleted == ([1001, 1003] if deleted else [])
 
 
-def test_timeout_cancels_the_run(pytester: pytest.Pytester) -> None:
+def test_timeout_cancels_the_run(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
     result = run_tests(
         pytester,
         """
@@ -139,10 +140,8 @@ def test_timeout_cancels_the_run(pytester: pytest.Pytester) -> None:
         import pytest
 
         from pytest_databricks_lakeflow import LakeflowTimeout
-        from tests.unit.fakes import make_run
 
         def test_job(lakeflow):
-            lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
             with lakeflow.job("my_job") as job:
                 with pytest.raises(LakeflowTimeout, match="Run 77 of 'my_job' did not finish within 0:00:00"):
                     job.run(timeout=timedelta(0))
@@ -153,21 +152,20 @@ def test_timeout_cancels_the_run(pytester: pytest.Pytester) -> None:
     result.assert_outcomes(passed=1)
 
 
-def test_exit_cancels_active_runs(pytester: pytest.Pytester) -> None:
+def test_exit_cancels_active_runs(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(run_id: int) -> jobs.Run:
+        raise RuntimeError("network down")
+
+    fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+    monkeypatch.setattr(fake_ws.jobs, "get_run", broken)
     result = run_tests(
         pytester,
         """
         import pytest
 
-        from tests.unit.fakes import make_run
-
         def test_job(lakeflow):
-            lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
-
-            def broken(run_id):
-                raise RuntimeError("network down")
-
-            lakeflow.ws.jobs.get_run = broken
             with pytest.raises(RuntimeError):
                 with lakeflow.job("my_job") as job:
                     job.run()
@@ -332,7 +330,7 @@ def test_params_declared_by_the_hook_are_accepted(pytester: pytest.Pytester, fak
     )
     result = run_tests(
         pytester,
-        """
+        r"""
         import pytest
 
         from pytest_databricks_lakeflow import LakeflowError

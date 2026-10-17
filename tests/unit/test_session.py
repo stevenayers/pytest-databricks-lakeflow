@@ -17,7 +17,7 @@ from pytest_databricks_lakeflow.options import Options
 from .conftest import FakeCli
 from .fakes import FakeWorkspaceClient, example_settings
 
-REPO = Path(__file__).parents[2]
+UNIT_TESTS = Path(__file__).parent
 
 
 def options(**overrides: Any) -> Options:
@@ -217,9 +217,9 @@ import json
 import time
 import sys
 
-sys.path.insert(0, {repo!r})
+sys.path.insert(0, {unit_tests!r})
 
-from tests.unit.fakes import FakeWorkspaceClient, example_settings
+from fakes import FakeWorkspaceClient, example_settings
 from pytest_databricks_lakeflow import bundle, session
 
 
@@ -248,7 +248,7 @@ def pytest_configure(config):
 
 def make_xdist_conftest(pytester: pytest.Pytester) -> Path:
     log = pytester.path / "cli.log"
-    pytester.makeconftest(XDIST_CONFTEST.format(repo=str(REPO), log=str(log)))
+    pytester.makeconftest(XDIST_CONFTEST.format(unit_tests=str(UNIT_TESTS), log=str(log)))
     return log
 
 

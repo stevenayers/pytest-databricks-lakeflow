@@ -12,7 +12,7 @@ from pytest_databricks_lakeflow.client import Lakeflow
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 
 from .conftest import FakeCli
-from .fakes import FakeWorkspaceClient
+from .fakes import FakeWorkspaceClient, make_run
 from .test_session import make_xdist_conftest, options
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -166,7 +166,7 @@ def test_destroy_failure_fails_a_passing_session(pytester: pytest.Pytester, fake
 
 
 def test_destroy_runs_after_interrupted_tests_are_cleaned_up(
-    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     order: list[str] = []
 
@@ -174,21 +174,13 @@ def test_destroy_runs_after_interrupted_tests_are_cleaned_up(
         if len(args) > 1:
             order.append(f"cli {args[1]} deleted={fake_ws.jobs.deleted}")
 
+    def interrupted(run_id: int) -> jobs.Run:
+        raise KeyboardInterrupt
+
     fake_cli.before = record
-    pytester.makepyfile(
-        """
-        from tests.unit.fakes import make_run
-
-        def test_job(lakeflow):
-            lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
-
-            def interrupted(run_id):
-                raise KeyboardInterrupt
-
-            lakeflow.ws.jobs.get_run = interrupted
-            lakeflow.job("my_job").run()
-        """
-    )
+    fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+    monkeypatch.setattr(fake_ws.jobs, "get_run", interrupted)
+    pytester.makepyfile('def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
     pytester.runpytest("--lakeflow-destroy", no_reraise_ctrlc=True)
     assert fake_ws.jobs.cancelled == [77]
     assert order[-1] == "cli destroy deleted=[1001]"

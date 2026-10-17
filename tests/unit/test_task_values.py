@@ -8,7 +8,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import ENV_KEY, Helpers, check_values, escape, inject_probes, wrap_task
 
-from .fakes import FakeWorkspaceClient, example_settings
+from .fakes import FakeWorkspaceClient, example_settings, recorded
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
@@ -114,14 +114,12 @@ def test_check_values() -> None:
 
 
 def test_single_task_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(*recorded("probe_success"))
     pytester.makepyfile(
         """
         import pytest
 
-        from tests.unit.fakes import recorded
-
         def test_task(lakeflow):
-            lakeflow.ws.jobs.queue(*recorded("probe_success"))
             with lakeflow.task(
                 "my_job.transform",
                 params={"param1": "hello"},
@@ -149,14 +147,10 @@ def test_single_task_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspac
 
 
 def test_job_capture_values_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(*recorded("probe_failure"))
     pytester.makepyfile(
         """
-        import pytest
-
-        from tests.unit.fakes import recorded
-
         def test_job(lakeflow):
-            lakeflow.ws.jobs.queue(*recorded("probe_failure"))
             with lakeflow.job("my_job", params={"param1": "explode"}, capture_values={"transform": ["stage"]}) as job:
                 run = job.run()
             assert run.failed
