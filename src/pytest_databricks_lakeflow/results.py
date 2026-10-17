@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
+from datetime import timedelta
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from databricks.sdk.errors.base import DatabricksError
+from databricks.sdk.service import jobs
+
+if TYPE_CHECKING:
+    from databricks.sdk import WorkspaceClient
+
+log = logging.getLogger("pytest_databricks_lakeflow")
+
+PREFIX = "__pytest_"
+PROBE_PREFIX = f"{PREFIX}probe__"
+NOT_RUN = frozenset({"UPSTREAM_FAILED", "UPSTREAM_CANCELED", "DISABLED", "EXCLUDED", "CANCELED"})
+
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+EXC_LINE = re.compile(r"^(?P<name>[A-Za-z_]\w*(?:\.(?:<locals>|[A-Za-z_]\w*))*)(?:: ?(?P<msg>.*))?$")
+JAVA_FRAME = re.compile(r"^\s+at \S")
+
+
+def _first_line(text: str, limit: int = 200) -> str:
+    lines = text.strip().splitlines()
+    line = lines[0] if lines else ""
+    return line if len(line) <= limit else f"{line[: limit - 3]}..."
+
+
+@dataclass(frozen=True)
+class TaskError:
+    """An error reported by a task run.
+
+    Attributes:
+        type: The exception class name as Python printed it, possibly dotted, such as
+            `json.decoder.JSONDecodeError`. `None` when the error is not an exception, for example when the
+            platform skipped the task.
+        message: The exception message.
+        trace: The error trace with ANSI colour codes removed.
+    """
+
+    type: str | None
+    message: str
+    trace: str
+
+    @classmethod
+    def from_output(cls, error: str | None, trace: str | None) -> TaskError | None:
+        """Parse the error fields of a task's `get_run_output` response.
+
+        The `error` field is preferred, because `error_trace` is ANSI-coloured IPython output. The last
+        `Name: message` line of the trace is the fallback.
+
+        Args:
+            error: The `error` field.
+            trace: The `error_trace` field.
+
+        Returns:
+            The parsed error, or `None` when both fields are empty.
+        """
+        if not error and not trace:
+            return None
+        err = ANSI.sub("", error or "").strip("\n")
+        tr = ANSI.sub("", trace or "")
+        if err:
+            first, *rest = err.splitlines()
+            match = EXC_LINE.match(first)
+            if match:
+                lines = [match["msg"] or "", *(line for line in rest if not JAVA_FRAME.match(line))]
+                return cls(type=match["name"], message="\n".join(lines).strip(), trace=tr or err)
+        for line in reversed(tr.splitlines()):
+            match = EXC_LINE.match(line)
+            if match and match["msg"] is not None:
+                return cls(type=match["name"], message=match["msg"].strip(), trace=tr)
+        return cls(type=None, message=err or tr.strip(), trace=tr)
+
+    def __str__(self) -> str:
+        return f"{self.type}: {self.message}" if self.type else self.message
+
+
+class TaskValues(dict[str, object]):
+    """Task values captured by a probe task.
+
+    A dict whose missing keys raise a `KeyError` that says why the value is missing: the task never set it, the
+    task did not run, or the probe failed.
+
+    Attributes:
+        reasons: The explanation for each missing key.
+    """
+
+    def __init__(self, values: Mapping[str, object] | None = None, reasons: Mapping[str, str] | None = None) -> None:
+        super().__init__(values or {})
+        self.reasons = dict(reasons or {})
+
+    def __missing__(self, key: str) -> object:
+        if key in self.reasons:
+            raise KeyError(self.reasons[key])
+        raise KeyError(key)
+
+
+@dataclass(frozen=True)
+class TaskRun:
+    """The outcome of one task in a job run.
+
+    When the platform retried the task, this describes the last attempt.
+
+    Attributes:
+        task_key: The task's key.
+        run_id: The task run's id.
+        result_state: The task's result state, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`.
+        termination_code: The termination code, such as `RUN_EXECUTION_ERROR`.
+        termination_message: The termination message.
+        run_url: The task run's page in the workspace.
+        duration: The time from start to end.
+        output: The value the notebook passed to `dbutils.notebook.exit()`.
+        output_truncated: Whether `output` was cut at 5 MB.
+        logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks.
+        logs_truncated: Whether `logs` holds only the last 5 MB.
+        error: The task's error, or `None` if it succeeded or did not run.
+        values: Task values captured by a probe.
+        missing_values: Keys that were requested from the probe but not captured.
+        attempt: The attempt number, 0 for the first attempt.
+    """
+
+    task_key: str
+    run_id: int
+    result_state: str | None
+    termination_code: str | None
+    termination_message: str | None
+    run_url: str | None
+    duration: timedelta
+    output: str | None = None
+    output_truncated: bool = False
+    logs: str = ""
+    logs_truncated: bool = False
+    error: TaskError | None = None
+    values: TaskValues = field(default_factory=TaskValues)
+    missing_values: list[str] = field(default_factory=list)
+    attempt: int = 0
+
+    @property
+    def succeeded(self) -> bool:
+        """Whether the task ended `SUCCESS`."""
+        return self.result_state == "SUCCESS"
+
+    @property
+    def ran(self) -> bool:
+        """Whether the task ran. False if it was skipped, excluded, disabled or cancelled."""
+        return self.result_state not in NOT_RUN
+
+    @property
+    def log_lines(self) -> list[str]:
+        """The non-blank lines of `logs`."""
+        return [line for line in self.logs.splitlines() if line.strip()]
+
+    def raised(self, exc_type: type[BaseException]) -> bool:
+        """Check whether the task failed with an exception of the given class.
+
+        Args:
+            exc_type: The exception class. Only its name is compared, because the task ran in another process.
+
+        Returns:
+            True if the task's error has the class name of `exc_type`.
+        """
+        if self.error is None or self.error.type is None:
+            return False
+        return self.error.type.rsplit(".", 1)[-1] == exc_type.__name__
+
+    def __repr__(self) -> str:
+        error = f", error={_first_line(str(self.error))!r}" if self.error else ""
+        return f"TaskRun({self.task_key!r}, {self.result_state}{error}, {self.run_url})"
+
+
+@dataclass(frozen=True)
+class JobRun:
+    """The outcome of one run of an ephemeral job.
+
+    Attributes:
+        job_key: The bundle resource key of the job.
+        job_id: The ephemeral job's id.
+        run_id: The run's id.
+        run_url: The run's page in the workspace.
+        result_state: The parent run's result state. Not a verdict: a run whose probe ran after a failed task
+            ends `SUCCESS_WITH_FAILURES`. Use `succeeded` instead.
+        termination_code: The parent run's termination code.
+        termination_message: The parent run's termination message.
+        duration: The time from start to end of the parent run.
+        tasks: The user's tasks that were part of the run, by task key.
+        injected_tasks: The stub and probe tasks added by the plugin, by task key.
+        skipped_tasks: Tasks left out by `only`, by task key.
+    """
+
+    job_key: str
+    job_id: int
+    run_id: int
+    run_url: str
+    result_state: str | None
+    termination_code: str | None
+    termination_message: str | None
+    duration: timedelta
+    tasks: dict[str, TaskRun]
+    injected_tasks: dict[str, TaskRun]
+    skipped_tasks: dict[str, TaskRun] = field(default_factory=dict)
+
+    @property
+    def succeeded(self) -> bool:
+        """Whether every task in `tasks` ended `SUCCESS`.
+
+        Injected and skipped tasks do not count, nor do tasks `EXCLUDED` because their `run_if` or if/else
+        condition was not met.
+        """
+        return bool(self.tasks) and not self._failing()
+
+    @property
+    def failed(self) -> bool:
+        """Whether the run did not succeed."""
+        return not self.succeeded
+
+    def task(self, key: str) -> TaskRun:
+        """Get one of the user's tasks.
+
+        Args:
+            key: The task key.
+
+        Returns:
+            The task's outcome.
+
+        Raises:
+            KeyError: If the task was not part of the run. The message lists the available keys.
+        """
+        if key not in self.tasks:
+            skipped = f" Skipped by only: {sorted(self.skipped_tasks)}." if key in self.skipped_tasks else ""
+            raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{skipped}")
+        return self.tasks[key]
+
+    def _failing(self) -> list[TaskRun]:
+        return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
+
+    def __repr__(self) -> str:
+        failing = [f"{t.task_key}: {_first_line(str(t.error)) if t.error else t.result_state}" for t in self._failing()]
+        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, failing={failing})"
+
+
+def build_job_run(
+    ws: WorkspaceClient,
+    run: jobs.Run,
+    *,
+    job_key: str,
+    job_id: int,
+    stubs: Collection[str] = (),
+    capture_values: Mapping[str, Sequence[str]] | None = None,
+) -> JobRun:
+    """Build a `JobRun` from a terminated run, reading each task's output.
+
+    When the platform retried a task, only its last attempt is kept. Probe outputs become the `values` of the
+    tasks they watched.
+
+    Args:
+        ws: The workspace client.
+        run: The terminated parent run from `get_run`.
+        job_key: The bundle resource key of the job.
+        job_id: The ephemeral job's id.
+        stubs: Keys of stub tasks, which count as injected tasks.
+        capture_values: The value keys requested from each probed task, by task key.
+
+    Returns:
+        The run's outcome.
+    """
+    latest: dict[str, jobs.RunTask] = {}
+    for task in run.tasks or []:
+        key = task.task_key or ""
+        current = latest.get(key)
+        if current is None or (task.attempt_number or 0) >= (current.attempt_number or 0):
+            latest[key] = task
+    outputs = _outputs(ws, [task for task in latest.values() if _enum(_result_state(task)) != "DISABLED"])
+    task_runs = {key: _task_run(task, outputs.get(task.run_id or 0)) for key, task in latest.items()}
+    injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
+    user = {key: t for key, t in task_runs.items() if key not in injected}
+    for target, keys in (capture_values or {}).items():
+        if target in user:
+            user[target] = _with_values(user[target], injected.get(f"{PROBE_PREFIX}{target}"), keys)
+    details = run.status.termination_details if run.status else None
+    return JobRun(
+        job_key=job_key,
+        job_id=job_id,
+        run_id=run.run_id or 0,
+        run_url=run.run_page_url or "",
+        result_state=_enum(run.state.result_state if run.state else None),
+        termination_code=_enum(details.code if details else None),
+        termination_message=details.message if details else None,
+        duration=_duration(run.start_time, run.end_time),
+        tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
+        injected_tasks=injected,
+        skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
+    )
+
+
+def _outputs(ws: WorkspaceClient, tasks: list[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
+    def fetch(task: jobs.RunTask) -> jobs.RunOutput:
+        try:
+            return ws.jobs.get_run_output(task.run_id or 0)
+        except DatabricksError as e:
+            log.warning("Could not read the output of task %s (run %s): %s", task.task_key, task.run_id, e)
+            return jobs.RunOutput()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return {task.run_id or 0: output for task, output in zip(tasks, pool.map(fetch, tasks), strict=True)}
+
+
+def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
+    out = out or jobs.RunOutput()
+    state = _enum(_result_state(task))
+    details = task.status.termination_details if task.status else None
+    notebook = out.notebook_output
+    return TaskRun(
+        task_key=task.task_key or "",
+        run_id=task.run_id or 0,
+        result_state=state,
+        termination_code=_enum(details.code if details else None),
+        termination_message=details.message if details else None,
+        run_url=task.run_page_url,
+        duration=_duration(task.start_time, task.end_time),
+        output=notebook.result if notebook else None,
+        output_truncated=bool(notebook and notebook.truncated),
+        logs=out.logs or "",
+        logs_truncated=bool(out.logs_truncated),
+        error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
+        attempt=task.attempt_number or 0,
+    )
+
+
+def _with_values(target: TaskRun, probe: TaskRun | None, keys: Sequence[str]) -> TaskRun:
+    name = target.task_key
+    if not target.ran:
+        why = {k: f"Task {name!r} did not run ({target.result_state}), so value {k!r} was not captured" for k in keys}
+        return replace(target, values=TaskValues({}, why), missing_values=list(keys))
+    captured = _probe_output(probe)
+    if isinstance(captured, str):
+        why = {k: f"Value {k!r} of task {name!r} was not captured: {captured}" for k in keys}
+        return replace(target, values=TaskValues({}, why), missing_values=list(keys))
+    values, missing = captured
+    why = {k: f"Task {name!r} never set value {k!r}" for k in missing}
+    return replace(target, values=TaskValues(values, why), missing_values=missing)
+
+
+def _probe_output(probe: TaskRun | None) -> tuple[dict[str, object], list[str]] | str:
+    if probe is None:
+        return "its probe task was not part of the run"
+    if not probe.succeeded:
+        error = f": {probe.error}" if probe.error else ""
+        return f"probe task {probe.task_key} ended {probe.result_state}{error}"
+    try:
+        data = json.loads(probe.output or "")
+        return dict(data["values"]), list(data["missing"])
+    except (ValueError, KeyError, TypeError):
+        truncated = " (truncated)" if probe.output_truncated else ""
+        return f"probe task {probe.task_key} returned unreadable output{truncated}"
+
+
+def _result_state(task: jobs.RunTask) -> jobs.RunResultState | None:
+    return task.state.result_state if task.state else None
+
+
+def _enum(value: Enum | str | None) -> str | None:
+    return value.value if isinstance(value, Enum) else value
+
+
+def _duration(start: int | None, end: int | None) -> timedelta:
+    return timedelta(milliseconds=end - start) if start and end and end >= start else timedelta(0)

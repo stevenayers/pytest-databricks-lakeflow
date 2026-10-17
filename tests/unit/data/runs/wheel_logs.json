@@ -1,0 +1,1382 @@
+{
+ "outputs": {
+  "319644947862990": {
+   "logs": "[diff_b] start action=marker argv=['--action', 'marker', '--marker', 'diff_b', '--lines', '20'] unknown=[] python=3.12.3\n[diff_b] stdout line 0\n\n\n[diff_b] stderr line 0\n\n\n[diff_b] stdout line 1\n\n\n[diff_b] stderr line 1\n\n\n[diff_b] stdout line 2\n\n\n[diff_b] stderr line 2\n\n\n[diff_b] stdout line 3\n\n\n[diff_b] stderr line 3\n\n\n[diff_b] stdout line 4\n\n\n[diff_b] stderr line 4\n\n\n[diff_b] stdout line 5\n\n\n[diff_b] stderr line 5\n\n\n[diff_b] stdout line 6\n\n\n[diff_b] stderr line 6\n\n\n[diff_b] stdout line 7\n\n\n[diff_b] stderr line 7\n\n\n[diff_b] stdout line 8\n\n\n[diff_b] stderr line 8\n\n\n[diff_b] stdout line 9\n\n\n[diff_b] stderr line 9\n\n\n[diff_b] stdout line 10\n\n\n[diff_b] stderr line 10\n\n\n[diff_b] stdout line 11\n\n\n[diff_b] stderr line 11\n\n\n[diff_b] stdout line 12\n\n\n[diff_b] stderr line 12\n\n\n[diff_b] stdout line 13\n\n\n[diff_b] stderr line 13\n\n\n[diff_b] stdout line 14\n\n\n[diff_b] stderr line 14\n\n\n[diff_b] stdout line 15\n\n\n[diff_b] stderr line 15\n\n\n[diff_b] stdout line 16\n\n\n[diff_b] stderr line 16\n\n\n[diff_b] stdout line 17\n\n\n[diff_b] stderr line 17\n\n\n[diff_b] stdout line 18\n\n\n[diff_b] stderr line 18\n\n\n[diff_b] stdout line 19\n\n\n[diff_b] stderr line 19\n\n\n[diff_b] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215179967,
+    "execution_duration": 83000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 319644947862990,
+    "original_attempt_run_id": 319644947862990,
+    "run_id": 319644947862990,
+    "run_name": "diff_b",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/319644947862990",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092370,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215179967,
+      "environment_key": "e_diff2",
+      "execution_duration": 83000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "diff_b",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 319644947862990,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/319644947862990",
+      "setup_duration": 4000,
+      "start_time": 1792215092370,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "diff_b"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "409071664864771": {
+   "logs": "[same_b] start action=marker argv=['--action', 'marker', '--marker', 'same_b', '--lines', '20'] unknown=[] python=3.12.3\n[same_b] stdout line 0\n\n\n[same_b] stderr line 0\n\n\n[same_b] stdout line 1\n\n\n[same_b] stderr line 1\n\n\n[same_b] stdout line 2\n\n\n[same_b] stderr line 2\n\n\n[same_b] stdout line 3\n\n\n[same_b] stderr line 3\n\n\n[same_b] stdout line 4\n\n\n[same_b] stderr line 4\n\n\n[same_b] stdout line 5\n\n\n[same_b] stderr line 5\n\n\n[same_b] stdout line 6\n\n\n[same_b] stderr line 6\n\n\n[same_b] stdout line 7\n\n\n[same_b] stderr line 7\n\n\n[same_b] stdout line 8\n\n\n[same_b] stderr line 8\n\n\n[same_b] stdout line 9\n\n\n[same_b] stderr line 9\n\n\n[same_b] stdout line 10\n\n\n[same_b] stderr line 10\n\n\n[same_b] stdout line 11\n\n\n[same_b] stderr line 11\n\n\n[same_b] stdout line 12\n\n\n[same_b] stderr line 12\n\n\n[same_b] stdout line 13\n\n\n[same_b] stderr line 13\n\n\n[same_b] stdout line 14\n\n\n[same_b] stderr line 14\n\n\n[same_b] stdout line 15\n\n\n[same_b] stderr line 15\n\n\n[same_b] stdout line 16\n\n\n[same_b] stderr line 16\n\n\n[same_b] stdout line 17\n\n\n[same_b] stderr line 17\n\n\n[same_b] stdout line 18\n\n\n[same_b] stderr line 18\n\n\n[same_b] stdout line 19\n\n\n[same_b] stderr line 19\n\n\n[same_b] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215205548,
+    "execution_duration": 109000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 409071664864771,
+    "original_attempt_run_id": 409071664864771,
+    "run_id": 409071664864771,
+    "run_name": "same_b",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/409071664864771",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092366,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215205548,
+      "environment_key": "e_same",
+      "execution_duration": 109000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "same_b",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 409071664864771,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/409071664864771",
+      "setup_duration": 4000,
+      "start_time": 1792215092366,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "same_b"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "551088677712570": {
+   "logs": "[seq_1] start action=marker argv=['--action', 'marker', '--marker', 'seq_1', '--lines', '20'] unknown=[] python=3.12.3\n[seq_1] stdout line 0\n\n\n[seq_1] stderr line 0\n\n\n[seq_1] stdout line 1\n\n\n[seq_1] stderr line 1\n\n\n[seq_1] stdout line 2\n\n\n[seq_1] stderr line 2\n\n\n[seq_1] stdout line 3\n\n\n[seq_1] stderr line 3\n\n\n[seq_1] stdout line 4\n\n\n[seq_1] stderr line 4\n\n\n[seq_1] stdout line 5\n\n\n[seq_1] stderr line 5\n\n\n[seq_1] stdout line 6\n\n\n[seq_1] stderr line 6\n\n\n[seq_1] stdout line 7\n\n\n[seq_1] stderr line 7\n\n\n[seq_1] stdout line 8\n\n\n[seq_1] stderr line 8\n\n\n[seq_1] stdout line 9\n\n\n[seq_1] stderr line 9\n\n\n[seq_1] stdout line 10\n\n\n[seq_1] stderr line 10\n\n\n[seq_1] stdout line 11\n\n\n[seq_1] stderr line 11\n\n\n[seq_1] stdout line 12\n\n\n[seq_1] stderr line 12\n\n\n[seq_1] stdout line 13\n\n\n[seq_1] stderr line 13\n\n\n[seq_1] stdout line 14\n\n\n[seq_1] stderr line 14\n\n\n[seq_1] stdout line 15\n\n\n[seq_1] stderr line 15\n\n\n[seq_1] stdout line 16\n\n\n[seq_1] stderr line 16\n\n\n[seq_1] stdout line 17\n\n\n[seq_1] stderr line 17\n\n\n[seq_1] stdout line 18\n\n\n[seq_1] stderr line 18\n\n\n[seq_1] stdout line 19\n\n\n[seq_1] stderr line 19\n\n\n[seq_1] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215200347,
+    "execution_duration": 104000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 551088677712570,
+    "original_attempt_run_id": 551088677712570,
+    "run_id": 551088677712570,
+    "run_name": "seq_1",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/551088677712570",
+    "run_type": "JOB_RUN",
+    "setup_duration": 3000,
+    "start_time": 1792215092373,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215200347,
+      "environment_key": "e_seq",
+      "execution_duration": 104000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "seq_1",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 551088677712570,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/551088677712570",
+      "setup_duration": 3000,
+      "start_time": 1792215092373,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "seq_1"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "601486759288827": {
+   "logs": "[scr_a] start action=marker argv=['--action', 'marker', '--marker', 'scr_a', '--lines', '20'] unknown=[] python=3.12.3\n[scr_a] stdout line 0\n\n\n[scr_a] stderr line 0\n\n\n[scr_a] stdout line 1\n\n\n[scr_a] stderr line 1\n\n\n[scr_a] stdout line 2\n\n\n[scr_a] stderr line 2\n\n\n[scr_a] stdout line 3\n\n\n[scr_a] stderr line 3\n\n\n[scr_a] stdout line 4\n\n\n[scr_a] stderr line 4\n\n\n[scr_a] stdout line 5\n\n\n[scr_a] stderr line 5\n\n\n[scr_a] stdout line 6\n\n\n[scr_a] stderr line 6\n\n\n[scr_a] stdout line 7\n\n\n[scr_a] stderr line 7\n\n\n[scr_a] stdout line 8\n\n\n[scr_a] stderr line 8\n\n\n[scr_a] stdout line 9\n\n\n[scr_a] stderr line 9\n\n\n[scr_a] stdout line 10\n\n\n[scr_a] stderr line 10\n\n\n[scr_a] stdout line 11\n\n\n[scr_a] stderr line 11\n\n\n[scr_a] stdout line 12\n\n\n[scr_a] stderr line 12\n\n\n[scr_a] stdout line 13\n\n\n[scr_a] stderr line 13\n\n\n[scr_a] stdout line 14\n\n\n[scr_a] stderr line 14\n\n\n[scr_a] stdout line 15\n\n\n[scr_a] stderr line 15\n\n\n[scr_a] stdout line 16\n\n\n[scr_a] stderr line 16\n\n\n[scr_a] stdout line 17\n\n\n[scr_a] stderr line 17\n\n\n[scr_a] stdout line 18\n\n\n[scr_a] stderr line 18\n\n\n[scr_a] stdout line 19\n\n\n[scr_a] stderr line 19\n\n\n[scr_a] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215206797,
+    "execution_duration": 110000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 601486759288827,
+    "original_attempt_run_id": 601486759288827,
+    "run_id": 601486759288827,
+    "run_name": "scr_a",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/601486759288827",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092377,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215206797,
+      "environment_key": "e_script",
+      "execution_duration": 110000,
+      "run_id": 601486759288827,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/601486759288827",
+      "setup_duration": 4000,
+      "spark_python_task": {
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "scr_a",
+        "--lines",
+        "20"
+       ],
+       "python_file": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/script.py"
+      },
+      "start_time": 1792215092377,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "scr_a"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "689771234869289": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215125847,
+    "execution_duration": 30000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 689771234869289,
+    "original_attempt_run_id": 689771234869289,
+    "run_id": 689771234869289,
+    "run_name": "nb_probe",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/689771234869289",
+    "run_type": "JOB_RUN",
+    "setup_duration": 3000,
+    "start_time": 1792215092383,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215125847,
+      "execution_duration": 30000,
+      "notebook_task": {
+       "base_parameters": {
+        "label": "nb_probe"
+       },
+       "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow-e/env_probe",
+       "source": "WORKSPACE"
+      },
+      "run_id": 689771234869289,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/689771234869289",
+      "setup_duration": 3000,
+      "start_time": 1792215092383,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "nb_probe"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"label\": \"nb_probe\", \"python\": \"3.12.3\", \"runtime\": \"client.6.3\", \"spike_pkg\": null, \"spike_pkg_error\": \"ModuleNotFoundError: No module named 'spike_pkg'\", \"env\": {\"DATABRICKS_CLUSTER_LIBS_PYTHON_ROOT_DIR\": \"python\", \"DATABRICKS_CLUSTER_LIBS_ROOT_DIR\": \"cluster_libraries\", \"DATABRICKS_CPU_ARCH\": \"x86_64\", \"DATABRICKS_ENV_VERSION\": \"6\", \"DATABRICKS_GANGLIA_ENABLED\": \"FALSE\", \"DATABRICKS_LIBS_NFS_ROOT_DIR\": \".ephemeral_nfs\", \"DATABRICKS_LIBS_NFS_ROOT_PATH\": \"/local_disk0/.ephemeral_nfs\", \"DATABRICKS_PIN_SPARK_TO_X86\": \"false\", \"DATABRICKS_ROOT_VIRTUALENV_ENV\": \"/databricks/python3\", \"DATABRICKS_RUNTIME_VERSION\": \"client.6.3\", \"DB_CONF\": \"{\\n  \\\"databricks.daemon.driver.lazyConfig.path\\\": \\\"/databricks/secrets/config.json\\\",\\n  \\\"databricks.loopbackRpc.enabled\\\": true\\n}\", \"DB_DRIVER_IP\": \"192.168.210.35\", \"DB_HOME\": \"/databricks\", \"DB_INSTANCE_TYPE\": \"serverless-driver-4cpu-low-mem-unified-az\", \"DB_IS_DRIVER\": \"TRUE\", \"IS_CLIENT_IMAGE\": \"true\", \"IS_SANDBOXED_REPL\": \"true\", \"IS_SERVERLESS\": \"TRUE\", \"PYTHONHASHSEED\": \"0\", \"PYTHONPATH\": \"/databricks/spark/python/lib/py4j-0.10.9.9-src.zip:/WSFS_NOTEBOOK_DIR:/databricks/python_shell/lib\", \"PYTHON_REPL_SAFE_CONFIG_MAP\": \"{\\\"databricks.repl.python.pipMagicNfsSleepDisabled\\\":true,\\\"databricks.repl.python.sparkConnectTracebackEnrichmentEnabled\\\":true,\\\"spark.databricks.driver.notebookGrpcSqlMagicApiEnabled\\\":true,\\\"databricks.r\", \"SPARK_CONF_DIR\": \"/databricks/spark/conf\", \"SPARK_CONNECT_MODE_ENABLED\": \"1\", \"SPARK_DIST_CLASSPATH\": \"/databricks/spark/dbconf/log4j/driver:/databricks/jars/*\", \"SPARK_DRIVER_CHECKPOINT_RESTORE_COMPATIBLE\": \"true\", \"SPARK_ENV_LOADED\": \"1\", \"SPARK_EXECUTOR_ATTRIBUTE_POD_NAME\": \"driver-pool-v23-repl-clien-serverlessdr-a4148679-10170508-ppnhz\", \"SPARK_HOME\": \"/databricks/spark\", \"SPARK_LOCAL_DIRS\": \"/local_disk0\", \"SPARK_LOCAL_HOSTNAME\": \"127.0.0.1\", \"SPARK_LOCAL_IP\": \"0.0.0.0\", \"SPARK_PUBLIC_DNS\": \"0.0.0.0\", \"SPARK_REMOTE\": \"unix:///databricks/sparkconnect/grpc.sock;user_id=PLACEHOLDER;session_id=dc31012d-79da-4f31-87ab-27f8d88c885a\", \"SPARK_SCALA_VERSION\": \"2.13\", \"SPARK_WARM_UP_CONF_JSON\": \"{\\\"sparkConfs\\\":{\\\"spark.databricks.driver.aioaLazyConfig.warmupQueries.deltaReadingQueries.basePath\\\":\\\"wasbs://storage@storage.blob.core.windows.net\\\"}}\", \"SPARK_WORKER_MEMORY\": \"23862m\", \"SPARK_WORKER_PORT\": \"7102\", \"VIRTUAL_ENV\": \"/local_disk0/.ephemeral_nfs/envs/pythonEnv-ab55190f-a1d0-42dc-9885-adaee0bbfc5a\", \"VIRTUAL_ENV_PROMPT\": \"pythonEnv-ab55190f-a1d0-42dc-9885-adaee0bbfc5a\"}, \"spark.databricks.clusterUsageTags.clusterId\": \"1017-053140-ys9u4wg-v2n\", \"spark.databricks.clusterUsageTags.sparkVersion\": \"AnalysisException: [CONFIG_NOT_AVAILABLE.WITHOUT_SUGGESTION] Configuration spark.databricks.clusterUsageTags.sparkVersion is not available.  SQLSTATE: 42K0I\\n\\nJVM stacktrace:\\norg.apache.spark.sql.AnalysisException\\n\\tat co\"}",
+    "truncated": false
+   }
+  },
+  "720439839730782": {
+   "logs": "[diff_a] start action=marker argv=['--action', 'marker', '--marker', 'diff_a', '--lines', '20'] unknown=[] python=3.12.3\n[diff_a] stdout line 0\n\n\n[diff_a] stderr line 0\n\n\n[diff_a] stdout line 1\n\n\n[diff_a] stderr line 1\n\n\n[diff_a] stdout line 2\n\n\n[diff_a] stderr line 2\n\n\n[diff_a] stdout line 3\n\n\n[diff_a] stderr line 3\n\n\n[diff_a] stdout line 4\n\n\n[diff_a] stderr line 4\n\n\n[diff_a] stdout line 5\n\n\n[diff_a] stderr line 5\n\n\n[diff_a] stdout line 6\n\n\n[diff_a] stderr line 6\n\n\n[diff_a] stdout line 7\n\n\n[diff_a] stderr line 7\n\n\n[diff_a] stdout line 8\n\n\n[diff_a] stderr line 8\n\n\n[diff_a] stdout line 9\n\n\n[diff_a] stderr line 9\n\n\n[diff_a] stdout line 10\n\n\n[diff_a] stderr line 10\n\n\n[diff_a] stdout line 11\n\n\n[diff_a] stderr line 11\n\n\n[diff_a] stdout line 12\n\n\n[diff_a] stderr line 12\n\n\n[diff_a] stdout line 13\n\n\n[diff_a] stderr line 13\n\n\n[diff_a] stdout line 14\n\n\n[diff_a] stderr line 14\n\n\n[diff_a] stdout line 15\n\n\n[diff_a] stderr line 15\n\n\n[diff_a] stdout line 16\n\n\n[diff_a] stderr line 16\n\n\n[diff_a] stdout line 17\n\n\n[diff_a] stderr line 17\n\n\n[diff_a] stdout line 18\n\n\n[diff_a] stderr line 18\n\n\n[diff_a] stdout line 19\n\n\n[diff_a] stderr line 19\n\n\n[diff_a] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215205870,
+    "execution_duration": 109000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 720439839730782,
+    "original_attempt_run_id": 720439839730782,
+    "run_id": 720439839730782,
+    "run_name": "diff_a",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/720439839730782",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092368,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215205870,
+      "environment_key": "e_diff1",
+      "execution_duration": 109000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "diff_a",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 720439839730782,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/720439839730782",
+      "setup_duration": 4000,
+      "start_time": 1792215092368,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "diff_a"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "738096123814362": {
+   "logs": "[same_a] start action=marker argv=['--action', 'marker', '--marker', 'same_a', '--lines', '20'] unknown=[] python=3.12.3\n[same_a] stdout line 0\n\n\n[same_a] stderr line 0\n\n\n[same_a] stdout line 1\n\n\n[same_a] stderr line 1\n\n\n[same_a] stdout line 2\n\n\n[same_a] stderr line 2\n\n\n[same_a] stdout line 3\n\n\n[same_a] stderr line 3\n\n\n[same_a] stdout line 4\n\n\n[same_a] stderr line 4\n\n\n[same_a] stdout line 5\n\n\n[same_a] stderr line 5\n\n\n[same_a] stdout line 6\n\n\n[same_a] stderr line 6\n\n\n[same_a] stdout line 7\n\n\n[same_a] stderr line 7\n\n\n[same_a] stdout line 8\n\n\n[same_a] stderr line 8\n\n\n[same_a] stdout line 9\n\n\n[same_a] stderr line 9\n\n\n[same_a] stdout line 10\n\n\n[same_a] stderr line 10\n\n\n[same_a] stdout line 11\n\n\n[same_a] stderr line 11\n\n\n[same_a] stdout line 12\n\n\n[same_a] stderr line 12\n\n\n[same_a] stdout line 13\n\n\n[same_a] stderr line 13\n\n\n[same_a] stdout line 14\n\n\n[same_a] stderr line 14\n\n\n[same_a] stdout line 15\n\n\n[same_a] stderr line 15\n\n\n[same_a] stdout line 16\n\n\n[same_a] stderr line 16\n\n\n[same_a] stdout line 17\n\n\n[same_a] stderr line 17\n\n\n[same_a] stdout line 18\n\n\n[same_a] stderr line 18\n\n\n[same_a] stdout line 19\n\n\n[same_a] stderr line 19\n\n\n[same_a] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215203552,
+    "execution_duration": 107000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 738096123814362,
+    "original_attempt_run_id": 738096123814362,
+    "run_id": 738096123814362,
+    "run_name": "same_a",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/738096123814362",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092363,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215203552,
+      "environment_key": "e_same",
+      "execution_duration": 107000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "same_a",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 738096123814362,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/738096123814362",
+      "setup_duration": 4000,
+      "start_time": 1792215092363,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "same_a"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "899508681889481": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215125209,
+    "execution_duration": 29000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 899508681889481,
+    "original_attempt_run_id": 899508681889481,
+    "run_id": 899508681889481,
+    "run_name": "extract",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/899508681889481",
+    "run_type": "JOB_RUN",
+    "setup_duration": 3000,
+    "start_time": 1792215092381,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215125209,
+      "execution_duration": 29000,
+      "notebook_task": {
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+       "source": "WORKSPACE"
+      },
+      "run_id": 899508681889481,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/899508681889481",
+      "setup_duration": 3000,
+      "start_time": 1792215092381,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "extract"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"task\": \"extract\", \"marker\": \"extract\"}",
+    "truncated": false
+   }
+  },
+  "935648020763568": {
+   "logs": "[scr_b] start action=marker argv=['--action', 'marker', '--marker', 'scr_b', '--lines', '20'] unknown=[] python=3.12.3\n[scr_b] stdout line 0\n\n\n[scr_b] stderr line 0\n\n\n[scr_b] stdout line 1\n\n\n[scr_b] stderr line 1\n\n\n[scr_b] stdout line 2\n\n\n[scr_b] stderr line 2\n\n\n[scr_b] stdout line 3\n\n\n[scr_b] stderr line 3\n\n\n[scr_b] stdout line 4\n\n\n[scr_b] stderr line 4\n\n\n[scr_b] stdout line 5\n\n\n[scr_b] stderr line 5\n\n\n[scr_b] stdout line 6\n\n\n[scr_b] stderr line 6\n\n\n[scr_b] stdout line 7\n\n\n[scr_b] stderr line 7\n\n\n[scr_b] stdout line 8\n\n\n[scr_b] stderr line 8\n\n\n[scr_b] stdout line 9\n\n\n[scr_b] stderr line 9\n\n\n[scr_b] stdout line 10\n\n\n[scr_b] stderr line 10\n\n\n[scr_b] stdout line 11\n\n\n[scr_b] stderr line 11\n\n\n[scr_b] stdout line 12\n\n\n[scr_b] stderr line 12\n\n\n[scr_b] stdout line 13\n\n\n[scr_b] stderr line 13\n\n\n[scr_b] stdout line 14\n\n\n[scr_b] stderr line 14\n\n\n[scr_b] stdout line 15\n\n\n[scr_b] stderr line 15\n\n\n[scr_b] stdout line 16\n\n\n[scr_b] stderr line 16\n\n\n[scr_b] stdout line 17\n\n\n[scr_b] stderr line 17\n\n\n[scr_b] stdout line 18\n\n\n[scr_b] stderr line 18\n\n\n[scr_b] stdout line 19\n\n\n[scr_b] stderr line 19\n\n\n[scr_b] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215206031,
+    "execution_duration": 109000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 935648020763568,
+    "original_attempt_run_id": 935648020763568,
+    "run_id": 935648020763568,
+    "run_name": "scr_b",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/935648020763568",
+    "run_type": "JOB_RUN",
+    "setup_duration": 4000,
+    "start_time": 1792215092379,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215206031,
+      "environment_key": "e_script",
+      "execution_duration": 109000,
+      "run_id": 935648020763568,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/935648020763568",
+      "setup_duration": 4000,
+      "spark_python_task": {
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "scr_b",
+        "--lines",
+        "20"
+       ],
+       "python_file": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/script.py"
+      },
+      "start_time": 1792215092379,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "scr_b"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "971916481774730": {
+   "logs": "[seq_2] start action=marker argv=['--action', 'marker', '--marker', 'seq_2', '--lines', '20'] unknown=[] python=3.12.3\n[seq_2] stdout line 0\n\n\n[seq_2] stderr line 0\n\n\n[seq_2] stdout line 1\n\n\n[seq_2] stderr line 1\n\n\n[seq_2] stdout line 2\n\n\n[seq_2] stderr line 2\n\n\n[seq_2] stdout line 3\n\n\n[seq_2] stderr line 3\n\n\n[seq_2] stdout line 4\n\n\n[seq_2] stderr line 4\n\n\n[seq_2] stdout line 5\n\n\n[seq_2] stderr line 5\n\n\n[seq_2] stdout line 6\n\n\n[seq_2] stderr line 6\n\n\n[seq_2] stdout line 7\n\n\n[seq_2] stderr line 7\n\n\n[seq_2] stdout line 8\n\n\n[seq_2] stderr line 8\n\n\n[seq_2] stdout line 9\n\n\n[seq_2] stderr line 9\n\n\n[seq_2] stdout line 10\n\n\n[seq_2] stderr line 10\n\n\n[seq_2] stdout line 11\n\n\n[seq_2] stderr line 11\n\n\n[seq_2] stdout line 12\n\n\n[seq_2] stderr line 12\n\n\n[seq_2] stdout line 13\n\n\n[seq_2] stderr line 13\n\n\n[seq_2] stdout line 14\n\n\n[seq_2] stderr line 14\n\n\n[seq_2] stdout line 15\n\n\n[seq_2] stderr line 15\n\n\n[seq_2] stdout line 16\n\n\n[seq_2] stderr line 16\n\n\n[seq_2] stdout line 17\n\n\n[seq_2] stderr line 17\n\n\n[seq_2] stdout line 18\n\n\n[seq_2] stderr line 18\n\n\n[seq_2] stdout line 19\n\n\n[seq_2] stderr line 19\n\n\n[seq_2] end\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215247548,
+    "execution_duration": 45000,
+    "job_id": 697962670531930,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 879080877136610,
+    "number_in_job": 971916481774730,
+    "original_attempt_run_id": 971916481774730,
+    "run_id": 971916481774730,
+    "run_name": "seq_2",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/971916481774730",
+    "run_type": "JOB_RUN",
+    "setup_duration": 1000,
+    "start_time": 1792215200661,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215247548,
+      "environment_key": "e_seq",
+      "execution_duration": 45000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "seq_2",
+        "--lines",
+        "20"
+       ]
+      },
+      "run_id": 971916481774730,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/971916481774730",
+      "setup_duration": 1000,
+      "start_time": 1792215200661,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "seq_2"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  }
+ },
+ "run": {
+  "cleanup_duration": 0,
+  "creator_user_name": "someone@example.com",
+  "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+  "end_time": 1792215247930,
+  "execution_duration": 0,
+  "job_id": 697962670531930,
+  "job_parameters": [
+   {
+    "default": "hello",
+    "name": "param1"
+   },
+   {
+    "default": "world",
+    "name": "param2"
+   },
+   {
+    "default": "full",
+    "name": "mode"
+   },
+   {
+    "default": "",
+    "name": "schema"
+   }
+  ],
+  "job_run_id": 879080877136610,
+  "number_in_job": 879080877136610,
+  "original_attempt_run_id": 879080877136610,
+  "run_duration": 155600,
+  "run_id": 879080877136610,
+  "run_name": "[spike] s09_log_mixing_run1",
+  "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/879080877136610",
+  "run_type": "JOB_RUN",
+  "setup_duration": 0,
+  "start_time": 1792215092330,
+  "state": {
+   "life_cycle_state": "TERMINATED",
+   "result_state": "SUCCESS",
+   "state_message": "",
+   "user_cancelled_or_timedout": false
+  },
+  "status": {
+   "state": "TERMINATED",
+   "termination_details": {
+    "code": "SUCCESS",
+    "message": "",
+    "type": "SUCCESS"
+   }
+  },
+  "tasks": [
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215206797,
+    "environment_key": "e_script",
+    "execution_duration": 110000,
+    "run_id": 601486759288827,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/601486759288827",
+    "setup_duration": 4000,
+    "spark_python_task": {
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "scr_a",
+      "--lines",
+      "20"
+     ],
+     "python_file": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/script.py"
+    },
+    "start_time": 1792215092377,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "scr_a"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215125847,
+    "execution_duration": 30000,
+    "notebook_task": {
+     "base_parameters": {
+      "label": "nb_probe"
+     },
+     "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow-e/env_probe",
+     "source": "WORKSPACE"
+    },
+    "run_id": 689771234869289,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/689771234869289",
+    "setup_duration": 3000,
+    "start_time": 1792215092383,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "nb_probe"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215203552,
+    "environment_key": "e_same",
+    "execution_duration": 107000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "same_a",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 738096123814362,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/738096123814362",
+    "setup_duration": 4000,
+    "start_time": 1792215092363,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "same_a"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215179967,
+    "environment_key": "e_diff2",
+    "execution_duration": 83000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "diff_b",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 319644947862990,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/319644947862990",
+    "setup_duration": 4000,
+    "start_time": 1792215092370,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "diff_b"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215125209,
+    "execution_duration": 29000,
+    "notebook_task": {
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+     "source": "WORKSPACE"
+    },
+    "run_id": 899508681889481,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/899508681889481",
+    "setup_duration": 3000,
+    "start_time": 1792215092381,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "extract"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215200347,
+    "environment_key": "e_seq",
+    "execution_duration": 104000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "seq_1",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 551088677712570,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/551088677712570",
+    "setup_duration": 3000,
+    "start_time": 1792215092373,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "seq_1"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215205870,
+    "environment_key": "e_diff1",
+    "execution_duration": 109000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "diff_a",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 720439839730782,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/720439839730782",
+    "setup_duration": 4000,
+    "start_time": 1792215092368,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "diff_a"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215205548,
+    "environment_key": "e_same",
+    "execution_duration": 109000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "same_b",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 409071664864771,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/409071664864771",
+    "setup_duration": 4000,
+    "start_time": 1792215092366,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "same_b"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "seq_1"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215247548,
+    "environment_key": "e_seq",
+    "execution_duration": 45000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "seq_2",
+      "--lines",
+      "20"
+     ]
+    },
+    "run_id": 971916481774730,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/971916481774730",
+    "setup_duration": 1000,
+    "start_time": 1792215200661,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "seq_2"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215206031,
+    "environment_key": "e_script",
+    "execution_duration": 109000,
+    "run_id": 935648020763568,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/697962670531930/run/935648020763568",
+    "setup_duration": 4000,
+    "spark_python_task": {
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "scr_b",
+      "--lines",
+      "20"
+     ],
+     "python_file": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/script.py"
+    },
+    "start_time": 1792215092379,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "scr_b"
+   }
+  ],
+  "trigger": "ONE_TIME"
+ }
+}

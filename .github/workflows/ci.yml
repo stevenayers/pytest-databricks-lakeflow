@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run ty check
+
+  test:
+    name: Unit tests (Python ${{ matrix.python }}, ${{ matrix.resolution }} dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported versions: Python 3.11, pytest 8, databricks-sdk 0.54, filelock 3.0.
+          - python: "3.11"
+            resolution: lowest-direct
+          - python: "3.11"
+            resolution: highest
+          - python: "3.14"
+            resolution: highest
+    env:
+      # Applies to the sync that every `uv run` does, so the lowest versions are not upgraded again.
+      UV_RESOLUTION: ${{ matrix.resolution }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+          cache-suffix: ${{ matrix.resolution }}
+      - run: uv run python -c "import databricks.sdk.version as v, pytest; print('sdk', v.__version__, 'pytest', pytest.__version__)"
+      - run: uv run pytest -m "not lakeflow"
+
+  # Runs the acceptance tests against examples/bundle in a real workspace. It needs the repository variables
+  # DATABRICKS_HOST and LAKEFLOW_CATALOG and the secrets DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET for a
+  # service principal, and is skipped until DATABRICKS_HOST is set.
+  integration:
+    name: Integration tests
+    needs: [lint, test]
+    if: github.event_name != 'pull_request' && vars.DATABRICKS_HOST != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One deployment of examples/bundle at a time: runs share the service principal's bundle root_path.
+    concurrency:
+      group: integration
+      cancel-in-progress: false
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      LAKEFLOW_CATALOG: ${{ vars.LAKEFLOW_CATALOG }}
+      LAKEFLOW_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - uses: databricks/setup-cli@v1.7.0
+      - run: >-
+          uv run pytest tests/integration -n 4 -rA --lakeflow-sweep
+          -o lakeflow_catalog="$LAKEFLOW_CATALOG"
+          --junitxml=integration.xml
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-results
+          path: integration.xml

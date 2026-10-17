@@ -1,0 +1,22 @@
+bundle:
+  name: lakeflow_example
+
+include:
+  - resources/*.yml
+
+artifacts:
+  lakeflow_example:
+    type: whl
+    build: uv build --wheel
+    path: .
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest

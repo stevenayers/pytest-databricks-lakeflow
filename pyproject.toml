@@ -1,7 +1,68 @@
 [project]
 name = "pytest-databricks-lakeflow"
 version = "0.1.0"
-description = "Add your description here"
+description = "Run Lakeflow Jobs from a Databricks Asset Bundle as throwaway jobs inside pytest tests."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+authors = [{ name = "Steven Ayers", email = "steven@ayers.io" }]
+classifiers = [
+    "Framework :: Pytest",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pytest>=8",
+    "databricks-sdk>=0.54",
+    "filelock>=3",
+]
+
+[project.urls]
+Homepage = "https://github.com/stevenayers/pytest-databricks-lakeflow"
+Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
+
+[project.optional-dependencies]
+xdist = ["pytest-xdist>=3"]
+pytester = ["databricks-labs-pytester>=0.7"]
+
+[project.entry-points.pytest11]
+databricks_lakeflow = "pytest_databricks_lakeflow.plugin"
+
+[dependency-groups]
+dev = [
+    "pytest-xdist>=3",
+    "ruff>=0.5",
+    "ty==0.0.89",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_databricks_lakeflow"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+# Docstrings are only required on the public API, so the missing-docstring rules are off.
+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"examples/bundle/src/notebooks/*.py" = ["F821"]
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+lakeflow_bundle_root = "examples/bundle"

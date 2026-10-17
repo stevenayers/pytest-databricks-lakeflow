@@ -1,0 +1,192 @@
+{
+ "outputs": {
+  "232749267735993": {
+   "logs": "[tmo] start action=marker argv=['--action', 'marker', '--marker', 'tmo', '--lines', '240'] unknown=[] python=3.12.3\n[tmo] stdout line 0\n\n\n[tmo] stderr line 0\n\n\n[tmo] stdout line 1\n\n\n[tmo] stderr line 1\n\n\n[tmo] stdout line 2\n\n\n[tmo] stderr line 2\n\n\n[tmo] stdout line 3\n\n\n[tmo] stderr line 3\n\n\n[tmo] stdout line 4\n\n\n[tmo] stderr line 4\n\n\n[tmo] stdout line 5\n\n\n[tmo] stderr line 5\n\n\n[tmo] stdout line 6\n\n\n[tmo] stderr line 6\n\n\n[tmo] stdout line 7\n\n\n[tmo] stderr line 7\n\n\n[tmo] stdout line 8\n\n\n[tmo] stderr line 8\n\n\n[tmo] stdout line 9\n\n\n[tmo] stderr line 9\n\n\n[tmo] stdout line 10\n\n\n[tmo] stderr line 10\n\n\n[tmo] stdout line 11\n\n\n[tmo] stderr line 11\n\n\n[tmo] stdout line 12\n\n\n[tmo] stderr line 12\n\n\n[tmo] stdout line 13\n\n\n[tmo] stderr line 13\n\n\n[tmo] stdout line 14\n\n\n[tmo] stderr line 14\n\n\n[tmo] stdout line 15\n\n\n[tmo] stderr line 15\n\n\n[tmo] stdout line 16\n\n\n[tmo] stderr line 16\n\n\n[tmo] stdout line 17\n\n\n[tmo] stderr line 17\n\n\n[tmo] stdout line 18\n\n\n[tmo] stderr line 18\n\n\n[tmo] stdout line 19\n\n\n[tmo] stderr line 19\n\n\n[tmo] stdout line 20\n\n\n[tmo] stderr line 20\n\n\n[tmo] stdout line 21\n\n\n[tmo] stderr line 21\n\n\n[tmo] stdout line 22\n\n\n[tmo] stderr line 22\n\n\n[tmo] stdout line 23\n\n\n[tmo] stderr line 23\n\n\n[tmo] stdout line 24\n\n\n[tmo] stderr line 24\n\n\n[tmo] stdout line 25\n\n\n[tmo] stderr line 25\n\n\n[tmo] stdout line 26\n\n\n[tmo] stderr line 26\n\n\n[tmo] stdout line 27\n\n\n[tmo] stderr line 27\n\n\n[tmo] stdout line 28\n\n\n[tmo] stderr line 28\n\n\n[tmo] stdout line 29\n\n\n[tmo] stderr line 29\n\n\n[tmo] stdout line 30\n\n\n[tmo] stderr line 30\n\n\n[tmo] stdout line 31\n\n\n[tmo] stderr line 31\n\n\n[tmo] stdout line 32\n\n\n[tmo] stderr line 32\n",
+   "logs_truncated": false,
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215062735,
+    "execution_duration": 64000,
+    "job_id": 531989437041095,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 139474678728363,
+    "number_in_job": 232749267735993,
+    "original_attempt_run_id": 232749267735993,
+    "run_id": 232749267735993,
+    "run_name": "my_wheel_task",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/531989437041095/run/232749267735993",
+    "run_type": "JOB_RUN",
+    "setup_duration": 2000,
+    "start_time": 1792214996653,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "CANCELED",
+     "state_message": "Run cancelled by user",
+     "user_cancelled_or_timedout": true
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "USER_CANCELED",
+      "message": "Run cancelled by user",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215062735,
+      "environment_key": "default",
+      "execution_duration": 64000,
+      "python_wheel_task": {
+       "entry_point": "main",
+       "package_name": "spike_pkg",
+       "parameters": [
+        "--action",
+        "marker",
+        "--marker",
+        "tmo",
+        "--lines",
+        "240"
+       ]
+      },
+      "run_id": 232749267735993,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/531989437041095/run/232749267735993",
+      "setup_duration": 2000,
+      "start_time": 1792214996653,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "CANCELED",
+       "state_message": "Run cancelled by user",
+       "user_cancelled_or_timedout": true
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "USER_CANCELED",
+        "message": "Run cancelled by user",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "my_wheel_task"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  }
+ },
+ "run": {
+  "cleanup_duration": 0,
+  "creator_user_name": "someone@example.com",
+  "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+  "end_time": 1792215063061,
+  "execution_duration": 64000,
+  "job_id": 531989437041095,
+  "job_parameters": [
+   {
+    "default": "hello",
+    "name": "param1"
+   },
+   {
+    "default": "world",
+    "name": "param2"
+   },
+   {
+    "default": "full",
+    "name": "mode"
+   },
+   {
+    "default": "",
+    "name": "schema"
+   }
+  ],
+  "job_run_id": 139474678728363,
+  "number_in_job": 139474678728363,
+  "original_attempt_run_id": 139474678728363,
+  "run_duration": 66442,
+  "run_id": 139474678728363,
+  "run_name": "[spike] s04_timeout_cancel",
+  "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/531989437041095/run/139474678728363",
+  "run_type": "JOB_RUN",
+  "setup_duration": 2000,
+  "start_time": 1792214996619,
+  "state": {
+   "life_cycle_state": "TERMINATED",
+   "result_state": "CANCELED",
+   "state_message": "Run cancelled by user",
+   "user_cancelled_or_timedout": true
+  },
+  "status": {
+   "state": "TERMINATED",
+   "termination_details": {
+    "code": "USER_CANCELED",
+    "message": "Run cancelled by user",
+    "type": "SUCCESS"
+   }
+  },
+  "tasks": [
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215062735,
+    "environment_key": "default",
+    "execution_duration": 64000,
+    "python_wheel_task": {
+     "entry_point": "main",
+     "package_name": "spike_pkg",
+     "parameters": [
+      "--action",
+      "marker",
+      "--marker",
+      "tmo",
+      "--lines",
+      "240"
+     ]
+    },
+    "run_id": 232749267735993,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/531989437041095/run/232749267735993",
+    "setup_duration": 2000,
+    "start_time": 1792214996653,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "CANCELED",
+     "state_message": "Run cancelled by user",
+     "user_cancelled_or_timedout": true
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "USER_CANCELED",
+      "message": "Run cancelled by user",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "my_wheel_task"
+   }
+  ],
+  "trigger": "ONE_TIME"
+ }
+}

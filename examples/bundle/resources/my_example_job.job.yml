@@ -1,0 +1,43 @@
+resources:
+  jobs:
+    my_example_job:
+      name: my_example_job
+      description: Example job for the pytest-databricks-lakeflow integration tests.
+      parameters:
+        - name: param1
+          default: hello
+        - name: param2
+          default: world
+        - name: schema
+          default: ""
+        - name: mode
+          default: full
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
+      tasks:
+        - task_key: extract
+          notebook_task:
+            notebook_path: ../src/notebooks/extract.py
+        - task_key: transform
+          depends_on:
+            - task_key: extract
+          notebook_task:
+            notebook_path: ../src/notebooks/transform.py
+            base_parameters:
+              row_count: "{{tasks.extract.values.row_count}}"
+        - task_key: load
+          depends_on:
+            - task_key: transform
+          notebook_task:
+            notebook_path: ../src/notebooks/load.py
+        - task_key: my_wheel_task
+          environment_key: default
+          python_wheel_task:
+            package_name: lakeflow_example
+            entry_point: main
+            parameters:
+              - "{{job.parameters.param1}}"

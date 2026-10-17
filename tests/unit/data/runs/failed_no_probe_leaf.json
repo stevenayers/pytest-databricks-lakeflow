@@ -1,0 +1,602 @@
+{
+ "outputs": {
+  "1083702091095467": {
+   "error": "Run result unavailable: The task was skipped because not all its dependencies were executed and succeeded.",
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215315438,
+    "execution_duration": 0,
+    "job_id": 70511281688801,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "explode"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 602058304389369,
+    "number_in_job": 1083702091095467,
+    "original_attempt_run_id": 1083702091095467,
+    "run_id": 1083702091095467,
+    "run_name": "load",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/1083702091095467",
+    "run_type": "JOB_RUN",
+    "setup_duration": 0,
+    "start_time": 1792215315438,
+    "state": {
+     "life_cycle_state": "SKIPPED",
+     "result_state": "UPSTREAM_FAILED",
+     "state_message": "An upstream task failed.",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SKIPPED",
+      "message": "An upstream task failed.",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215315438,
+      "execution_duration": 0,
+      "notebook_task": {
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/load",
+       "source": "WORKSPACE"
+      },
+      "run_id": 1083702091095467,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/1083702091095467",
+      "setup_duration": 0,
+      "start_time": 1792215315438,
+      "state": {
+       "life_cycle_state": "SKIPPED",
+       "result_state": "UPSTREAM_FAILED",
+       "state_message": "An upstream task failed.",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SKIPPED",
+        "message": "An upstream task failed.",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "load"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   }
+  },
+  "471929751794429": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215324389,
+    "execution_duration": 7000,
+    "job_id": 70511281688801,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "explode"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 602058304389369,
+    "number_in_job": 471929751794429,
+    "original_attempt_run_id": 471929751794429,
+    "run_id": 471929751794429,
+    "run_name": "__pytest_probe__transform",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/471929751794429",
+    "run_type": "JOB_RUN",
+    "setup_duration": 1000,
+    "start_time": 1792215315513,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215324389,
+      "execution_duration": 7000,
+      "notebook_task": {
+       "base_parameters": {
+        "keys": "[\"stage\", \"rows_written\"]",
+        "task_key": "transform"
+       },
+       "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+       "source": "WORKSPACE"
+      },
+      "run_id": 471929751794429,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/471929751794429",
+      "setup_duration": 1000,
+      "start_time": 1792215315513,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "__pytest_probe__transform"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"values\": {\"stage\": \"validation\"}, \"missing\": [\"rows_written\"]}",
+    "truncated": false
+   }
+  },
+  "503299353515972": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215225081,
+    "execution_duration": 24000,
+    "job_id": 70511281688801,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "explode"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 602058304389369,
+    "number_in_job": 503299353515972,
+    "original_attempt_run_id": 503299353515972,
+    "run_id": 503299353515972,
+    "run_name": "extract",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/503299353515972",
+    "run_type": "JOB_RUN",
+    "setup_duration": 2000,
+    "start_time": 1792215198900,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215225081,
+      "execution_duration": 24000,
+      "notebook_task": {
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+       "source": "WORKSPACE"
+      },
+      "run_id": 503299353515972,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/503299353515972",
+      "setup_duration": 2000,
+      "start_time": 1792215198900,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "extract"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"task\": \"extract\", \"marker\": \"extract\"}",
+    "truncated": false
+   }
+  },
+  "504261171155569": {
+   "error": "ValueError: validation failed for explode",
+   "error_trace": "\u001b[31m---------------------------------------------------------------------------\u001b[39m\n\u001b[31mValueError\u001b[39m                                Traceback (most recent call last)\n\u001b[36mFile\u001b[39m\u001b[36m \u001b[39m\u001b[32m<command-6323931704437350>\u001b[39m\u001b[32m, line 12\u001b[39m\n\u001b[32m     10\u001b[39m \u001b[38;5;28mprint\u001b[39m(\u001b[33mf\u001b[39m\u001b[33m\"\u001b[39m\u001b[33mtransform param1=\u001b[39m\u001b[38;5;132;01m{\u001b[39;00mparam1\u001b[38;5;132;01m}\u001b[39;00m\u001b[33m row_count=\u001b[39m\u001b[38;5;132;01m{\u001b[39;00mrow_count\u001b[38;5;132;01m!r}\u001b[39;00m\u001b[33m ref=\u001b[39m\u001b[38;5;132;01m{\u001b[39;00mrow_count_ref\u001b[38;5;132;01m!r}\u001b[39;00m\u001b[33m\"\u001b[39m)\n\u001b[32m     11\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m param1 == \u001b[33m\"\u001b[39m\u001b[33mexplode\u001b[39m\u001b[33m\"\u001b[39m:\n\u001b[32m---> \u001b[39m\u001b[32m12\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mValueError\u001b[39;00m(\u001b[33m\"\u001b[39m\u001b[33mvalidation failed for explode\u001b[39m\u001b[33m\"\u001b[39m)\n\u001b[32m     13\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m param1 == \u001b[33m\"\u001b[39m\u001b[33mforbidden\u001b[39m\u001b[33m\"\u001b[39m:\n\u001b[32m     14\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mPermissionError\u001b[39;00m(\u001b[33m\"\u001b[39m\u001b[33maccess denied for forbidden\u001b[39m\u001b[33m\"\u001b[39m)\n\n\u001b[31mValueError\u001b[39m: validation failed for explode",
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215315165,
+    "execution_duration": 26000,
+    "job_id": 70511281688801,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "explode"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 602058304389369,
+    "number_in_job": 504261171155569,
+    "original_attempt_run_id": 955262621607601,
+    "run_id": 504261171155569,
+    "run_name": "transform",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/504261171155569",
+    "run_type": "JOB_RUN",
+    "setup_duration": 2000,
+    "start_time": 1792215287018,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "FAILED",
+     "state_message": "Workload failed, see run output for details",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "RUN_EXECUTION_ERROR",
+      "message": "Workload failed, see run output for details",
+      "type": "CLIENT_ERROR"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 1,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215315165,
+      "execution_duration": 26000,
+      "notebook_task": {
+       "base_parameters": {
+        "row_count_ref": "{{tasks.extract.values.row_count}}"
+       },
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/transform",
+       "source": "WORKSPACE"
+      },
+      "run_id": 504261171155569,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/504261171155569",
+      "setup_duration": 2000,
+      "start_time": 1792215287018,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "FAILED",
+       "state_message": "Workload failed, see run output for details",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "RUN_EXECUTION_ERROR",
+        "message": "Workload failed, see run output for details",
+        "type": "CLIENT_ERROR"
+       }
+      },
+      "task_key": "transform"
+     }
+    ],
+    "trigger": "RETRY"
+   },
+   "notebook_output": {}
+  }
+ },
+ "run": {
+  "cleanup_duration": 0,
+  "creator_user_name": "someone@example.com",
+  "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+  "end_time": 1792215324703,
+  "execution_duration": 0,
+  "job_id": 70511281688801,
+  "job_parameters": [
+   {
+    "default": "hello",
+    "name": "param1",
+    "value": "explode"
+   },
+   {
+    "default": "world",
+    "name": "param2"
+   },
+   {
+    "default": "full",
+    "name": "mode"
+   },
+   {
+    "default": "",
+    "name": "schema"
+   }
+  ],
+  "job_run_id": 602058304389369,
+  "number_in_job": 602058304389369,
+  "original_attempt_run_id": 602058304389369,
+  "run_duration": 125843,
+  "run_id": 602058304389369,
+  "run_name": "[spike] s08_followup_mixed_leaves",
+  "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/602058304389369",
+  "run_type": "JOB_RUN",
+  "setup_duration": 0,
+  "start_time": 1792215198860,
+  "state": {
+   "life_cycle_state": "INTERNAL_ERROR",
+   "result_state": "FAILED",
+   "state_message": "Task transform failed with message: Workload failed, see run output for details.",
+   "user_cancelled_or_timedout": false
+  },
+  "status": {
+   "state": "TERMINATED",
+   "termination_details": {
+    "code": "RUN_EXECUTION_ERROR",
+    "message": "Task transform failed with message: Workload failed, see run output for details.",
+    "type": "CLIENT_ERROR"
+   }
+  },
+  "tasks": [
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "extract"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215237000,
+    "execution_duration": 10000,
+    "notebook_task": {
+     "base_parameters": {
+      "row_count_ref": "{{tasks.extract.values.row_count}}"
+     },
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/transform",
+     "source": "WORKSPACE"
+    },
+    "run_id": 955262621607601,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/955262621607601",
+    "setup_duration": 1000,
+    "start_time": 1792215225371,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "FAILED",
+     "state_message": "Workload failed, see run output for details",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "RUN_EXECUTION_ERROR",
+      "message": "Workload failed, see run output for details",
+      "type": "CLIENT_ERROR"
+     }
+    },
+    "task_key": "transform"
+   },
+   {
+    "attempt_number": 1,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "extract"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215315165,
+    "execution_duration": 26000,
+    "notebook_task": {
+     "base_parameters": {
+      "row_count_ref": "{{tasks.extract.values.row_count}}"
+     },
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/transform",
+     "source": "WORKSPACE"
+    },
+    "run_id": 504261171155569,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/504261171155569",
+    "setup_duration": 2000,
+    "start_time": 1792215287018,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "FAILED",
+     "state_message": "Workload failed, see run output for details",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "RUN_EXECUTION_ERROR",
+      "message": "Workload failed, see run output for details",
+      "type": "CLIENT_ERROR"
+     }
+    },
+    "task_key": "transform"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "transform"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215315438,
+    "execution_duration": 0,
+    "notebook_task": {
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/load",
+     "source": "WORKSPACE"
+    },
+    "run_id": 1083702091095467,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/1083702091095467",
+    "setup_duration": 0,
+    "start_time": 1792215315438,
+    "state": {
+     "life_cycle_state": "SKIPPED",
+     "result_state": "UPSTREAM_FAILED",
+     "state_message": "An upstream task failed.",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SKIPPED",
+      "message": "An upstream task failed.",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "load"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215225081,
+    "execution_duration": 24000,
+    "notebook_task": {
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+     "source": "WORKSPACE"
+    },
+    "run_id": 503299353515972,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/503299353515972",
+    "setup_duration": 2000,
+    "start_time": 1792215198900,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "extract"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "transform"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215324389,
+    "execution_duration": 7000,
+    "notebook_task": {
+     "base_parameters": {
+      "keys": "[\"stage\", \"rows_written\"]",
+      "task_key": "transform"
+     },
+     "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+     "source": "WORKSPACE"
+    },
+    "run_id": 471929751794429,
+    "run_if": "ALL_DONE",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/70511281688801/run/471929751794429",
+    "setup_duration": 1000,
+    "start_time": 1792215315513,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "__pytest_probe__transform"
+   }
+  ],
+  "trigger": "ONE_TIME"
+ }
+}

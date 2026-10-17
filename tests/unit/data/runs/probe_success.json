@@ -1,0 +1,442 @@
+{
+ "outputs": {
+  "330620703952519": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215011858,
+    "execution_duration": 24000,
+    "job_id": 642501636814121,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "hello"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 1106156548055441,
+    "number_in_job": 330620703952519,
+    "original_attempt_run_id": 330620703952519,
+    "run_id": 330620703952519,
+    "run_name": "extract",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/330620703952519",
+    "run_type": "JOB_RUN",
+    "setup_duration": 3000,
+    "start_time": 1792214984718,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215011858,
+      "execution_duration": 24000,
+      "notebook_task": {
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+       "source": "WORKSPACE"
+      },
+      "run_id": 330620703952519,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/330620703952519",
+      "setup_duration": 3000,
+      "start_time": 1792214984718,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "extract"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"task\": \"extract\", \"marker\": \"extract\"}",
+    "truncated": false
+   }
+  },
+  "557474806586701": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215021767,
+    "execution_duration": 7000,
+    "job_id": 642501636814121,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "hello"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 1106156548055441,
+    "number_in_job": 557474806586701,
+    "original_attempt_run_id": 557474806586701,
+    "run_id": 557474806586701,
+    "run_name": "transform",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/557474806586701",
+    "run_type": "JOB_RUN",
+    "setup_duration": 2000,
+    "start_time": 1792215012150,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215021767,
+      "execution_duration": 7000,
+      "notebook_task": {
+       "base_parameters": {
+        "row_count_ref": "{{tasks.extract.values.row_count}}"
+       },
+       "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/transform",
+       "source": "WORKSPACE"
+      },
+      "run_id": 557474806586701,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/557474806586701",
+      "setup_duration": 2000,
+      "start_time": 1792215012150,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "transform"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"greeting\": \"hello world\", \"row_count\": 7, \"row_count_type\": \"int\", \"row_count_ref\": \"7\"}",
+    "truncated": false
+   }
+  },
+  "828987004660317": {
+   "metadata": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215030126,
+    "execution_duration": 5000,
+    "job_id": 642501636814121,
+    "job_parameters": [
+     {
+      "default": "hello",
+      "name": "param1",
+      "value": "hello"
+     },
+     {
+      "default": "world",
+      "name": "param2"
+     },
+     {
+      "default": "full",
+      "name": "mode"
+     },
+     {
+      "default": "",
+      "name": "schema"
+     }
+    ],
+    "job_run_id": 1106156548055441,
+    "number_in_job": 828987004660317,
+    "original_attempt_run_id": 828987004660317,
+    "run_id": 828987004660317,
+    "run_name": "__pytest_probe__transform",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/828987004660317",
+    "run_type": "JOB_RUN",
+    "setup_duration": 2000,
+    "start_time": 1792215022131,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "tasks": [
+     {
+      "attempt_number": 0,
+      "cleanup_duration": 0,
+      "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+      "end_time": 1792215030126,
+      "execution_duration": 5000,
+      "notebook_task": {
+       "base_parameters": {
+        "keys": "[\"stage\", \"rows_written\"]",
+        "task_key": "transform"
+       },
+       "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+       "source": "WORKSPACE"
+      },
+      "run_id": 828987004660317,
+      "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/828987004660317",
+      "setup_duration": 2000,
+      "start_time": 1792215022131,
+      "state": {
+       "life_cycle_state": "TERMINATED",
+       "result_state": "SUCCESS",
+       "state_message": "",
+       "user_cancelled_or_timedout": false
+      },
+      "status": {
+       "state": "TERMINATED",
+       "termination_details": {
+        "code": "SUCCESS",
+        "message": "",
+        "type": "SUCCESS"
+       }
+      },
+      "task_key": "__pytest_probe__transform"
+     }
+    ],
+    "trigger": "ONE_TIME"
+   },
+   "notebook_output": {
+    "result": "{\"values\": {\"stage\": \"done\", \"rows_written\": 7}, \"missing\": []}",
+    "truncated": false
+   }
+  }
+ },
+ "run": {
+  "cleanup_duration": 0,
+  "creator_user_name": "someone@example.com",
+  "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+  "end_time": 1792215030494,
+  "execution_duration": 0,
+  "job_id": 642501636814121,
+  "job_parameters": [
+   {
+    "default": "hello",
+    "name": "param1",
+    "value": "hello"
+   },
+   {
+    "default": "world",
+    "name": "param2"
+   },
+   {
+    "default": "full",
+    "name": "mode"
+   },
+   {
+    "default": "",
+    "name": "schema"
+   }
+  ],
+  "job_run_id": 1106156548055441,
+  "number_in_job": 1106156548055441,
+  "original_attempt_run_id": 1106156548055441,
+  "run_duration": 45822,
+  "run_id": 1106156548055441,
+  "run_name": "[spike] s08_probe_failure_hello",
+  "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/1106156548055441",
+  "run_type": "JOB_RUN",
+  "setup_duration": 0,
+  "start_time": 1792214984672,
+  "state": {
+   "life_cycle_state": "TERMINATED",
+   "result_state": "SUCCESS",
+   "state_message": "",
+   "user_cancelled_or_timedout": false
+  },
+  "status": {
+   "state": "TERMINATED",
+   "termination_details": {
+    "code": "SUCCESS",
+    "message": "",
+    "type": "SUCCESS"
+   }
+  },
+  "tasks": [
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "extract"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215021767,
+    "execution_duration": 7000,
+    "notebook_task": {
+     "base_parameters": {
+      "row_count_ref": "{{tasks.extract.values.row_count}}"
+     },
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/transform",
+     "source": "WORKSPACE"
+    },
+    "run_id": 557474806586701,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/557474806586701",
+    "setup_duration": 2000,
+    "start_time": 1792215012150,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "transform"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "depends_on": [
+     {
+      "task_key": "transform"
+     }
+    ],
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215030126,
+    "execution_duration": 5000,
+    "notebook_task": {
+     "base_parameters": {
+      "keys": "[\"stage\", \"rows_written\"]",
+      "task_key": "transform"
+     },
+     "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+     "source": "WORKSPACE"
+    },
+    "run_id": 828987004660317,
+    "run_if": "ALL_DONE",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/828987004660317",
+    "setup_duration": 2000,
+    "start_time": 1792215022131,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "__pytest_probe__transform"
+   },
+   {
+    "attempt_number": 0,
+    "cleanup_duration": 0,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED",
+    "end_time": 1792215011858,
+    "execution_duration": 24000,
+    "notebook_task": {
+     "notebook_path": "/Workspace/Users/someone@example.com/.bundle/example_bundle/test/files/src/extract",
+     "source": "WORKSPACE"
+    },
+    "run_id": 330620703952519,
+    "run_if": "ALL_SUCCESS",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/642501636814121/run/330620703952519",
+    "setup_duration": 3000,
+    "start_time": 1792214984718,
+    "state": {
+     "life_cycle_state": "TERMINATED",
+     "result_state": "SUCCESS",
+     "state_message": "",
+     "user_cancelled_or_timedout": false
+    },
+    "status": {
+     "state": "TERMINATED",
+     "termination_details": {
+      "code": "SUCCESS",
+      "message": "",
+      "type": "SUCCESS"
+     }
+    },
+    "task_key": "extract"
+   }
+  ],
+  "trigger": "ONE_TIME"
+ }
+}
