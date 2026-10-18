@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +62,16 @@ def check_cli_version(root: Path) -> None:
         raise LakeflowBundleError(f"pytest-databricks-lakeflow needs Databricks CLI v{minimum} or later: {out.strip()}")
 
 
-def deploy(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
+def deploy(
+    root: Path,
+    target: str,
+    profile: str | None,
+    variables: Mapping[str, str] | None = None,
+    *,
+    flags: Sequence[str] = (),
+) -> None:
     log.info("Deploying bundle %s to target %s", root, target)
-    run_cli(["bundle", "deploy", "-t", target, "--auto-approve", *_var_args(variables)], root, profile)
+    run_cli(["bundle", "deploy", "-t", target, "--auto-approve", *_var_args(variables), *flags], root, profile)
 
 
 def sync(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:

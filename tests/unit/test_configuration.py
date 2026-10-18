@@ -77,6 +77,7 @@ def test_defaults() -> None:
     assert lakeflow.permissions is None
     assert lakeflow.access_control_list() is None
     assert lakeflow.variables is None
+    assert lakeflow.deploy_flags == ()
 
 
 def test_permissions_accept_dicts() -> None:
@@ -106,3 +107,23 @@ def test_rejects_an_unknown_side_effects_mode() -> None:
 def test_rejects_an_unknown_sync_strategy() -> None:
     with pytest.raises(ValueError, match="sync must be one of deploy, sync, none, got 'upload'"):
         Lakeflow(sync=cast(Any, "upload"))
+
+
+@pytest.mark.parametrize(
+    ("flags", "argument"),
+    [
+        (["-t", "other"], "target="),
+        (["--target", "other"], "target="),
+        (["--target=other"], "target="),
+        (["--profile", "x"], "profile="),
+        (["--var", "catalog=dev"], "variables="),
+        (["--auto-approve"], "always passes --auto-approve"),
+    ],
+)
+def test_deploy_flags_reject_plugin_owned_flags(flags: list[str], argument: str) -> None:
+    with pytest.raises(ValueError, match=f"deploy_flags cannot contain {flags[0].split('=')[0]}.*{argument}"):
+        Lakeflow(deploy_flags=flags)
+
+
+def test_deploy_flags_accept_other_flags() -> None:
+    assert Lakeflow(deploy_flags=["--fail-on-active-runs"]).deploy_flags == ["--fail-on-active-runs"]

@@ -78,6 +78,9 @@ def test_bundle_keys_name_distinct_state_files(tmp_path: Path) -> None:
     b = bundle_key(tmp_path, variables=(("catalog", "b"),))
     assert len({a.file_name(), b.file_name(), bundle_key(tmp_path).file_name()}) == 3
     assert a.file_name() == bundle_key(tmp_path, variables=(("catalog", "a"),)).file_name()
+    flagged = bundle_key(tmp_path, deploy_flags=("--fail-on-active-runs",)).file_name()
+    assert flagged not in names
+    assert flagged == bundle_key(tmp_path, deploy_flags=("--fail-on-active-runs",)).file_name()
 
 
 @pytest.mark.parametrize(
@@ -356,6 +359,41 @@ def test_variables_are_part_of_the_bundle_target(
         [*DEPLOY, "--var", "catalog=a"],
         [*DEPLOY, "--var", "catalog=b"],
     ]
+
+
+def test_setup_passes_deploy_flags(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path) -> None:
+    session.setup(as_client(fake_ws), bundle_key(bundle_dir, deploy_flags=("--fail-on-active-runs",)))
+    assert fake_cli.calls[1] == [*DEPLOY, "--fail-on-active-runs"]
+    assert fake_cli.calls[2] == ["bundle", "summary", "-t", "test", "-o", "json"]
+
+
+def test_deploy_flags_from_the_fixture(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    configure_lakeflow(pytester, 'deploy_flags=["--fail-on-active-runs"]')
+    pytester.makepyfile("def test_one(lakeflow):\n    assert lakeflow.template('my_job').tasks\n")
+    pytester.runpytest().assert_outcomes(passed=1)
+    assert fake_cli.calls[1] == [*DEPLOY, "--fail-on-active-runs"]
+
+
+def test_lakeflows_with_different_deploy_flags_deploy_separately(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    pytester.makeconftest(
+        "import pytest\nfrom pytest_databricks_lakeflow import Lakeflow\n\n"
+        "@pytest.fixture(scope='session')\ndef plain():\n    return Lakeflow()\n\n"
+        "@pytest.fixture(scope='session')\ndef same():\n    return Lakeflow()\n\n"
+        "@pytest.fixture(scope='session')\ndef flagged():\n"
+        "    return Lakeflow(deploy_flags=['--fail-on-active-runs'])\n"
+    )
+    pytester.makepyfile(
+        "def test_one(plain, same, flagged):\n"
+        "    for lakeflow in (plain, same, flagged):\n"
+        "        assert lakeflow.template('my_job').tasks\n"
+    )
+    pytester.runpytest().assert_outcomes(passed=1)
+    deploys = [call for call in fake_cli.calls if call[:2] == ["bundle", "deploy"]]
+    assert deploys == [DEPLOY, [*DEPLOY, "--fail-on-active-runs"]]
 
 
 def test_helper_sources_use_prefixed_widgets() -> None:
