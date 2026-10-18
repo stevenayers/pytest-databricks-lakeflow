@@ -25,7 +25,7 @@ uv run coverage run -m pytest -m "not lakeflow" && uv run coverage report   # wi
 uv run --group docs mkdocs build --strict   # docs
 ```
 
-The unit tests use pytest's `pytester` and an in-memory fake of the parts of `WorkspaceClient` the plugin uses, in `tests/unit/fakes.py`. They never touch the network. CI runs them on every supported Python version and once more on the oldest supported versions of the dependencies: Python 3.11, pytest 8, databricks-sdk 0.108 and filelock 3.
+The unit tests use pytest's `pytester` and an in-memory fake of the parts of `WorkspaceClient` the plugin uses, in `tests/unit/fakes.py`. They never touch the network. CI runs them on every supported Python version and once more on the oldest supported versions of the dependencies: Python 3.11, pytest 8, databricks-sdk 0.66 and filelock 3.
 
 ## Integration tests
 
