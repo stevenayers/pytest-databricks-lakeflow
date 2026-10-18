@@ -114,6 +114,19 @@ def test_wrappers_build_commands(runner: FakeRunner, tmp_path: Path) -> None:
     ]
 
 
+def test_deploy_appends_flags(runner: FakeRunner, tmp_path: Path) -> None:
+    bundle.deploy(tmp_path, "test", None, flags=("--fail-on-active-runs", "--force-lock"))
+    assert runner.calls[0][0] == [
+        "bundle",
+        "deploy",
+        "-t",
+        "test",
+        "--auto-approve",
+        "--fail-on-active-runs",
+        "--force-lock",
+    ]
+
+
 def test_wrappers_reject_non_json(runner: FakeRunner, tmp_path: Path) -> None:
     runner.outputs = ["Warning: something\n"]
     with pytest.raises(LakeflowBundleError, match="did not print JSON"):

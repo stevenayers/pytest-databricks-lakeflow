@@ -4,10 +4,10 @@ This page follows a test session from the first `lakeflow.job()` call to the las
 
 ## Session setup
 
-Creating a `Lakeflow` does nothing. The first time a test asks it for a job template, the plugin sets up the bundle target. Setup is keyed on the bundle root, target, profile, variables, sync strategy and helpers path, and happens once per key per session, however many `Lakeflow` instances share it.
+Creating a `Lakeflow` does nothing. The first time a test asks it for a job template, the plugin sets up the bundle target. Setup is keyed on the bundle root, target, profile, variables, sync strategy, helpers path and deploy flags, and happens once per key per session, however many `Lakeflow` instances share it.
 
 1. **CLI check.** `databricks --version` must report v1.7.0 or later.
-2. **Templates.** With `sync="deploy"`, the plugin runs `databricks bundle deploy -t <target> --auto-approve`, then `databricks bundle summary -t <target> -o json` for the deployed job ids, then `jobs.get` for each id in parallel. Every `bundle` command gets `--var name=value` for each of `Lakeflow`'s `variables`, sorted by name. Before `jobs.get`, the `workspace.host` from the summary is compared with the workspace client's host, ignoring scheme, trailing slash and case, and a mismatch fails setup with a `LakeflowError` that names both hosts, instead of every `jobs.get` failing with `NotFound` and the jobs looking stale. The deployed settings are the templates, with workspace paths for notebooks and uploaded wheels. A job that the summary lists without an id is recorded as not deployed, and a job whose id no longer exists in the workspace as stale, so that using it fails with a clear message instead of a bare API error. With `sync="sync"` or `"none"`, the templates come from `databricks bundle validate -o json` instead, after a `bundle sync` for `sync`, and the host check reads `workspace.host` from the validate output. See [sync strategies](configuration.md#sync-strategies) for what those refuse.
+2. **Templates.** With `sync="deploy"`, the plugin runs `databricks bundle deploy -t <target> --auto-approve`, followed by any `deploy_flags`, then `databricks bundle summary -t <target> -o json` for the deployed job ids, then `jobs.get` for each id in parallel. Every `bundle` command gets `--var name=value` for each of `Lakeflow`'s `variables`, sorted by name. Before `jobs.get`, the `workspace.host` from the summary is compared with the workspace client's host, ignoring scheme, trailing slash and case, and a mismatch fails setup with a `LakeflowError` that names both hosts, instead of every `jobs.get` failing with `NotFound` and the jobs looking stale. The deployed settings are the templates, with workspace paths for notebooks and uploaded wheels. A job that the summary lists without an id is recorded as not deployed, and a job whose id no longer exists in the workspace as stale, so that using it fails with a clear message instead of a bare API error. With `sync="sync"` or `"none"`, the templates come from `databricks bundle validate -o json` instead, after a `bundle sync` for `sync`, and the host check reads `workspace.host` from the validate output. See [sync strategies](configuration.md#sync-strategies) for what those refuse.
 3. **Helper notebooks.** Two small Python notebooks, one that sets task values from a widget and one that reads them and returns them as JSON, are uploaded to `helpers_path` with overwrite. Their widget names start with `__pytest_` because every job parameter is pushed into every notebook task's widgets.
 4. **Sweep.** With `--lakeflow-sweep`, the process that did the setup lists your jobs and deletes those tagged `pytest` whose `pytest_run_id` differs from this run and whose creation time is older than `sweep_hours`.
 
@@ -16,6 +16,51 @@ The result, job templates as dicts, template errors and helper paths, is JSON. I
 ### Parallel sessions
 
 Under pytest-xdist, the controller creates a temporary directory and passes it and the run id to every worker. The first worker to need a bundle target takes a `FileLock` on a state file named after the bundle key, runs the setup and writes the JSON. Workers that arrive later read the file. A setup error is written too, so all workers report it. Each worker builds its own `WorkspaceClient`, and the controller deletes the directory at the end.
+
+## Isolating test deployments
+
+Every session that deploys the same target deploys into the same `workspace.root_path`. When a second session, a developer and CI, or two CI pipelines deploy that target while the first session's jobs are running, the deploy replaces the wheels under `artifact_path/.internal/` and the running copies fail when they look for the old ones. The plugin cannot tell sessions apart inside one target, because it reads its templates from whatever the target holds. Give each identity and branch its own deployment in `databricks.yml` instead:
+
+```yaml
+variables:
+  lakeflow_suffix:
+    description: Keeps one test deployment per branch apart from the others.
+    default: local
+
+experimental:
+  skip_artifact_cleanup: true
+
+targets:
+  test:
+    mode: development
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test/${var.lakeflow_suffix}
+```
+
+`~` is the home folder of the identity that deploys, so a developer and a CI service principal never share a deployment. `${var.lakeflow_suffix}` separates branches. `experimental.skip_artifact_cleanup` stops a deploy from deleting the wheels that the previous deploy of the same root uploaded, so a redeploy from the same branch does not break jobs that are still running.
+
+Set the variable in the root `conftest.py`, at import time. The CLI reads `BUNDLE_VAR_<name>` environment variables, and the plugin's CLI calls inherit the environment of the pytest process. Setting it at import time, rather than in the fixture, means the xdist controller sees it too, so `--lakeflow-destroy` destroys the same deployment. Branch names can contain `/`, so replace anything outside letters, digits, `_` and `-`:
+
+```python
+import os
+import re
+
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+branch = os.environ.get("GITHUB_HEAD_REF") or "local"
+os.environ.setdefault("BUNDLE_VAR_lakeflow_suffix", re.sub(r"[^A-Za-z0-9_-]", "-", branch))
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(deploy_flags=["--fail-on-active-runs"])
+```
+
+Each branch then leaves its own deployment behind, so end the pipeline with `pytest --lakeflow-destroy`, which runs `databricks bundle destroy` for the targets the session deployed.
+
+The `deploy_flags` argument passes `--fail-on-active-runs` to `bundle deploy`, which then refuses to deploy while a job that the bundle deploys has an active run. It catches someone running the deployed test target's jobs by hand. It does not catch a concurrent test session, because the plugin never runs the deployed jobs: every test runs a separate `[pytest]` copy, and the CLI does not look at those. Only separate deployments protect one session from another.
 
 ## One ephemeral job
 
