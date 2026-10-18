@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -195,8 +195,9 @@ def make_run(
     result_state: str = "SUCCESS",
     code: str = "SUCCESS",
     attempts: Mapping[str, Sequence[str]] | None = None,
+    disabled: Collection[str] = (),
 ) -> jobs.Run:
-    """Build a terminated run whose tasks ended in `states`, keyed by task key.
+    """Build a terminated run whose tasks ended in `states`, keyed by task key, flagging the `disabled` tasks.
 
     `attempts` gives the state of every attempt of the tasks it names, in order, numbered from attempt 0. Task run
     ids are `run_id * 100` plus the position of the attempt among all task runs.
@@ -206,6 +207,7 @@ def make_run(
     tasks = [
         jobs.RunTask(
             task_key=key,
+            disabled=True if key in disabled else None,
             run_id=(task_run_id := run_id * 100 + next(numbered)),
             attempt_number=attempt,
             state=jobs.RunState(result_state=jobs.RunResultState(state)),
@@ -276,6 +278,41 @@ def example_settings() -> jobs.JobSettings:
                     "task_key": "classic",
                     "job_cluster_key": "classic",
                     "notebook_task": {"notebook_path": f"{nb}/classic"},
+                },
+            ],
+        }
+    )
+
+
+def reporting_settings() -> jobs.JobSettings:
+    """Build a reporting job: a dashboard with a subscription, a SQL alert with subscriptions, and a notify task."""
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] reporting",
+            "tasks": [
+                {
+                    "task_key": "dashboard",
+                    "dashboard_task": {
+                        "dashboard_id": "d1",
+                        "warehouse_id": "w1",
+                        "filters": {"region": "emea"},
+                        "subscription": {
+                            "custom_subject": "Daily report",
+                            "subscribers": [{"user_name": "someone@example.com"}, {"destination_id": "slack"}],
+                        },
+                    },
+                },
+                {
+                    "task_key": "alert",
+                    "sql_task": {
+                        "warehouse_id": "w1",
+                        "alert": {"alert_id": "a1", "subscriptions": [{"user_name": "someone@example.com"}]},
+                    },
+                },
+                {
+                    "task_key": "notify",
+                    "depends_on": [{"task_key": "dashboard"}, {"task_key": "alert"}],
+                    "notebook_task": {"notebook_path": "/Workspace/src/notify"},
                 },
             ],
         }

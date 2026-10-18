@@ -21,7 +21,17 @@ from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.results import JobRun
-from pytest_databricks_lakeflow.settings import Helpers, RunAs, check_params, inject_probes, sanitise, wrap_task
+from pytest_databricks_lakeflow.settings import (
+    SIDE_EFFECTS,
+    Helpers,
+    RunAs,
+    SideEffects,
+    check_params,
+    disable_tasks,
+    inject_probes,
+    sanitise,
+    wrap_task,
+)
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -61,6 +71,8 @@ class Lakeflow:
         helpers_environment_version: The serverless environment version for stub and probe tasks.
         disable_auto_optimization: Stop serverless from retrying failed tasks, so that a failure fails once and fast.
         performance_optimized: Run every ephemeral job as `PERFORMANCE_OPTIMIZED`, whatever the template says.
+        side_effects: `neutralise` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral
+            job, so runs do not email snapshots or notify subscribers. `keep` leaves them as the template has them.
         allow_undeclared_params: Allow parameters that the job does not declare.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
@@ -87,6 +99,7 @@ class Lakeflow:
     helpers_environment_version: str = "4"
     disable_auto_optimization: bool = True
     performance_optimized: bool = False
+    side_effects: SideEffects = "neutralise"
     allow_undeclared_params: bool = False
     sweep_hours: float = 24
     keep: bool = False
@@ -101,6 +114,8 @@ class Lakeflow:
     def __post_init__(self) -> None:
         if self.sync not in SYNC_STRATEGIES:
             raise ValueError(f"sync must be one of {', '.join(SYNC_STRATEGIES)}, got {self.sync!r}")
+        if self.side_effects not in SIDE_EFFECTS:
+            raise ValueError(f"side_effects must be one of {', '.join(SIDE_EFFECTS)}, got {self.side_effects!r}")
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -159,6 +174,7 @@ class Lakeflow:
         capture_task_values: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
         run_as: RunAs = None,
+        disable: Sequence[str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -170,18 +186,21 @@ class Lakeflow:
             run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
                 the template's. A string with `@` names a user, any other string names a service principal by its
                 application id, and a `jobs.JobRunAs` is used as given.
+            disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.skipped_tasks`
+                with `disabled` set.
 
         Returns:
             The job, created when entered with `with` or on its first run.
 
         Raises:
             KeyError: If the bundle has no job `key`.
-            LakeflowError: If called outside a test, `capture_task_values` names a task that is not in the job, or a
-                parameter name is reserved.
+            LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
+                the job, or a parameter name is reserved.
         """
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
+        disable_tasks(settings, disable or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
         return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as)
 
@@ -313,6 +332,7 @@ class Lakeflow:
             performance_optimized=self.performance_optimized,
             run_as=run_as,
             timeout=self.timeout,
+            side_effects=self.side_effects,
         )
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
