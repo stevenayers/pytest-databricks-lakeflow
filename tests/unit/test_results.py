@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -254,3 +255,21 @@ def test_output_json_when_not_json() -> None:
 def test_output_json_when_truncated() -> None:
     with pytest.raises(ValueError, match="Output of task 't' was cut at 5 MB"):
         _ = task("t", output='{"a": 1}', output_truncated=True).output_json
+
+
+@pytest.mark.parametrize("state", ["FAILED", "SUCCESS", "CANCELED", None])
+def test_timed_out_is_false_for_other_states(state: str | None) -> None:
+    assert not task("a", state).timed_out
+    assert not job_run([task("a", state)]).timed_out
+
+
+def test_timed_out_task() -> None:
+    timed_out = task("a", "TIMEDOUT")
+    assert timed_out.timed_out
+    assert timed_out.ran
+    assert job_run([timed_out]).timed_out
+    assert replace(job_run([task("a")]), result_state="TIMEDOUT").timed_out
+
+
+def test_attempts_default_to_empty() -> None:
+    assert task("a").attempts == []

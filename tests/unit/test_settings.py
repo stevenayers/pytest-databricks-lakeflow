@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -278,3 +279,33 @@ def test_select_adds_stubs_of_selected_tasks() -> None:
 def test_select_rejects_unknown_tasks() -> None:
     with pytest.raises(LakeflowError, match=r"Unknown task 'lod' in only. Available: \['extract', 'load'"):
         select(chain(), ["lod+"])
+
+
+def test_sanitise_mirrors_the_timeout() -> None:
+    assert sanitised(timeout=timedelta(minutes=20)).timeout_seconds == 1260
+
+
+def test_sanitise_mirrors_the_timeout_over_a_looser_template() -> None:
+    settings = example_settings()
+    settings.timeout_seconds = 7200
+    assert sanitised(settings, timeout=timedelta(minutes=20)).timeout_seconds == 1260
+
+
+def test_sanitise_rounds_the_timeout_up() -> None:
+    assert sanitised(timeout=timedelta(seconds=1.2)).timeout_seconds == 62
+
+
+def test_sanitise_keeps_a_stricter_template_timeout() -> None:
+    settings = example_settings()
+    settings.timeout_seconds = 300
+    assert sanitised(settings, timeout=timedelta(minutes=30)).timeout_seconds == 300
+
+
+def test_sanitise_replaces_a_zero_template_timeout() -> None:
+    settings = example_settings()
+    settings.timeout_seconds = 0
+    assert sanitised(settings, timeout=timedelta(minutes=1)).timeout_seconds == 120
+
+
+def test_sanitise_without_timeout() -> None:
+    assert sanitised().timeout_seconds is None

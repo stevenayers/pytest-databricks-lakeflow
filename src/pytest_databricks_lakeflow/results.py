@@ -133,7 +133,7 @@ class TaskValues(dict[str, object]):
 class TaskRun:
     """The outcome of one task in a job run.
 
-    When the platform retried the task, this describes the last attempt.
+    When the platform retried the task, this describes the last attempt and `attempts` holds every attempt.
 
     Attributes:
         task_key: The task's key.
@@ -156,6 +156,8 @@ class TaskRun:
             parameters; a list for Python wheel tasks with positional parameters, Python script, JAR and
             spark-submit tasks, and dbt tasks (`commands`); `None` for other task types or when the platform
             reported no resolved values.
+        attempts: One `TaskRun` per attempt, in attempt order, each with empty `attempts`. The last equals this
+            task apart from `attempts`.
     """
 
     task_key: str
@@ -174,11 +176,17 @@ class TaskRun:
     missing_task_values: list[str] = field(default_factory=list)
     attempt: int = 0
     parameters: dict[str, str] | list[str] | None = None
+    attempts: list[TaskRun] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:
         """Whether the task ended `SUCCESS`."""
         return self.result_state == "SUCCESS"
+
+    @property
+    def timed_out(self) -> bool:
+        """Whether the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`."""
+        return self.result_state == "TIMEDOUT"
 
     @property
     def ran(self) -> bool:
@@ -275,6 +283,11 @@ class JobRun:
         """Whether the run did not succeed."""
         return not self.succeeded
 
+    @property
+    def timed_out(self) -> bool:
+        """Whether the parent run ended `TIMEDOUT` or any task in `tasks` timed out."""
+        return self.result_state == "TIMEDOUT" or any(t.timed_out for t in self.tasks.values())
+
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.
 
@@ -335,8 +348,8 @@ def build_job_run(
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output.
 
-    When the platform retried a task, only its last attempt is kept. Probe outputs become the `values` of the
-    tasks they watched.
+    When the platform retried a task, the `TaskRun` describes its last attempt and its `attempts` hold every
+    attempt. Probe outputs become the `values` of the tasks they watched.
 
     Args:
         ws: The workspace client.
@@ -349,19 +362,22 @@ def build_job_run(
     Returns:
         The run's outcome.
     """
-    latest: dict[str, jobs.RunTask] = {}
-    for task in run.tasks or []:
-        key = task.task_key or ""
-        current = latest.get(key)
-        if current is None or (task.attempt_number or 0) >= (current.attempt_number or 0):
-            latest[key] = task
-    outputs = _outputs(ws, [task for task in latest.values() if _enum(_result_state(task)) != "DISABLED"])
-    task_runs = {key: _task_run(task, outputs.get(task.run_id or 0)) for key, task in latest.items()}
+    by_key: dict[str, list[jobs.RunTask]] = {}
+    for task in sorted(run.tasks or [], key=lambda t: t.attempt_number or 0):
+        by_key.setdefault(task.task_key or "", []).append(task)
+    ran = [task for tasks in by_key.values() for task in tasks if _enum(_result_state(task)) != "DISABLED"]
+    outputs = _outputs(ws, ran)
+    attempts = {
+        key: [_task_run(task, outputs.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()
+    }
+    task_runs = {key: runs[-1] for key, runs in attempts.items()}
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
     for target, keys in (capture_task_values or {}).items():
         if target in user:
             user[target] = _with_values(user[target], injected.get(f"{PROBE_PREFIX}{target}"), keys)
+    injected = {key: _with_attempts(t, attempts[key]) for key, t in injected.items()}
+    user = {key: _with_attempts(t, attempts[key]) for key, t in user.items()}
     details = run.status.termination_details if run.status else None
     return JobRun(
         job_key=job_key,
@@ -377,6 +393,10 @@ def build_job_run(
         skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
         parameters=_job_parameters(run.job_parameters),
     )
+
+
+def _with_attempts(last: TaskRun, attempts: list[TaskRun]) -> TaskRun:
+    return replace(last, attempts=[*attempts[:-1], last])
 
 
 def _job_parameters(parameters: Sequence[jobs.JobParameter] | None) -> dict[str, str]:

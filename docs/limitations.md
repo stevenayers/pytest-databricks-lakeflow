@@ -7,7 +7,7 @@
 - **Task values need probes.** Task values are not available through the Jobs API, so they are read by probe tasks. Each probe costs 7 to 30 seconds of serverless compute, even when its task did not run.
 - **Job code must read catalog and schema from job parameters.** Bundle variables are fixed at deploy time, and the plugin deploys once per session.
 - **Single-task jobs keep only the target task.** On a shared job cluster a task can import libraries that other tasks declared, and on its own it loses them. Declare every library on the task that needs it.
-- **Serverless auto-retry is off by default** in ephemeral jobs, so a test sees one attempt. Pass `disable_auto_optimization=False` to keep the platform's behaviour. When a task is retried, `TaskRun` describes the last attempt.
+- **Serverless auto-retry is off by default** in ephemeral jobs, so a test sees one attempt. Pass `disable_auto_optimization=False` to keep the platform's behaviour. When a task is retried, `TaskRun` describes the last attempt and its `attempts` holds every attempt.
 - **The Databricks CLI is required.** Deploying is only possible through the CLI, so the plugin shells out to it. There is no pure-SDK mode.
 - **One run at a time per ephemeral job.** Each copy is created with `max_concurrent_runs: 1`. Parallelism comes from separate tests, each with its own job.
 - **`sync` and `none` strategies read `bundle validate` output**, which leaves library paths local and `${resources...}` references unresolved. Jobs affected by that are refused, with an error that says to use `deploy`.

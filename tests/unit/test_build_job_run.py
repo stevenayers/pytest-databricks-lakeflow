@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any, cast
 
@@ -264,3 +265,66 @@ def test_reserved_job_parameters_are_hidden() -> None:
     parameters = build_from(ws, run).parameters
     assert parameters == {"date": "2026-01-01"}
     assert not any(key.startswith("__pytest_") for key in parameters)
+
+
+def test_every_attempt_is_kept() -> None:
+    run, ws = build("probe_failure", capture_task_values=CAPTURE)
+    transform = run.task("transform")
+    assert transform.attempt == 1
+    assert [a.attempt for a in transform.attempts] == [0, 1]
+    assert [a.run_id for a in transform.attempts] == [1103977916948693, 1054812578975269]
+    assert all(a.attempts == [] for a in transform.attempts)
+    assert transform.attempts[-1] == replace(transform, attempts=[])
+    assert {1103977916948693, 1054812578975269} <= set(ws.jobs.output_calls)
+
+
+def test_a_single_attempt_equals_the_task() -> None:
+    run, _ = build("probe_failure", capture_task_values=CAPTURE)
+    extract = run.task("extract")
+    assert extract.attempts == [replace(extract, attempts=[])]
+
+
+def test_attempts_from_make_run() -> None:
+    ws = FakeWorkspaceClient()
+    ws.jobs.outputs[902] = jobs.RunOutput(error="ValueError: flaky")
+    run = build_from(ws, make_run(9, {"s": "SUCCESS"}, attempts={"t": ["FAILED", "FAILED", "SUCCESS"]}))
+    t = run.task("t")
+    assert t.succeeded
+    assert (t.attempt, t.run_id) == (2, 903)
+    assert [(a.attempt, a.result_state) for a in t.attempts] == [(0, "FAILED"), (1, "FAILED"), (2, "SUCCESS")]
+    assert t.attempts[0].error is None
+    assert t.attempts[1].raised(ValueError)
+    assert sorted(ws.jobs.output_calls) == [900, 901, 902, 903]
+    assert run.task("s").attempts == [replace(run.task("s"), attempts=[])]
+
+
+def test_timed_out_task_and_run() -> None:
+    ws = FakeWorkspaceClient()
+    ws.jobs.outputs[900] = jobs.RunOutput(error="TimeoutError: too slow")
+    run = build_from(ws, make_run(9, {"load": "TIMEDOUT"}, result_state="TIMEDOUT", code="RUN_EXECUTION_ERROR"))
+    load = run.task("load")
+    assert run.timed_out
+    assert load.timed_out
+    assert load.ran
+    assert load.raised(TimeoutError)
+    assert run.failed
+
+
+def test_timed_out_task_without_error_in_repr() -> None:
+    ws = FakeWorkspaceClient()
+    run = build_from(ws, make_run(9, {"load": "TIMEDOUT"}, result_state="TIMEDOUT", code="RUN_EXECUTION_ERROR"))
+    assert run.timed_out
+    assert run.task("load").timed_out
+    assert run.failed
+    assert "load: TIMEDOUT" in repr(run)
+
+
+def test_a_timed_out_task_times_out_the_run() -> None:
+    ws = FakeWorkspaceClient()
+    run = build_from(ws, make_run(9, {"load": "TIMEDOUT"}, result_state="FAILED", code="RUN_EXECUTION_ERROR"))
+    assert run.timed_out
+
+
+def test_a_failed_run_did_not_time_out() -> None:
+    run, _ = build("probe_failure", capture_task_values=CAPTURE)
+    assert not run.timed_out

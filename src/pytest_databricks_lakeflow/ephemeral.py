@@ -122,7 +122,8 @@ class EphemeralJob:
         Args:
             params: Job parameters for this run only, merged over the job's params.
             only: Task keys to run. `+key`, `key+` and `+key+` add upstream and downstream tasks.
-            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`.
+            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`. It must not be longer than the job's
+                `timeout_seconds`, which `Lakeflow`'s `timeout` sets.
             performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
             queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
@@ -131,8 +132,8 @@ class EphemeralJob:
             The run's outcome.
 
         Raises:
-            LakeflowError: If the job has been closed, a parameter is not declared, or `only` names an unknown
-                task.
+            LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
+                task, or `timeout` is longer than the job's `timeout_seconds`.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -142,6 +143,8 @@ class EphemeralJob:
         assert self.job_id is not None
         item = session.current_item()
         check_params(self.job_key, self.settings, params or {}, self.lakeflow.allow_undeclared_params)
+        if timeout is not None:
+            self._check_timeout(timeout)
         merged = {**self.params, **(params or {})}
         selected = select(self.settings, only, self.stubs) if only else None
         ws = self.lakeflow.ws
@@ -184,6 +187,15 @@ class EphemeralJob:
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)
         return result
+
+    def _check_timeout(self, timeout: timedelta) -> None:
+        limit = self.settings.timeout_seconds
+        if limit and timeout.total_seconds() > limit:
+            raise LakeflowError(
+                f"run(timeout={timeout}) of {self.job_key!r} is longer than the job's timeout_seconds of {limit} "
+                f"({timedelta(seconds=limit)}), so the platform would stop the run first. Pass a longer "
+                "Lakeflow(timeout=...), which sets the job's timeout, or a shorter run timeout."
+            )
 
     def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> jobs.Run:
         ws = self.lakeflow.ws
