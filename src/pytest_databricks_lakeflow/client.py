@@ -37,6 +37,16 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 
 Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
+PLUGIN_DEPLOY_FLAGS = {
+    "-t": "Pass target= to Lakeflow instead",
+    "--target": "Pass target= to Lakeflow instead",
+    "-e": "Pass target= to Lakeflow instead",
+    "--environment": "Pass target= to Lakeflow instead",
+    "-p": "Pass profile= to Lakeflow instead",
+    "--profile": "Pass profile= to Lakeflow instead",
+    "--var": "Pass variables= to Lakeflow instead",
+    "--auto-approve": "The plugin always passes --auto-approve",
+}
 
 
 @dataclass(kw_only=True, eq=False)
@@ -63,6 +73,10 @@ class Lakeflow:
         sync: How to prepare the bundle: `deploy`, `sync` or `none`.
         variables: Bundle variables, passed as `--var name=value` to every `bundle` command, `bundle destroy`
             included. Instances with different variables set the target up separately.
+        deploy_flags: Extra flags for `databricks bundle deploy`, added at the end of the command, such as
+            `["--fail-on-active-runs"]`. Instances with different flags deploy separately. Used only when `sync`
+            is `deploy`. `-t`, `--target`, `-e`, `--environment`, `-p`, `--profile`, `--var` and `--auto-approve` are
+            not allowed.
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
         catalog: The catalog in which `schema()` creates temporary schemas.
@@ -102,6 +116,7 @@ class Lakeflow:
     workspace_client: WorkspaceClient | None = field(default=None, repr=False)
     sync: Sync = "deploy"
     variables: Mapping[str, str] | None = None
+    deploy_flags: Sequence[str] = ()
     timeout: timedelta = timedelta(minutes=30)
     catalog: str | None = None
     helpers_path: str | None = None
@@ -129,6 +144,16 @@ class Lakeflow:
             raise ValueError(f"sync must be one of {', '.join(SYNC_STRATEGIES)}, got {self.sync!r}")
         if self.side_effects not in SIDE_EFFECTS:
             raise ValueError(f"side_effects must be one of {', '.join(SIDE_EFFECTS)}, got {self.side_effects!r}")
+        if isinstance(self.deploy_flags, str):
+            raise ValueError(f"deploy_flags must be a list of flags, not a string: [{self.deploy_flags!r}]")
+        for flag in self.deploy_flags:
+            if not isinstance(flag, str):
+                raise ValueError(f"deploy_flags must contain only strings, got {flag!r}")
+            name = flag.split("=", 1)[0]
+            if not name.startswith("--") and len(name) > 2:
+                name = name[:2]
+            if name in PLUGIN_DEPLOY_FLAGS:
+                raise ValueError(f"deploy_flags cannot contain {name}. {PLUGIN_DEPLOY_FLAGS[name]}.")
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -301,6 +326,7 @@ class Lakeflow:
             sync=self.sync,
             helpers_path=self.helpers_path,
             variables=tuple(sorted((self.variables or {}).items())),
+            deploy_flags=tuple(self.deploy_flags) if self.sync == "deploy" else (),
         )
         state = current.bundle_state(key, self.ws, self.sweep_hours)
         current.lakeflows.append(self)

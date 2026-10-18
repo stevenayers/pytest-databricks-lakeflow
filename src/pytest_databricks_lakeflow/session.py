@@ -49,10 +49,19 @@ class BundleKey:
     sync: str
     helpers_path: str | None
     variables: tuple[tuple[str, str], ...] = ()
+    deploy_flags: tuple[str, ...] = ()
 
     def file_name(self) -> str:
         """Name the file in which xdist workers share this target's setup."""
-        fields = [str(self.root), self.target, self.profile, self.sync, self.helpers_path, self.variables]
+        fields = [
+            str(self.root),
+            self.target,
+            self.profile,
+            self.sync,
+            self.helpers_path,
+            self.variables,
+            list(self.deploy_flags),
+        ]
         return f"lakeflow_{hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:16]}.json"
 
 
@@ -329,7 +338,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     variables = dict(key.variables)
     bundle.check_cli_version(root)
     if key.sync == "deploy":
-        bundle.deploy(root, key.target, key.profile, variables)
+        bundle.deploy(root, key.target, key.profile, variables, flags=key.deploy_flags)
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
         check_host(key.target, (bundle_summary.get("workspace") or {}).get("host"), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
