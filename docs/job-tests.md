@@ -219,6 +219,8 @@ One worker deploys the bundle and loads the templates while the others wait, the
 - `--no-lakeflow-keep-failed` deletes jobs even when their test fails, for CI.
 - `--lakeflow-sweep` deletes the jobs you kept earlier, once they are older than `sweep_hours`.
 
+Every kept job and schema is listed in a `lakeflow` block at the end of the run, with a hint to run `pytest --lakeflow-sweep` when jobs were kept, so you do not need `--log-cli-level` to find them.
+
 ## Change the settings before the job is created
 
 `modify_settings` is called with each ephemeral job's `JobSettings` and the test's `pytest.Item`, just before the job is created. Change the settings in place:

@@ -12,7 +12,7 @@ from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 
 from .conftest import FakeCli, configure_lakeflow
-from .fakes import FakeWorkspaceClient, make_run
+from .fakes import HOST, FakeWorkspaceClient, make_run
 from .test_session import STAGING_FIXTURE, make_xdist_conftest
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -244,3 +244,65 @@ def test_crashed_xdist_worker_is_reported_normally(pytester: pytest.Pytester) ->
     result = pytester.runpytest("-n", "2")
     assert "INTERNALERROR" not in result.stdout.str() + result.stderr.str()
     result.stdout.fnmatch_lines(["*crashed while running*test_crash*", "*1 failed, 2 passed*"])
+
+
+SWEEP_HINT = "hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours"
+FAILING_JOB = "def test_{0}(lakeflow):\n    lakeflow.job('my_job').create()\n    assert False\n"
+XDIST_WORKER_IDS = """
+
+import os
+
+
+def make_client(profile):
+    ws = FakeWorkspaceClient()
+    ws.jobs.add(example_settings())
+    ws.jobs.start_ids_at(1000 * (2 + int(os.environ["PYTEST_XDIST_WORKER"][2:])))
+    return ws
+"""
+
+
+def test_terminal_summary_lists_kept_jobs(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(FAILING_JOB.format("kept") + "\n" + USES_LAKEFLOW.format("other"))
+    result = pytester.runpytest()
+    result.assert_outcomes(failed=1, passed=1)
+    result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 job kept", f"  {HOST}/jobs/1001", SWEEP_HINT])
+    result.stdout.no_fnmatch_line("*schema* kept*")
+    result.stdout.no_fnmatch_line("*cancelled at session end*")
+
+
+def test_terminal_summary_lists_kept_schemas(pytester: pytest.Pytester) -> None:
+    configure_lakeflow(pytester, 'catalog="c"')
+    pytester.makepyfile("def test_schema(lakeflow):\n    with lakeflow.schema():\n        pass\n")
+    result = pytester.runpytest("--lakeflow-keep")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 schema kept", "  c.pytest_*"])
+    result.stdout.no_fnmatch_line(SWEEP_HINT)
+
+
+@pytest.mark.parametrize(("runs", "line"), [("{1}", "1 run"), ("{3, 1}", "2 runs")])
+def test_terminal_summary_counts_cancelled_runs(pytester: pytest.Pytester, runs: str, line: str) -> None:
+    pytester.makepyfile(USES_LAKEFLOW.format("leak") + f"    lakeflow.active_runs.update({runs})\n")
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*= lakeflow =*", f"lakeflow: {line} cancelled at session end"])
+    result.stdout.no_fnmatch_line("*kept*")
+
+
+def test_no_summary_when_nothing_was_kept(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile("def test_job(lakeflow):\n    lakeflow.job('my_job').run()\n")
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=1)
+    result.stdout.no_fnmatch_line("*= lakeflow =*")
+    result.stdout.no_fnmatch_line("lakeflow:*")
+
+
+def test_xdist_controller_summarises_kept_jobs(pytester: pytest.Pytester) -> None:
+    pytest.importorskip("xdist")
+    make_xdist_conftest(pytester, XDIST_WORKER_IDS)
+    pytester.makepyfile(FAILING_JOB.format("a") + "\n" + FAILING_JOB.format("b"))
+    result = pytester.runpytest("-n", "2")
+    result.assert_outcomes(failed=2)
+    result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 2 jobs kept", f"  {HOST}/jobs/*", f"  {HOST}/jobs/*"])
+    urls = [line for line in result.stdout.lines if line.startswith(f"  {HOST}/jobs/")]
+    assert len(urls) == 2
+    assert len(set(urls)) == 2
