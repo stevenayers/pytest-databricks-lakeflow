@@ -138,7 +138,14 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
 
 `repr(run)` names the failing tasks with the first line of their errors and links to the run, so `assert run.succeeded, run` gives a useful failure message. When the run failed, it also prints `params={...}`, the run's job parameters, and `repr()` of a task with an error prints the task's `parameters`. Reprs of successful runs and tasks leave them out.
 
-`run.raise_for_failure()` gives the full detail in one call. It returns the run when `run.succeeded` is true, so `run = job.run().raise_for_failure()` works, and otherwise raises `LakeflowRunFailed`. The message is `repr(run)` followed by one line per failing task with its whole error, its root cause when there is one, and its run URL. The exception's `run` attribute holds the `JobRun`.
+`run.raise_for_failure()` gives the full detail in one call. It returns the run when `run.succeeded` is true, so `run = job.run().raise_for_failure()` works, and otherwise raises `LakeflowRunFailed`. The message is `repr(run)` followed by one line per failing task with its whole error, its root cause when there is one, and its run URL. It also prints the resolved parameters: the run's job parameters on a `params:` line after the repr (in place of the repr's `params={...}`), and each failing task's `parameters` on an indented `params:` line after the task's own, when the platform reported them. The exception's `run` attribute holds the `JobRun`.
+
+```text
+LakeflowRunFailed: JobRun('etl', FAILED, https://.../runs/77, failing=['extract: ValueError: bad limit'])
+params: {"date": "2026-10-01"}
+extract: ValueError: bad limit https://.../runs/7701
+  params: {"date": "2026-10-01", "limit": "10"}
+```
 
 ```python
 import pytest

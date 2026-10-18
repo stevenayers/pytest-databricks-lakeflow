@@ -9,7 +9,7 @@ import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
-from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues, Timing
+from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues, Timing, format_parameters
 
 from .fakes import DATA
 
@@ -349,6 +349,36 @@ def test_raise_for_failure_raises_with_every_failing_task() -> None:
     assert "https://example.com/b" in detail
     assert "c: UPSTREAM_FAILED" in detail
     assert "https://example.com/c" in detail
+
+
+def test_format_parameters_sorts_cuts_and_hides_reserved_keys() -> None:
+    text = format_parameters({"b": "2", "a": "x" * 500})
+    assert "\n" not in text
+    assert text.index('"a"') < text.index('"b"')
+    value = json.loads(text)["a"]
+    assert len(value) == 200
+    assert value.endswith("...")
+    assert json.loads(format_parameters(["--rows", "10"])) == ["--rows", "10"]
+    assert format_parameters(None) == ""
+    assert format_parameters({}) == ""
+    assert format_parameters([]) == ""
+    assert format_parameters({"__pytest_task_key": "t", "limit": "10"}) == '{"limit": "10"}'
+
+
+def test_raise_for_failure_lists_parameters() -> None:
+    error = TaskError(type="ValueError", message="bad limit", trace="")
+    failed = task("extract", "FAILED", error=error, parameters={"date": "2026-10-01", "limit": "10"})
+    unknown = task("load", "FAILED", error=error, parameters=None)
+    run = job_run([failed, unknown, task("ok", parameters={"date": "2026-10-01"})], parameters={"date": "2026-10-01"})
+    with pytest.raises(LakeflowRunFailed) as excinfo:
+        run.raise_for_failure()
+    lines = str(excinfo.value).splitlines()
+    assert lines[0].startswith("JobRun('my_job', SUCCESS, https://example.com/run, failing=")
+    assert lines[1] == 'params: {"date": "2026-10-01"}'
+    assert lines[2].startswith("extract: ValueError: bad limit")
+    assert lines[3] == '  params: {"date": "2026-10-01", "limit": "10"}'
+    assert lines[4].startswith("load: ValueError: bad limit")
+    assert len(lines) == 5
 
 
 def test_output_json_parses_exit_value() -> None:

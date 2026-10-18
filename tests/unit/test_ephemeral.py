@@ -422,6 +422,58 @@ def test_failing_run_adds_a_failing_property(pytester: pytest.Pytester, fake_ws:
     assert '<property name="lakeflow_failing" value="extract: ValueError: no rows"' in xml
 
 
+def test_failed_run_reports_parameters(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    run = make_run(77, {"extract": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR")
+    run.job_parameters = [jobs.JobParameter(name="param1", default="hello", value="hi")]
+    assert run.tasks
+    run.tasks[0].resolved_values = jobs.ResolvedValues(
+        notebook_task=jobs.ResolvedNotebookTaskValues(
+            base_parameters={"param1": "hi", "limit": "10", "__pytest_task_key": "extract"}
+        )
+    )
+    fake_ws.jobs.queue(run, {7700: jobs.RunOutput(error="ValueError: no rows")})
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run()
+            assert False
+        """,
+        "--junitxml=report.xml",
+    )
+    result.stdout.fnmatch_lines(
+        [
+            "*- lakeflow -*",
+            '*lakeflow_params: {"param1": "hi"}*',
+            '*lakeflow_task_params: {"extract": {"limit": "10", "param1": "hi"}}*',
+        ]
+    )
+    xml = (pytester.path / "report.xml").read_text()
+    assert '<property name="lakeflow_params" value="{&quot;param1&quot;: &quot;hi&quot;}"' in xml
+    assert '<property name="lakeflow_task_params"' in xml
+
+
+def test_successful_run_reports_no_parameters(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    run = make_run(77, {"extract": "SUCCESS"})
+    run.job_parameters = [jobs.JobParameter(name="param1", default="hello", value="hi")]
+    fake_ws.jobs.queue(run)
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run()
+            assert False
+        """,
+        "--junitxml=report.xml",
+    )
+    result.stdout.fnmatch_lines(["*- lakeflow -*"])
+    result.stdout.no_fnmatch_line("*lakeflow_params*")
+    result.stdout.no_fnmatch_line("*lakeflow_task_params*")
+    assert "lakeflow_params" not in (pytester.path / "report.xml").read_text()
+
+
 def test_section_is_attached_to_setup_failures(pytester: pytest.Pytester) -> None:
     result = run_tests(
         pytester,
