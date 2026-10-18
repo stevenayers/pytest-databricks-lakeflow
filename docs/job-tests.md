@@ -109,7 +109,7 @@ Each `TaskRun` has:
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
 - The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
-- `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
+- `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
@@ -354,17 +354,20 @@ def test_parent_is_refused(lakeflow: Lakeflow) -> None:
         lakeflow.job("parent", children="refuse")
 ```
 
-When the child does run, `TaskRun.child_run_id` gives the id of its run, for example to look it up with `lakeflow.ws.jobs.get_run()`:
+When the child does run, `TaskRun.child_run_id` gives the id of its run and `TaskRun.child_run` gives the run itself as a `JobRun`, so you assert on the child's tasks with the same API as the parent's:
 
 ```python
 def test_parent_triggers_child(lakeflow: Lakeflow) -> None:
     with lakeflow.job("parent") as job:
         run = job.run().raise_for_failure()
-        child_run_id = run.task("trigger_child").child_run_id
-        assert child_run_id is not None
-        child = lakeflow.ws.jobs.get_run(child_run_id)
-        assert child.run_page_url is not None
+    child = run.task("trigger_child").child_run
+    assert child is not None
+    assert child.job_key == "child"
+    assert child.task("load").succeeded
+    assert run.task("prepare").child_run is None
 ```
+
+The plugin reads the child run with `get_run` once the parent run has finished. `child_run.job_id` is the deployed child job's id, and `child_run.job_key` is that job's bundle resource key when the bundle deployed it, otherwise the job id as a string; with `sync="sync"` or `sync="none"` the plugin knows no job ids, so the key is always the id. `child_run.succeeded` follows the same rules as the parent's, and a child with its own Run Job tasks has nested `child_run`s. `child_run` is `None` for any other task, for a Run Job task that did not run, and when the child run cannot be read, which logs a warning.
 
 ## Change the settings before the job is created
 

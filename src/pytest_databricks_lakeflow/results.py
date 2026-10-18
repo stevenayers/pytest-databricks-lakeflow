@@ -253,6 +253,11 @@ class TaskRun:
         child_run_id: The id of the job run that a run-job task triggered, from `run_job_output.run_id`. The run is
             of the deployed child job, not a copy, so the plugin does not cancel or delete it. `None` for any other
             task or when the platform reported no run id.
+        child_run: The run that a run-job task triggered, as a `JobRun` with the child's own tasks, read with
+            `get_run` once the parent run finished. Its `job_key` is the child job's bundle resource key, or its job
+            id as a string when the job is not in the bundle. A child with its own run-job tasks has nested
+            `child_run`s. `None` for any other task, when the task did not run, when the platform reported no run id,
+            or when the child run could not be read, which logs a warning.
         dashboard_output: The output of a dashboard task, with its `page_snapshots`, or `None`.
         clean_rooms_notebook_output: The output of a clean room notebook task, with `notebook_output` and
             `clean_room_job_run_state`, or `None`.
@@ -283,6 +288,7 @@ class TaskRun:
     dbt_output: jobs.DbtOutput | None = None
     run_job_output: jobs.RunJobOutput | None = None
     child_run_id: int | None = None
+    child_run: JobRun | None = None
     dashboard_output: jobs.DashboardTaskOutput | None = None
     clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
 
@@ -382,11 +388,12 @@ class TaskRun:
 
 @dataclass(frozen=True)
 class JobRun:
-    """The outcome of one run of an ephemeral job.
+    """The outcome of one run of an ephemeral job, or of the child run that a run-job task triggered.
 
     Attributes:
-        job_key: The bundle resource key of the job.
-        job_id: The ephemeral job's id.
+        job_key: The bundle resource key of the job. For a child run, the child job's key when the job is in the
+            bundle, otherwise its job id as a string.
+        job_id: The ephemeral job's id. For a child run, the id of the deployed child job.
         run_id: The run's id.
         run_url: The run's page in the workspace.
         result_state: The parent run's result state. Not a verdict: a run whose probe ran after a failed task
@@ -546,6 +553,7 @@ def build_job_run(
     capture_task_values: Mapping[str, Sequence[str]] | None = None,
     disabled: Collection[str] = (),
     outputs: Mapping[int, jobs.RunOutput] | None = None,
+    job_keys: Mapping[int, str] | None = None,
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output.
 
@@ -562,6 +570,7 @@ def build_job_run(
         disabled: Keys of the tasks disabled in the job's settings. The Jobs API does not flag them on the run, where
             a disabled task and one left out by `only` both end `DISABLED`.
         outputs: Task outputs already read, by task run id. Only the outputs missing from it are fetched.
+        job_keys: Bundle resource keys by job id, which name the child runs of run-job tasks.
 
     Returns:
         The run's outcome.
@@ -575,7 +584,7 @@ def build_job_run(
     known = dict(outputs or {})
     known.update(fetch_outputs(ws, [task for task in ran if (task.run_id or 0) not in known]))
     attempts = {key: [_task_run(task, known.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()}
-    task_runs = {key: runs[-1] for key, runs in attempts.items()}
+    task_runs = {key: _with_child_run(ws, runs[-1], job_keys or {}) for key, runs in attempts.items()}
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
     for target, keys in (capture_task_values or {}).items():
@@ -601,6 +610,19 @@ def build_job_run(
         timing=Timing.from_run(run),
         effective_performance_target=_enum(run.effective_performance_target),
     )
+
+
+def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, str]) -> TaskRun:
+    if task.child_run_id is None or task.result_state in NOT_RUN:
+        return task
+    try:
+        child = ws.jobs.get_run(task.child_run_id, include_resolved_values=True)
+    except DatabricksError as e:
+        log.warning("Could not read run %s triggered by task %s: %s", task.child_run_id, task.task_key, e)
+        return task
+    job_id = child.job_id or 0
+    key = job_keys.get(job_id) or str(job_id)
+    return replace(task, child_run=build_job_run(ws, child, job_key=key, job_id=job_id, job_keys=job_keys))
 
 
 def _with_attempts(last: TaskRun, attempts: list[TaskRun]) -> TaskRun:
