@@ -23,7 +23,7 @@ Import from `pytest_databricks_lakeflow`: `Lakeflow`, `EphemeralJob`, `JobRun`, 
 - `lakeflow.task("job_key.task_key", params=None, upstream_task_values=None, capture_task_values=None) -> EphemeralJob`. `upstream_task_values` is `{upstream_task_key: {value_key: value}}`; `capture_task_values` is a list.
 - `lakeflow.schema(catalog=None)`: context manager yielding a temporary `catalog.schema` name. Needs `catalog`.
 - `lakeflow.ws`: the `WorkspaceClient`. `lakeflow.template(key)`: a fresh `JobSettings` copy.
-- `EphemeralJob.run(params=None, only=None, timeout=None) -> JobRun`. `only` takes task keys with `+key`, `key+`, `+key+`. Also `job_id`, `url`, `runs`.
+- `EphemeralJob.run(params=None, only=None, timeout=None, *, performance_target=None, queue=None) -> JobRun`. `only` takes task keys with `+key`, `key+`, `+key+`. `performance_target` (`"PERFORMANCE_OPTIMIZED"` or `"STANDARD"`) and `queue` (a bool) are keyword-only and apply to that run only. Also `job_id`, `url`, `runs`.
 - `JobRun`: `succeeded`, `failed`, `raise_for_failure()` (returns the run, or raises `LakeflowRunFailed` whose `run` is the run), `tasks`, `task(key)`, `skipped_tasks`, `injected_tasks`, `result_state`, `termination_code`, `termination_message`, `duration`, `run_id`, `run_url`.
 - `TaskRun`: `succeeded`, `ran`, `result_state`, `termination_code`, `termination_message`, `output`, `output_json`, `output_truncated`, `logs`, `log_lines`, `logs_truncated`, `error` (`type`, `message`, `trace`, `root_cause`, `code`), `raised(ExcType)`, `task_values`, `missing_task_values`, `duration`, `attempt`, `run_url`.
 - Flags: `--lakeflow-keep`, `--lakeflow-keep-failed`, `--no-lakeflow-keep-failed`, `--lakeflow-sweep`, `--lakeflow-destroy`. There are no ini options and no other fixtures.
