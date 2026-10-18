@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -12,6 +13,8 @@ from databricks.sdk.service import compute, jobs
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.helpers import KEYS_WIDGET, TASK_KEY_WIDGET, VALUES_WIDGET
 from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX
+
+log = logging.getLogger("pytest_databricks_lakeflow")
 
 STRIPPED = (
     "deployment",
@@ -32,6 +35,8 @@ RunAs = Literal["keep"] | str | jobs.JobRunAs | None
 MAX_NAME_BYTES = 4096
 MAX_TAG_BYTES = 256
 MAX_TAGS = 25
+MAX_DESCRIPTION_BYTES = 27700
+ATTRIBUTION_TAGS = ("pytest_ci_url", "pytest_user", "pytest_git_sha", "pytest_git_branch")
 NEWLINES = re.compile(r"[\r\n]+")
 ENV_KEY = f"{PREFIX}serverless"
 MAX_VALUE_CHARS = 49152
@@ -64,6 +69,7 @@ def sanitise(
     disable_auto_optimization: bool,
     performance_optimized: bool,
     run_as: RunAs = None,
+    description: str | None = None,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
@@ -74,18 +80,20 @@ def sanitise(
     Args:
         settings: A copy of a template. It is changed in place.
         name: The job name, without the `[pytest] ` prefix.
-        tags: Tags to add. Values are made acceptable as tag values.
+        tags: Tags to add. Values are made acceptable as tag values. The attribution tags in `ATTRIBUTION_TAGS`
+            are added only while the job has fewer than 25 tags, in that order; the others must fit.
         disable_auto_optimization: Stop serverless from retrying failed code tasks.
         performance_optimized: Override the performance target with `PERFORMANCE_OPTIMIZED`.
         run_as: `None` removes the template's `run_as`, so the job runs as its creator. `"keep"` keeps it. A
             `jobs.JobRunAs` replaces it. Any other string names a user when it contains `@`, and otherwise a
             service principal by its application id.
+        description: Put before the template's description, separated by a blank line.
 
     Returns:
         `settings`.
 
     Raises:
-        LakeflowError: If the job would have more than 25 tags.
+        LakeflowError: If the job would have more than 25 tags without the attribution tags.
     """
     for attr in STRIPPED:
         setattr(settings, attr, None)
@@ -100,12 +108,26 @@ def sanitise(
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
     settings.name = _trim(NAME_PREFIX + NEWLINES.sub(" ", name), MAX_NAME_BYTES)
-    settings.tags = {**(settings.tags or {}), **{key: tag_value(value) for key, value in tags.items()}}
+    if description is not None:
+        parts = [description, settings.description] if settings.description else [description]
+        settings.description = _trim("\n\n".join(parts), MAX_DESCRIPTION_BYTES)
+    required = {key: tag_value(value) for key, value in tags.items() if key not in ATTRIBUTION_TAGS}
+    settings.tags = {**(settings.tags or {}), **required}
     if len(settings.tags) > MAX_TAGS:
         raise LakeflowError(
             f"The job would have {len(settings.tags)} tags, more than the {MAX_TAGS} allowed. "
             f"Remove {len(settings.tags) - MAX_TAGS} from the template: {sorted(settings.tags)}"
         )
+    dropped = []
+    for key in ATTRIBUTION_TAGS:
+        if key not in tags:
+            continue
+        if key in settings.tags or len(settings.tags) < MAX_TAGS:
+            settings.tags[key] = tag_value(tags[key])
+        else:
+            dropped.append(key)
+    if dropped:
+        log.debug("Left out the tags %s, because the job already has %d tags", dropped, MAX_TAGS)
     return settings
 
 

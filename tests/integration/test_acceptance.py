@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
+from pathlib import Path
 
 import pytest
 from databricks.sdk.service import jobs
@@ -31,6 +33,12 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         transform = run.task("transform").parameters
         assert isinstance(transform, dict)
         assert transform["row_count"] == "7"
+        assert job.job_id is not None
+        settings = lakeflow.ws.jobs.get(job.job_id).settings
+        tags = (settings.tags if settings else None) or {}
+        assert tags["pytest_user"]
+        if (Path(__file__).parents[2] / ".git").exists():
+            assert re.fullmatch(r"[0-9a-f]{40}", tags["pytest_git_sha"])
 
 
 def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:

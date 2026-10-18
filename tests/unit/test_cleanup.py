@@ -118,6 +118,14 @@ def test_sweep_flag_sweeps_once_at_session_start(pytester: pytest.Pytester, fake
     assert fake_ws.jobs.list_calls == 1
 
 
+def test_sweep_reuses_the_user_from_setup(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.listed = sweep_candidates()
+    pytester.makepyfile(uses_lakeflow("a"))
+    pytester.runpytest("--lakeflow-sweep").assert_outcomes(passed=1)
+    assert fake_ws.jobs.deleted == [1, 2, 7]
+    assert fake_ws.current_user.me_calls == 1
+
+
 def test_sweep_uses_sweep_hours(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     fake_ws.jobs.listed = sweep_candidates()
     configure_lakeflow(pytester, "sweep_hours=0.5")

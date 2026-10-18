@@ -300,10 +300,14 @@ class Lakeflow:
                 "Pass performance_optimized=True to Lakeflow to run tests with PERFORMANCE_OPTIMIZED.",
                 stacklevel=3,
             )
+        attribution = dict(session.current().attribution)
+        if "pytest_user" not in attribution and (user := self._state().get("user")):
+            attribution["pytest_user"] = user
         sanitise(
             settings,
             name=name or item.nodeid,
-            tags={"pytest": "", "pytest_run_id": self.run_id, "pytest_nodeid": item.nodeid},
+            tags={"pytest": "", "pytest_run_id": self.run_id, "pytest_nodeid": item.nodeid, **attribution},
+            description=f"{item.nodeid} {attribution.get('pytest_ci_url', '')}".strip(),
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
             run_as=run_as,

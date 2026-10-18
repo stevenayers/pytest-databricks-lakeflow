@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -11,7 +12,7 @@ from databricks.sdk import WorkspaceClient
 from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 
-from .conftest import FakeCli, configure_lakeflow
+from .conftest import AZURE_DEVOPS, GITHUB, FakeCli, configure_lakeflow, git, make_repository, set_ci
 from .fakes import FakeWorkspaceClient, example_settings
 
 UNIT_TESTS = Path(__file__).parent
@@ -99,6 +100,63 @@ def test_random_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_id != session.resolve_run_id()
 
 
+def test_attribution_from_github(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {**AZURE_DEVOPS, **GITHUB})
+    assert session.resolve_attribution(tmp_path) == {
+        "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
+        "pytest_git_sha": "abc",
+        "pytest_git_branch": "main",
+        "pytest_user": "someone",
+    }
+    monkeypatch.setenv("GITHUB_HEAD_REF", "feature/x")
+    assert session.resolve_attribution(tmp_path)["pytest_git_branch"] == "feature/x"
+
+
+def test_attribution_from_azure_devops(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, AZURE_DEVOPS)
+    assert session.resolve_attribution(tmp_path) == {
+        "pytest_ci_url": "https://dev.azure.com/org/proj/_build/results?buildId=42",
+        "pytest_git_sha": "def",
+        "pytest_git_branch": "feature",
+        "pytest_user": "person@example.com",
+    }
+
+
+def test_attribution_quotes_the_azure_devops_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {**AZURE_DEVOPS, "SYSTEM_TEAMPROJECT": "My Project"})
+    url = session.resolve_attribution(tmp_path)["pytest_ci_url"]
+    assert url == "https://dev.azure.com/org/My%20Project/_build/results?buildId=42"
+
+
+def test_attribution_from_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    sha = make_repository(tmp_path)
+    assert session.resolve_attribution(tmp_path) == {"pytest_git_sha": sha, "pytest_git_branch": "topic"}
+
+
+def test_attribution_on_a_detached_head_has_no_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    sha = make_repository(tmp_path)
+    git(tmp_path, "checkout", "-q", "--detach")
+    assert session.resolve_attribution(tmp_path) == {"pytest_git_sha": sha}
+
+
+def test_attribution_without_git_is_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    assert session.resolve_attribution(tmp_path) == {}
+
+
+def test_attribution_outside_a_repository_is_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    assert session.resolve_attribution(tmp_path) == {}
+
+
 def test_client_construction_retries_token_contention(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts: list[str | None] = []
     sleeps: list[float] = []
@@ -173,6 +231,7 @@ def test_setup_with_deploy(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bund
         "templates": {"my_job": example_settings().as_dict()},
         "template_errors": {},
         "helpers": {"set_values": f"{folder}/set_values", "get_values": f"{folder}/get_values"},
+        "user": "someone@example.com",
     }
     assert set(fake_ws.workspace.uploads) == {f"{folder}/set_values", f"{folder}/get_values"}
     assert all(upload["overwrite"] for upload in fake_ws.workspace.uploads.values())
@@ -473,3 +532,49 @@ def test_xdist_workers_share_each_bundle_target(pytester: pytest.Pytester, bundl
     calls = log.read_text().splitlines()
     assert calls.count(" ".join(DEPLOY)) == 1
     assert calls.count(" ".join(DEPLOY_STAGING)) == 1
+
+
+GIT_LOGGING = """
+
+import os
+import subprocess
+
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    _run = subprocess.run
+
+    def logged_run(args, *rest, **kwargs):
+        if args and args[0] == "git":
+            with open({calls!r}, "a") as f:
+                f.write(" ".join(args) + "\\n")
+        return _run(args, *rest, **kwargs)
+
+    subprocess.run = logged_run
+"""
+
+
+def test_xdist_workers_share_attribution(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, bundle_dir: Path
+) -> None:
+    pytest.importorskip("xdist")
+    set_ci(monkeypatch, {})
+    sha = make_repository(pytester.path)
+    calls = pytester.path / "git.log"
+    make_xdist_conftest(pytester, GIT_LOGGING.format(calls=str(calls)))
+    tags = pytester.path / "tags.log"
+    test = (
+        "def test_{i}(lakeflow):\n"
+        "    with lakeflow.job('my_job'):\n"
+        "        pass\n"
+        f"    with open({str(tags)!r}, 'a') as f:\n"
+        "        tags = lakeflow.ws.jobs.created[-1]['tags']\n"
+        "        f.write(json.dumps({{**tags, 'worker': os.environ['PYTEST_XDIST_WORKER']}}) + '\\n')\n"
+    )
+    pytester.makepyfile("import json\nimport os\n\n" + "\n".join(test.format(i=i) for i in range(6)))
+    pytester.runpytest("-n", "2").assert_outcomes(passed=6)
+    created = [json.loads(line) for line in tags.read_text().splitlines()]
+    assert len(created) == 6
+    assert {t["worker"] for t in created} == {"gw0", "gw1"}
+    assert {t["pytest_git_sha"] for t in created} == {sha}
+    assert {t["pytest_git_branch"] for t in created} == {"topic"}
+    assert {t["pytest_user"] for t in created} == {"someone@example.com"}
+    assert not calls.exists(), calls.read_text()

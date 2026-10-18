@@ -35,8 +35,8 @@ dbutils.notebook.exit(json.dumps({{
 NOTEBOOKS = {"set_values": SET_VALUES, "get_values": GET_VALUES}
 
 
-def default_folder(ws: WorkspaceClient) -> str:
-    return f"/Users/{ws.current_user.me().user_name}/.pytest-databricks-lakeflow"
+def default_folder(user: str | None) -> str:
+    return f"/Users/{user}/.pytest-databricks-lakeflow"
 
 
 def upload(ws: WorkspaceClient, folder: str) -> dict[str, str]:

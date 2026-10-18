@@ -239,6 +239,8 @@ One worker deploys the bundle and loads the templates while the others wait, the
 - `--no-lakeflow-keep-failed` deletes jobs even when their test fails, for CI.
 - `--lakeflow-sweep` deletes the jobs you kept earlier, once they are older than `sweep_hours`.
 
+A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pytest_git_sha` tags, and the test node id and CI run URL in its description.
+
 Every kept job and schema is listed in a `lakeflow` block at the end of the run, with a hint to run `pytest --lakeflow-sweep` when jobs were kept, so you do not need `--log-cli-level` to find them.
 
 ## Change the settings before the job is created

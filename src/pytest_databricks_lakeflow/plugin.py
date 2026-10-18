@@ -12,7 +12,13 @@ from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.client import Lakeflow
 from pytest_databricks_lakeflow.ephemeral import REPORTS, cancel_run
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
-from pytest_databricks_lakeflow.session import SessionState, activate, deactivate, resolve_run_id
+from pytest_databricks_lakeflow.session import (
+    SessionState,
+    activate,
+    deactivate,
+    resolve_attribution,
+    resolve_run_id,
+)
 
 STATE = pytest.StashKey[SessionState]()
 
@@ -46,9 +52,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     workerinput: dict[str, Any] = getattr(config, "workerinput", {})
     state_dir = workerinput.get("lakeflow_state_dir")
+    attribution = workerinput.get("lakeflow_attribution")
     state = SessionState(
         rootpath=config.rootpath,
         run_id=workerinput.get("lakeflow_run_id") or resolve_run_id(),
+        attribution=resolve_attribution(config.rootpath) if attribution is None else attribution,
         state_dir=Path(state_dir) if state_dir else None,
         keep=config.getoption("lakeflow_keep"),
         keep_failed=config.getoption("lakeflow_keep_failed"),
@@ -74,6 +82,7 @@ def pytest_configure_node(node: Any) -> None:
     if state.worker_dir is None:
         state.worker_dir = Path(tempfile.mkdtemp(prefix="pytest-lakeflow-"))
     node.workerinput["lakeflow_run_id"] = state.run_id
+    node.workerinput["lakeflow_attribution"] = state.attribution
     node.workerinput["lakeflow_state_dir"] = str(state.worker_dir)
 
 

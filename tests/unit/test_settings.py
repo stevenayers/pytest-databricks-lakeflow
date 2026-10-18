@@ -118,6 +118,105 @@ def test_too_many_tags() -> None:
         sanitised(settings)
 
 
+ATTRIBUTION = {
+    "pytest_git_branch": "main",
+    "pytest_git_sha": "abc",
+    "pytest_user": "someone",
+    "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
+}
+
+
+def test_attribution_tags_are_added() -> None:
+    settings = sanitise(
+        example_settings(),
+        "tests/test_x.py::test_y",
+        {**TAGS, **ATTRIBUTION},
+        disable_auto_optimization=True,
+        performance_optimized=False,
+    )
+    assert settings.tags == {"dev": "someone", "purpose": "pytest", **TAGS, **ATTRIBUTION}
+
+
+def test_attribution_tags_fit_within_the_cap(caplog: pytest.LogCaptureFixture) -> None:
+    settings = example_settings()
+    settings.tags = {f"t{i}": "" for i in range(20)}
+    caplog.set_level("DEBUG", logger="pytest_databricks_lakeflow")
+    sanitised_settings = sanitise(
+        settings,
+        "tests/test_x.py::test_y",
+        {**TAGS, **ATTRIBUTION},
+        disable_auto_optimization=True,
+        performance_optimized=False,
+    )
+    tags = sanitised_settings.tags or {}
+    assert len(tags) == 25
+    assert {key for key in tags if key in ATTRIBUTION} == {"pytest_ci_url", "pytest_user"}
+    assert "pytest_git_sha" in caplog.text and "pytest_git_branch" in caplog.text
+
+
+def test_attribution_tags_never_push_out_the_required_tags() -> None:
+    settings = example_settings()
+    settings.tags = {f"t{i}": "" for i in range(22)}
+    tags = sanitise(
+        settings,
+        "tests/test_x.py::test_y",
+        {**TAGS, **ATTRIBUTION},
+        disable_auto_optimization=True,
+        performance_optimized=False,
+    ).tags
+    assert tags is not None
+    assert len(tags) == 25
+    assert set(TAGS) <= set(tags)
+    assert not set(ATTRIBUTION) & set(tags)
+    settings.tags = {f"t{i}": "" for i in range(23)}
+    with pytest.raises(LakeflowError, match="26 tags, more than the 25 allowed. Remove 1"):
+        sanitise(
+            settings,
+            "tests/test_x.py::test_y",
+            {**TAGS, **ATTRIBUTION},
+            disable_auto_optimization=True,
+            performance_optimized=False,
+        )
+
+
+def test_attribution_values_are_made_acceptable() -> None:
+    tags = sanitise(
+        example_settings(),
+        "tests/test_x.py::test_y",
+        {**TAGS, "pytest_git_branch": "feature/中\nx" + "y" * 300},
+        disable_auto_optimization=True,
+        performance_optimized=False,
+    ).tags
+    assert tags is not None
+    branch = tags["pytest_git_branch"]
+    assert branch.startswith("feature/? x")
+    assert len(branch.encode()) <= 256
+    branch.encode("latin-1")
+
+
+def test_description_prepends_the_test() -> None:
+    settings = example_settings()
+    settings.description = "The bundle's job."
+    described = sanitised(settings, description="tests/test_x.py::test_y https://github.com/o/r/actions/runs/9")
+    assert described.description == (
+        "tests/test_x.py::test_y https://github.com/o/r/actions/runs/9\n\nThe bundle's job."
+    )
+
+
+def test_description_without_ci_url() -> None:
+    assert sanitised(description="tests/test_x.py::test_y").description == "tests/test_x.py::test_y"
+    assert sanitised().description is None
+
+
+def test_long_descriptions_are_trimmed() -> None:
+    settings = example_settings()
+    settings.description = "中" * 20000
+    description = sanitised(settings, description="tests/test_x.py::test_y").description
+    assert description is not None
+    assert len(description.encode()) <= 27700
+    assert description.startswith("tests/test_x.py::test_y\n\n中")
+
+
 def test_create_kwargs() -> None:
     settings = sanitised()
     settings.triggers = []

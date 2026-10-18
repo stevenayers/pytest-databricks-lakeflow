@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -28,6 +30,12 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 
 RUN_ID_VARIABLES = ("LAKEFLOW_RUN_ID", "GITHUB_RUN_ID", "BUILD_BUILDID")
+GITHUB_URL_VARIABLES = ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")
+AZURE_DEVOPS_URL_VARIABLES = ("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI", "SYSTEM_TEAMPROJECT", "BUILD_BUILDID")
+SHA_VARIABLES = ("GITHUB_SHA", "BUILD_SOURCEVERSION")
+BRANCH_VARIABLES = ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "BUILD_SOURCEBRANCHNAME")
+USER_VARIABLES = ("GITHUB_ACTOR", "BUILD_REQUESTEDFOREMAIL")
+GIT_TIMEOUT_SECONDS = 10
 CLIENT_ATTEMPTS = 4
 
 
@@ -54,6 +62,8 @@ class SessionState:
     Attributes:
         rootpath: The pytest rootdir, against which relative bundle roots are resolved.
         run_id: The id of this test session, the same in every xdist worker.
+        attribution: The `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` tags that could be
+            resolved, the same in every xdist worker.
         state_dir: A directory shared by the session's xdist workers, or `None` without xdist.
         keep: Whether `--lakeflow-keep` is set.
         keep_failed: `True` for `--lakeflow-keep-failed`, `False` for `--no-lakeflow-keep-failed`, or `None`.
@@ -72,6 +82,7 @@ class SessionState:
 
     rootpath: Path
     run_id: str
+    attribution: dict[str, str] = field(default_factory=dict)
     state_dir: Path | None = None
     keep: bool = False
     keep_failed: bool | None = None
@@ -113,7 +124,8 @@ class SessionState:
             sweep_hours: The age after which leftover jobs are swept.
 
         Returns:
-            The target's state: its job templates, the errors of jobs that cannot be used, and the helper paths.
+            The target's state: its job templates, the errors of jobs that cannot be used, the helper paths, and the
+                workspace user.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -128,15 +140,16 @@ class SessionState:
                 return setup(ws, key)
 
             try:
-                self.setups[key] = shared_state(path, produce)
+                produced_state = shared_state(path, produce)
             except Exception as e:
                 self.setups[key] = e
                 raise
+            self.setups[key] = produced_state
             if key.sync == "deploy":
                 self.deployed.append((str(key.root), key.target, key.profile))
             if produced and self.sweep and not self.swept:
                 self.swept = True
-                sweep(ws, self.run_id, sweep_hours)
+                sweep(ws, self.run_id, sweep_hours, user=produced_state.get("user"))
         state = self.setups[key]
         if isinstance(state, Exception):
             raise LakeflowError(
@@ -195,6 +208,55 @@ def resolve_run_id() -> str:
         if value := os.environ.get(name):
             return value
     return secrets.token_hex(4)
+
+
+def resolve_attribution(rootpath: Path) -> dict[str, str]:
+    """Find out which CI run, commit, branch and person a session belongs to, for tagging ephemeral jobs.
+
+    Reads the GitHub Actions and Azure DevOps variables, and falls back to `git` in `rootpath` for the commit and
+    branch. Errors from `git`, including a missing `git`, are ignored, and a detached HEAD has no branch.
+
+    Args:
+        rootpath: The pytest rootdir.
+
+    Returns:
+        The `pytest_ci_url`, `pytest_git_sha`, `pytest_git_branch` and `pytest_user` tags that have a value.
+    """
+    env = os.environ
+    ci_url = None
+    if all(env.get(name) for name in GITHUB_URL_VARIABLES):
+        server, repository, run_id = (env[name] for name in GITHUB_URL_VARIABLES)
+        ci_url = f"{server.rstrip('/')}/{repository}/actions/runs/{run_id}"
+    elif all(env.get(name) for name in AZURE_DEVOPS_URL_VARIABLES):
+        collection, project, build_id = (env[name] for name in AZURE_DEVOPS_URL_VARIABLES)
+        ci_url = f"{collection}{urllib.parse.quote(project)}/_build/results?buildId={build_id}"
+    attribution = {
+        "pytest_ci_url": ci_url,
+        "pytest_git_sha": _first(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
+        "pytest_git_branch": _first(BRANCH_VARIABLES) or _git_branch(rootpath),
+        "pytest_user": _first(USER_VARIABLES),
+    }
+    return {key: value for key, value in attribution.items() if value}
+
+
+def _first(names: tuple[str, ...]) -> str | None:
+    return next((value for name in names if (value := os.environ.get(name))), None)
+
+
+def _git_branch(cwd: Path) -> str | None:
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    return None if branch == "HEAD" else branch
+
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT_SECONDS
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log.debug("git %s failed: %s", " ".join(args), e)
+        return None
+    return result.stdout.strip() or None
 
 
 def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
@@ -271,8 +333,9 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
             bundle.sync(root, key.target, key.profile)
         config = bundle.validate(root, key.target, key.profile)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
-    folder = key.helpers_path or helpers.default_folder(ws)
-    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder)}
+    user = ws.current_user.me().user_name
+    folder = key.helpers_path or helpers.default_folder(user)
+    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder), "user": user}
     log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
     return state
 
@@ -322,18 +385,19 @@ def exists(ws: WorkspaceClient, path: str) -> bool:
     return True
 
 
-def sweep(ws: WorkspaceClient, run_id: str, hours: float) -> list[int]:
+def sweep(ws: WorkspaceClient, run_id: str, hours: float, user: str | None = None) -> list[int]:
     """Delete this user's ephemeral jobs from other runs that are older than `hours`.
 
     Args:
         ws: The workspace client.
         run_id: The id of this run, whose jobs are kept.
         hours: The age after which a job is deleted.
+        user: The workspace user whose jobs are swept. Looked up when not given.
 
     Returns:
         The ids of the deleted jobs.
     """
-    me = ws.current_user.me().user_name
+    me = user or ws.current_user.me().user_name
     cutoff = (time.time() - hours * 3600) * 1000
     stale = [
         job.job_id
