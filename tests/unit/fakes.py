@@ -189,20 +189,33 @@ def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
     return jobs.Run.from_dict(data["run"]), outputs
 
 
-def make_run(run_id: int, states: dict[str, str], result_state: str = "SUCCESS", code: str = "SUCCESS") -> jobs.Run:
-    """Build a terminated run whose tasks ended in `states`, keyed by task key."""
+def make_run(
+    run_id: int,
+    states: dict[str, str],
+    result_state: str = "SUCCESS",
+    code: str = "SUCCESS",
+    attempts: Mapping[str, Sequence[str]] | None = None,
+) -> jobs.Run:
+    """Build a terminated run whose tasks ended in `states`, keyed by task key.
+
+    `attempts` gives the state of every attempt of the tasks it names, in order, numbered from attempt 0. Task run
+    ids are `run_id * 100` plus the position of the attempt among all task runs.
+    """
+    by_key = {key: [state] for key, state in states.items()} | {key: list(s) for key, s in (attempts or {}).items()}
+    numbered = itertools.count()
     tasks = [
         jobs.RunTask(
             task_key=key,
-            run_id=run_id * 100 + index,
-            attempt_number=0,
+            run_id=(task_run_id := run_id * 100 + next(numbered)),
+            attempt_number=attempt,
             state=jobs.RunState(result_state=jobs.RunResultState(state)),
             status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
-            run_page_url=f"{HOST}/jobs/runs/{run_id * 100 + index}",
+            run_page_url=f"{HOST}/jobs/runs/{task_run_id}",
             start_time=1_000,
             end_time=3_000,
         )
-        for index, (key, state) in enumerate(states.items())
+        for key, key_states in by_key.items()
+        for attempt, state in enumerate(key_states)
     ]
     return jobs.Run(
         run_id=run_id,
@@ -221,6 +234,7 @@ def _details(state: str) -> jobs.TerminationDetails:
         "UPSTREAM_FAILED": "SKIPPED",
         "CANCELED": "USER_CANCELED",
         "EXCLUDED": "SKIPPED",
+        "TIMEDOUT": "RUN_EXECUTION_ERROR",
     }
     return jobs.TerminationDetails(code=jobs.TerminationCodeCode(codes.get(state, state)))
 

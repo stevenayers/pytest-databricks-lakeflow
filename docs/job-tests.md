@@ -43,7 +43,7 @@ A string that contains `@` names a user and any other string names a service pri
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
-- `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised.
+- `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. A `timeout` longer than that raises `LakeflowError` before the run starts; pass a longer `Lakeflow(timeout=...)` instead.
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
 
@@ -74,7 +74,7 @@ Do not use `run.result_state`, the parent run's state, as the verdict. A job wit
 
 Each `TaskRun` has:
 
-- `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`.
+- `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`. `timed_out` is true when the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`.
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
@@ -82,6 +82,9 @@ Each `TaskRun` has:
 - `task_values` and `missing_task_values`, task values captured by a probe.
 - `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. The platform gives job parameters precedence over task parameters with the same key, so check the value here rather than assume which one the task received.
 - `duration`, `attempt` and `run_url`.
+- `attempts`, one `TaskRun` per attempt in attempt order, when the platform retried the task. The task itself describes the last attempt, and `attempts[-1]` equals it apart from `attempts`. Each element has its own `run_id`, `error` and `output`, and an empty `attempts`.
+
+`run.timed_out` is true when the parent run ended `TIMEDOUT` or any task in `run.tasks` timed out. Such a run has failed, and `repr(run)` lists a timed-out task without an error as `load: TIMEDOUT`.
 
 A failure test reads like this:
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +235,52 @@ def test_timeout_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspace
     )
     result.assert_outcomes(passed=1)
     assert fake_ws.jobs.cancelled == [77]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "job_timeout"),
+    [pytest.param(None, 1860, id="default"), pytest.param("timeout=timedelta(minutes=1)", 120, id="one-minute")],
+)
+def test_run_timeout_longer_than_the_job_fails_clearly(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str | None, job_timeout: int
+) -> None:
+    if arguments is not None:
+        configure_lakeflow(pytester, arguments)
+    result = run_tests(
+        pytester,
+        f"""
+        from datetime import timedelta
+
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowError
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowError, match=r"Lakeflow\\(timeout") as e:
+                    job.run(timeout=timedelta(hours=1))
+            assert "1:00:00" in str(e.value)
+            assert "{timedelta(seconds=job_timeout)}" in str(e.value)
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.run_now_calls == []
+    assert fake_ws.jobs.created[0]["timeout_seconds"] == job_timeout
+
+
+def test_run_timeout_within_the_job_timeout_runs(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        from datetime import timedelta
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                assert job.run(timeout=timedelta(minutes=31)).succeeded
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.created[0]["timeout_seconds"] == 1860
 
 
 def test_exit_cancels_active_runs(
