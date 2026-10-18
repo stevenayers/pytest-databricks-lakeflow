@@ -217,14 +217,21 @@ def pipeline_params(
 
     Raises:
         LakeflowError: If an argument is set and no task, nested `for_each_task` tasks included, is a pipeline task,
-            or a selection is set and the installed databricks-sdk cannot send it.
+            a selection is a string rather than a list of table names, or a selection is set and the installed
+            databricks-sdk cannot send it.
     """
     selections = {"full_refresh_selection": full_refresh_selection, "refresh_selection": refresh_selection}
     if full_refresh is None and all(value is None for value in selections.values()):
         return None
+    for key, value in selections.items():
+        if isinstance(value, str):
+            raise LakeflowError(f"{key} must be a list of table names, not a string: {value!r}")
     unsupported = sorted(k for k, v in selections.items() if v is not None and k not in PIPELINE_PARAMS_FIELDS)
     if unsupported:
-        raise LakeflowError(f"{unsupported} need databricks-sdk 0.110.0 or later. Upgrade databricks-sdk to pass them.")
+        raise LakeflowError(
+            f"full_refresh_selection and refresh_selection need databricks-sdk 0.110.0 or later; got {unsupported}. "
+            "Upgrade databricks-sdk to pass them."
+        )
     if not any(task.pipeline_task for task in _with_nested(settings.tasks)):
         keys = sorted(task.task_key for task in settings.tasks or [] if task.task_key)
         raise LakeflowError(

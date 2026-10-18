@@ -217,7 +217,7 @@ def test_full_refresh(lakeflow: Lakeflow) -> None:
         assert job.run(refresh_selection=["bronze_orders"]).succeeded
 ```
 
-They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, and need databricks-sdk 0.110.0 or later. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
+They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, and need databricks-sdk 0.110.0 or later. A bare string in place of the list raises `LakeflowError`. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
 
 The pipeline is the deployed one, not a copy: every test that runs it updates the same pipeline and its tables, and the options apply to every pipeline task in the run.
 

@@ -20,6 +20,7 @@ from pytest_databricks_lakeflow.settings import (
     tag_value,
 )
 
+from .conftest import NEEDS_REFRESH_SELECTION
 from .fakes import example_settings, pipeline_settings, reporting_settings
 
 CLUSTER = "0123-456789-abcdef"
@@ -520,13 +521,7 @@ def test_pipeline_params_full_refresh() -> None:
     assert refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
 
 
-SELECTIONS = pytest.mark.skipif(
-    "refresh_selection" not in jobs.PipelineParams.__dataclass_fields__,
-    reason="this databricks-sdk has no PipelineParams.refresh_selection",
-)
-
-
-@SELECTIONS
+@NEEDS_REFRESH_SELECTION
 def test_pipeline_params_selections() -> None:
     assert refresh(pipeline_settings(), refresh_selection=["bronze_orders"]) == jobs.PipelineParams(
         refresh_selection=["bronze_orders"]
@@ -544,8 +539,18 @@ def test_pipeline_params_none_without_arguments() -> None:
 def test_pipeline_params_selections_need_a_recent_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings_module, "PIPELINE_PARAMS_FIELDS", frozenset({"full_refresh"}))
     assert refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
-    with pytest.raises(LakeflowError, match=r"\['refresh_selection'\] need databricks-sdk 0.110.0 or later"):
+    message = (
+        r"full_refresh_selection and refresh_selection need databricks-sdk 0.110.0 or later; "
+        r"got \['refresh_selection'\]"
+    )
+    with pytest.raises(LakeflowError, match=message):
         refresh(pipeline_settings(), refresh_selection=["bronze"])
+
+
+@pytest.mark.parametrize("name", ["full_refresh_selection", "refresh_selection"])
+def test_pipeline_params_reject_a_bare_string_selection(name: str) -> None:
+    with pytest.raises(LakeflowError, match=rf"{name} must be a list of table names, not a string: 'bronze'"):
+        refresh(pipeline_settings(), **{name: "bronze"})
 
 
 def test_pipeline_params_need_a_pipeline_task() -> None:
