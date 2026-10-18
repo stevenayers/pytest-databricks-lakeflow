@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -99,6 +100,88 @@ def test_random_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_id != session.resolve_run_id()
 
 
+GITHUB = {
+    "GITHUB_SERVER_URL": "https://github.com",
+    "GITHUB_REPOSITORY": "o/r",
+    "GITHUB_RUN_ID": "9",
+    "GITHUB_SHA": "abc",
+    "GITHUB_REF_NAME": "main",
+    "GITHUB_ACTOR": "someone",
+}
+AZURE_DEVOPS = {
+    "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI": "https://dev.azure.com/org/",
+    "SYSTEM_TEAMPROJECT": "proj",
+    "BUILD_BUILDID": "42",
+    "BUILD_SOURCEVERSION": "def",
+    "BUILD_SOURCEBRANCHNAME": "feature",
+    "BUILD_REQUESTEDFOREMAIL": "person@example.com",
+}
+
+
+def set_ci(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """Clear every CI variable that attribution reads, then set `env`."""
+    for name in session.ATTRIBUTION_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_attribution_from_github(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {**AZURE_DEVOPS, **GITHUB})
+    assert session.resolve_attribution(tmp_path) == {
+        "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
+        "pytest_git_sha": "abc",
+        "pytest_git_branch": "main",
+        "pytest_user": "someone",
+    }
+    monkeypatch.setenv("GITHUB_HEAD_REF", "feature/x")
+    assert session.resolve_attribution(tmp_path)["pytest_git_branch"] == "feature/x"
+
+
+def test_attribution_from_azure_devops(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, AZURE_DEVOPS)
+    assert session.resolve_attribution(tmp_path) == {
+        "pytest_ci_url": "https://dev.azure.com/org/proj/_build/results?buildId=42",
+        "pytest_git_sha": "def",
+        "pytest_git_branch": "feature",
+        "pytest_user": "person@example.com",
+    }
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def make_repository(path: Path, branch: str = "topic") -> str:
+    """Make a git repository in `path` with one empty commit on `branch`, and return the commit's sha."""
+    git(path, "init", "-q")
+    git(path, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x")
+    git(path, "checkout", "-q", "-b", branch)
+    return git(path, "rev-parse", "HEAD")
+
+
+def test_attribution_from_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    sha = make_repository(tmp_path)
+    assert session.resolve_attribution(tmp_path) == {"pytest_git_sha": sha, "pytest_git_branch": "topic"}
+
+
+def test_attribution_without_git_is_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+
+    def missing(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    assert session.resolve_attribution(tmp_path) == {}
+
+
+def test_attribution_outside_a_repository_is_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    assert session.resolve_attribution(tmp_path) == {}
+
+
 def test_client_construction_retries_token_contention(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts: list[str | None] = []
     sleeps: list[float] = []
@@ -173,6 +256,7 @@ def test_setup_with_deploy(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bund
         "templates": {"my_job": example_settings().as_dict()},
         "template_errors": {},
         "helpers": {"set_values": f"{folder}/set_values", "get_values": f"{folder}/get_values"},
+        "user": "someone@example.com",
     }
     assert set(fake_ws.workspace.uploads) == {f"{folder}/set_values", f"{folder}/get_values"}
     assert all(upload["overwrite"] for upload in fake_ws.workspace.uploads.values())
@@ -473,3 +557,47 @@ def test_xdist_workers_share_each_bundle_target(pytester: pytest.Pytester, bundl
     calls = log.read_text().splitlines()
     assert calls.count(" ".join(DEPLOY)) == 1
     assert calls.count(" ".join(DEPLOY_STAGING)) == 1
+
+
+GIT_LOGGING = """
+
+import os
+import subprocess
+
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    _run = subprocess.run
+
+    def logged_run(args, *rest, **kwargs):
+        if args and args[0] == "git":
+            with open({calls!r}, "a") as f:
+                f.write(" ".join(args) + "\\n")
+        return _run(args, *rest, **kwargs)
+
+    subprocess.run = logged_run
+"""
+
+
+def test_xdist_workers_share_attribution(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, bundle_dir: Path
+) -> None:
+    pytest.importorskip("xdist")
+    set_ci(monkeypatch, {})
+    sha = make_repository(pytester.path)
+    calls = pytester.path / "git.log"
+    make_xdist_conftest(pytester, GIT_LOGGING.format(calls=str(calls)))
+    tags = pytester.path / "tags.log"
+    test = (
+        "def test_{i}(lakeflow):\n"
+        "    with lakeflow.job('my_job'):\n"
+        "        pass\n"
+        f"    with open({str(tags)!r}, 'a') as f:\n"
+        "        f.write(json.dumps(lakeflow.ws.jobs.created[-1]['tags']) + '\\n')\n"
+    )
+    pytester.makepyfile("import json\n\n" + "\n".join(test.format(i=i) for i in range(6)))
+    pytester.runpytest("-n", "2").assert_outcomes(passed=6)
+    created = [json.loads(line) for line in tags.read_text().splitlines()]
+    assert len(created) == 6
+    assert {t["pytest_git_sha"] for t in created} == {sha}
+    assert {t["pytest_git_branch"] for t in created} == {"topic"}
+    assert {t["pytest_user"] for t in created} == {"someone@example.com"}
+    assert not calls.exists(), calls.read_text()

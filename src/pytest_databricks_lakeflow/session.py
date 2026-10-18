@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,17 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 
 RUN_ID_VARIABLES = ("LAKEFLOW_RUN_ID", "GITHUB_RUN_ID", "BUILD_BUILDID")
+GITHUB_URL_VARIABLES = ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID")
+AZURE_DEVOPS_URL_VARIABLES = ("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI", "SYSTEM_TEAMPROJECT", "BUILD_BUILDID")
+SHA_VARIABLES = ("GITHUB_SHA", "BUILD_SOURCEVERSION")
+BRANCH_VARIABLES = ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "BUILD_SOURCEBRANCHNAME")
+USER_VARIABLES = ("GITHUB_ACTOR", "BUILD_REQUESTEDFOREMAIL")
+ATTRIBUTION_VARIABLES = tuple(
+    dict.fromkeys(
+        (*GITHUB_URL_VARIABLES, *AZURE_DEVOPS_URL_VARIABLES, *SHA_VARIABLES, *BRANCH_VARIABLES, *USER_VARIABLES)
+    )
+)
+GIT_TIMEOUT_SECONDS = 10
 CLIENT_ATTEMPTS = 4
 
 
@@ -54,6 +66,8 @@ class SessionState:
     Attributes:
         rootpath: The pytest rootdir, against which relative bundle roots are resolved.
         run_id: The id of this test session, the same in every xdist worker.
+        attribution: The `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` tags that could be
+            resolved, the same in every xdist worker.
         state_dir: A directory shared by the session's xdist workers, or `None` without xdist.
         keep: Whether `--lakeflow-keep` is set.
         keep_failed: `True` for `--lakeflow-keep-failed`, `False` for `--no-lakeflow-keep-failed`, or `None`.
@@ -72,6 +86,7 @@ class SessionState:
 
     rootpath: Path
     run_id: str
+    attribution: dict[str, str] = field(default_factory=dict)
     state_dir: Path | None = None
     keep: bool = False
     keep_failed: bool | None = None
@@ -197,6 +212,50 @@ def resolve_run_id() -> str:
     return secrets.token_hex(4)
 
 
+def resolve_attribution(rootpath: Path) -> dict[str, str]:
+    """Find out which CI run, commit, branch and person a session belongs to, for tagging ephemeral jobs.
+
+    Reads the GitHub Actions and Azure DevOps variables, and falls back to `git` in `rootpath` for the commit and
+    branch. Errors from `git`, including a missing `git`, are ignored.
+
+    Args:
+        rootpath: The pytest rootdir.
+
+    Returns:
+        The `pytest_ci_url`, `pytest_git_sha`, `pytest_git_branch` and `pytest_user` tags that have a value.
+    """
+    env = os.environ
+    ci_url = None
+    if all(env.get(name) for name in GITHUB_URL_VARIABLES):
+        server, repository, run_id = (env[name] for name in GITHUB_URL_VARIABLES)
+        ci_url = f"{server.rstrip('/')}/{repository}/actions/runs/{run_id}"
+    elif all(env.get(name) for name in AZURE_DEVOPS_URL_VARIABLES):
+        collection, project, build_id = (env[name] for name in AZURE_DEVOPS_URL_VARIABLES)
+        ci_url = f"{collection}{project}/_build/results?buildId={build_id}"
+    attribution = {
+        "pytest_ci_url": ci_url,
+        "pytest_git_sha": _first(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
+        "pytest_git_branch": _first(BRANCH_VARIABLES) or _git(rootpath, "rev-parse", "--abbrev-ref", "HEAD"),
+        "pytest_user": _first(USER_VARIABLES),
+    }
+    return {key: value for key, value in attribution.items() if value}
+
+
+def _first(names: tuple[str, ...]) -> str | None:
+    return next((value for name in names if (value := os.environ.get(name))), None)
+
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT_SECONDS
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log.debug("git %s failed: %s", " ".join(args), e)
+        return None
+    return result.stdout.strip() or None
+
+
 def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
     """Find the bundle root.
 
@@ -271,8 +330,9 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
             bundle.sync(root, key.target, key.profile)
         config = bundle.validate(root, key.target, key.profile)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
-    folder = key.helpers_path or helpers.default_folder(ws)
-    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder)}
+    user = ws.current_user.me().user_name
+    folder = key.helpers_path or helpers.default_folder(user)
+    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder), "user": user}
     log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
     return state
 

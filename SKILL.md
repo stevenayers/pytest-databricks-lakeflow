@@ -101,6 +101,6 @@ pytest tests/ --lakeflow-keep               # keep jobs and schemas to inspect
 pytest tests/ --lakeflow-sweep              # delete leftovers from earlier runs first
 ```
 
-Kept jobs and schemas are listed in a `lakeflow` block at the end of the run.
+Kept jobs and schemas are listed in a `lakeflow` block at the end of the run. Every ephemeral job is tagged `pytest`, `pytest_run_id` and `pytest_nodeid`, plus `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` when they can be resolved.
 
 Needs the Databricks CLI v1.7.0 or later on `PATH`, credentials for the CLI and the SDK, and serverless jobs (or `helpers_compute="<job_cluster_key>"`).
