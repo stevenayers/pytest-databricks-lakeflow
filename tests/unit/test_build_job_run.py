@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from datetime import timedelta
 from typing import Any, cast
 
@@ -128,7 +129,8 @@ def test_unreadable_probe_output() -> None:
     assert run.tasks is not None
     notebook = jobs.NotebookOutput(result='{"values": {"k": "', truncated=True)
     ws.jobs.outputs[run.tasks[1].run_id or 0] = jobs.RunOutput(notebook_output=notebook)
-    result = build_from(ws, run, capture_task_values={"transform": ["k"]})
+    with pytest.warns(UserWarning, match="__pytest_probe__transform"):
+        result = build_from(ws, run, capture_task_values={"transform": ["k"]})
     with pytest.raises(KeyError, match=r"returned unreadable output \(truncated\)"):
         result.task("transform").task_values["k"]
 
@@ -151,3 +153,50 @@ def test_untaken_branches_do_not_fail_the_run() -> None:
     assert result.succeeded
     assert result.task("on_false").result_state == "EXCLUDED"
     assert repr(result).endswith("failing=[])")
+
+
+def test_output_json_of_a_recorded_run() -> None:
+    run, _ = build("probe_failure")
+    assert run.task("extract").output_json == {"task": "extract", "marker": "extract"}
+
+
+def test_truncated_output_warns() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"extract": "SUCCESS", "transform": "SUCCESS"})
+    assert run.tasks is not None
+    notebook = jobs.NotebookOutput(result="x", truncated=True)
+    ws.jobs.outputs[run.tasks[1].run_id or 0] = jobs.RunOutput(notebook_output=notebook)
+    with pytest.warns(UserWarning, match="transform") as record:
+        result = build_from(ws, run)
+    assert len(record) == 1
+    assert "5 MB" in str(record[0].message)
+    assert "extract" not in str(record[0].message)
+    assert result.task("transform").output_truncated
+
+
+def test_truncated_logs_warn() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"my_wheel_task": "SUCCESS"})
+    assert run.tasks is not None
+    ws.jobs.outputs[run.tasks[0].run_id or 0] = jobs.RunOutput(logs="tail", logs_truncated=True)
+    with pytest.warns(UserWarning, match="my_wheel_task.*5 MB") as record:
+        build_from(ws, run)
+    assert len(record) == 1
+
+
+def test_truncated_output_and_logs_warn_once_per_task() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"t": "SUCCESS"})
+    assert run.tasks is not None
+    notebook = jobs.NotebookOutput(result="x", truncated=True)
+    ws.jobs.outputs[run.tasks[0].run_id or 0] = jobs.RunOutput(notebook_output=notebook, logs_truncated=True)
+    with pytest.warns(UserWarning, match="The output and logs of task 't' were cut at the 5 MB limit") as record:
+        build_from(ws, run)
+    assert len(record) == 1
+
+
+def test_no_warning_without_truncation() -> None:
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        build("probe_success", capture_task_values=CAPTURE)
+    assert record == []
