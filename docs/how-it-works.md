@@ -30,7 +30,7 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 ### Create and run
 
 1. Entering the `with` block, or the first `run()`, calls `modify_settings` if set, checks that `params` are declared, and calls `jobs.create` with the settings fields that `create` accepts. The job URL is logged and recorded in the test's `user_properties`.
-2. `run()` merges the run's parameters over the job's, extends `only` with the stubs and probes the selected tasks need, and calls `run_now` with `job_parameters` and `only`.
+2. `run()` merges the run's parameters over the job's, extends `only` with the stubs and probes the selected tasks need, and calls `run_now` with `job_parameters`, `only`, a fresh idempotency token, and `performance_target` and `queue` when the test passed them. A retried request with the same token returns the run it already started instead of starting another.
 3. The plugin polls `get_run` every two seconds until the run terminates, rather than using the SDK waiter, which raises on an ordinary task failure. The run URL is recorded as soon as it is known. When the timeout expires the run is cancelled and `LakeflowTimeout` is raised.
 4. Building the `JobRun` takes the latest attempt of each task, calls `get_run_output` for each one in parallel, parses errors from the `error` field (falling back to the last `Name: message` line of the trace), parses each probe's JSON output into the `values` of the task it watched, and sorts tasks into `tasks`, `injected_tasks` and `skipped_tasks`.
 5. `run_finished` is called if set.

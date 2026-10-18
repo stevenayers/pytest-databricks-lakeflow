@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Collection, Mapping, Sequence
 from datetime import timedelta
 from types import TracebackType
@@ -108,13 +109,22 @@ class EphemeralJob:
         params: Mapping[str, str] | None = None,
         only: Sequence[str] | None = None,
         timeout: timedelta | None = None,
+        *,
+        performance_target: jobs.PerformanceTarget | str | None = None,
+        queue: bool | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
+
+        Every call sends a fresh idempotency token with the run request, so a request the SDK retries cannot
+        start a second run.
 
         Args:
             params: Job parameters for this run only, merged over the job's params.
             only: Task keys to run. `+key`, `key+` and `+key+` add upstream and downstream tasks.
             timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`.
+            performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
+                applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
+            queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
 
         Returns:
             The run's outcome.
@@ -123,7 +133,10 @@ class EphemeralJob:
             LakeflowError: If the job has been closed, a parameter is not declared, or `only` names an unknown
                 task.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
+            ValueError: If `performance_target` is not a known performance target.
         """
+        target = None if performance_target is None else jobs.PerformanceTarget(performance_target)
+        queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
         assert self.job_id is not None
         item = session.current_item()
@@ -131,12 +144,21 @@ class EphemeralJob:
         merged = {**self.params, **(params or {})}
         selected = select(self.settings, only, self.stubs) if only else None
         ws = self.lakeflow.ws
-        waiter = ws.jobs.run_now(job_id=self.job_id, job_parameters=merged or None, only=selected)
+        token = uuid.uuid4().hex
+        waiter = ws.jobs.run_now(
+            job_id=self.job_id,
+            idempotency_token=token,
+            job_parameters=merged or None,
+            only=selected,
+            performance_target=target,
+            queue=queue_settings,
+        )
         run_id = cast(jobs.RunNowResponse, waiter.response).run_id
         assert run_id is not None
         self._active.add(run_id)
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
+        log.debug("Run %s was started with idempotency token %s", run_id, token)
         run = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
         self._forget(run_id)
         result = build_job_run(

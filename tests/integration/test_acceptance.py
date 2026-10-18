@@ -63,6 +63,12 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
         assert sorted(run.skipped_tasks) == ["load", "my_wheel_task"]
 
 
+def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job") as job:
+        run = job.run(performance_target="PERFORMANCE_OPTIMIZED")
+        assert run.succeeded
+
+
 @pytest.mark.parametrize(
     ("greeting", "expected"),
     [("hello", "hello world"), ("goodbye", "goodbye world")],
