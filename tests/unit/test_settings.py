@@ -125,6 +125,11 @@ def test_environment_version_override() -> None:
     assert versions(settings) == {"default": "5", "other": "5", ENV_KEY: "4"}
 
 
+def test_environment_version_gives_a_spec_to_an_environment_without_one() -> None:
+    settings = sanitised(with_environments({"environment_key": "bare"}), environment_version="5")
+    assert versions(settings) == {"default": "5", "bare": "5", ENV_KEY: "4"}
+
+
 @pytest.mark.skipif(
     "base_environment" not in compute.Environment.__dataclass_fields__,
     reason="this databricks-sdk has no base_environment",

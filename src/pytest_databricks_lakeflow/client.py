@@ -78,8 +78,8 @@ class Lakeflow:
             `helpers_environment_version`.
         budget_policy_id: The budget policy of every ephemeral job.
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
-            cluster, stub and probe tasks included, so that tests skip cluster start-up. The job clusters are
-            dropped. Serverless and warehouse tasks keep their compute.
+            cluster, stub and probe tasks and tasks nested in a `for_each_task` included, so that tests skip
+            cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their compute.
         allow_undeclared_params: Allow parameters that the job does not declare.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
