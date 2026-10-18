@@ -8,17 +8,17 @@ A task test runs one task of a bundle job in a job of its own. The plugin keeps 
 with lakeflow.task(
     "my_example_job.transform",
     params={"param1": "hello", "param2": "world"},
-    upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-    capture_values=["rows_written"],
+    upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+    capture_task_values=["rows_written"],
 ) as task:
     run = task.run()
-    assert run.task("transform").values["rows_written"] == 42
+    assert run.task("transform").task_values["rows_written"] == 42
 ```
 
 - `ref` names the job and the task as `"job_key.task_key"`.
 - `params` are job parameters for every run. The job's declared parameters are kept, and the same rules apply as for [job tests](job-tests.md#make-a-job).
-- `upstream_values` maps upstream task keys to the task values their stubs set. Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
-- `capture_values` lists the task value keys to capture from the task. It adds one probe task.
+- `upstream_task_values` maps upstream task keys to the task values their stubs set. Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
+- `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
 
 The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. `run()`, `only`, the keep rules and the result objects all work the same way, and `with` is optional.
 
@@ -26,7 +26,7 @@ The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. 
 
 Both `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")` in the task's code and `{{tasks.extract.values.row_count}}` in its settings resolve by the producer's task key. A stub with the key `extract` satisfies both.
 
-If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is not in `upstream_values`, the plugin raises `LakeflowError` before anything is created, because the reference would otherwise fail at run time.
+If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is not in `upstream_task_values`, the plugin raises `LakeflowError` before anything is created, because the reference would otherwise fail at run time.
 
 Stub values arrive as JSON through a widget. `{{` inside a value is escaped so that the platform does not treat it as a reference, and the value reaches the task verbatim.
 
@@ -41,7 +41,7 @@ The plugin checks these before creating the job and raises `LakeflowError` other
 
 ## Read captured values
 
-`run.task("transform").values` is a dict of the captured values, and `missing_values` lists the keys that were not captured. Reading a missing key raises a `KeyError` whose message gives the reason:
+`run.task("transform").task_values` is a dict of the captured values, and `missing_task_values` lists the keys that were not captured. Reading a missing key raises a `KeyError` whose message gives the reason:
 
 - `Task 'transform' never set value 'rows_written'`: the task ran and did not set it.
 - `Task 'load' did not run (UPSTREAM_FAILED), so value 'anything' was not captured`: the task was skipped.
@@ -54,13 +54,13 @@ def test_stage_is_recorded_before_the_failure(lakeflow: Lakeflow) -> None:
     with lakeflow.task(
         "my_example_job.transform",
         params={"param1": "explode"},
-        upstream_values={"extract": {"row_count": 1, "source_path": "/Volumes/x/y/z"}},
-        capture_values=["stage"],
+        upstream_task_values={"extract": {"row_count": 1, "source_path": "/Volumes/x/y/z"}},
+        capture_task_values=["stage"],
     ) as task:
         run = task.run()
         assert run.failed
         assert run.task("transform").raised(ValueError)
-        assert run.task("transform").values["stage"] == "validation"
+        assert run.task("transform").task_values["stage"] == "validation"
 ```
 
 ## Helper compute
@@ -94,13 +94,13 @@ def test_single_task(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
         with lakeflow.task(
             "my_example_job.transform",
             params={"param1": greeting, "param2": "world", "schema": schema, "mode": "incremental"},
-            upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-            capture_values=["rows_written"],
+            upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+            capture_task_values=["rows_written"],
         ) as task:
             run = task.run()
             assert run.succeeded
             assert run.task("transform").output == expected
-            assert run.task("transform").values["rows_written"] == 42
+            assert run.task("transform").task_values["rows_written"] == 42
         assert lakeflow.ws.tables.exists(f"{schema}.example_rows").table_exists
 ```
 

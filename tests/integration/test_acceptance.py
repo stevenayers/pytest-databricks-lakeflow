@@ -54,13 +54,13 @@ def test_single_task(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
         with lakeflow.task(
             "my_example_job.transform",
             params={"param1": greeting, "param2": "world", "schema": schema, "mode": "incremental"},
-            upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-            capture_values=["rows_written"],
+            upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+            capture_task_values=["rows_written"],
         ) as task:
             run = task.run()
             assert run.succeeded
             assert run.task("transform").output == expected
-            assert run.task("transform").values["rows_written"] == 42
+            assert run.task("transform").task_values["rows_written"] == 42
         assert lakeflow.ws.tables.exists(f"{schema}.example_rows").table_exists
 
 
@@ -73,29 +73,31 @@ def test_run_twice_in_one_job(lakeflow: Lakeflow) -> None:
 
 
 def test_values_captured_even_on_failure(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", params={"param1": "explode"}, capture_values={"transform": ["stage"]}) as job:
+    with lakeflow.job(
+        "my_example_job", params={"param1": "explode"}, capture_task_values={"transform": ["stage"]}
+    ) as job:
         run = job.run()
         assert run.failed
-        assert run.task("transform").values["stage"] == "validation"
+        assert run.task("transform").task_values["stage"] == "validation"
 
 
-def test_missing_values_explain_themselves(lakeflow: Lakeflow) -> None:
-    job = lakeflow.job("my_example_job", capture_values={"transform": ["never_set"], "load": ["anything"]})
+def test_missing_task_values_explain_themselves(lakeflow: Lakeflow) -> None:
+    job = lakeflow.job("my_example_job", capture_task_values={"transform": ["never_set"], "load": ["anything"]})
     run = job.run(params={"param1": "explode"})
-    assert run.task("transform").missing_values == ["never_set"]
+    assert run.task("transform").missing_task_values == ["never_set"]
     with pytest.raises(KeyError, match="Task 'transform' never set value 'never_set'"):
-        run.task("transform").values["never_set"]
+        run.task("transform").task_values["never_set"]
     with pytest.raises(KeyError, match=r"Task 'load' did not run \(UPSTREAM_FAILED\)"):
-        run.task("load").values["anything"]
+        run.task("load").task_values["anything"]
 
 
 def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
     source_path = "/Volumes/{{job.id}}/{{tasks.other.values.x}}"
     with lakeflow.task(
         "my_example_job.transform",
-        upstream_values={"extract": {"row_count": 1, "source_path": source_path}},
-        capture_values=["source_path"],
+        upstream_task_values={"extract": {"row_count": 1, "source_path": source_path}},
+        capture_task_values=["source_path"],
     ) as task:
         run = task.run()
         assert run.succeeded, run
-        assert run.task("transform").values["source_path"] == source_path
+        assert run.task("transform").task_values["source_path"] == source_path

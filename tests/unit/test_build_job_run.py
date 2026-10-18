@@ -27,7 +27,7 @@ def build(name: str, **kwargs: Any) -> tuple[JobRun, FakeWorkspaceClient]:
 
 
 def test_failed_task_with_probe() -> None:
-    run, _ = build("probe_failure", capture_values=CAPTURE)
+    run, _ = build("probe_failure", capture_task_values=CAPTURE)
     assert run.failed
     assert (run.result_state, run.termination_code) == ("SUCCESS_WITH_FAILURES", "SUCCESS_WITH_FAILURES")
     assert run.duration == timedelta(milliseconds=60_355)
@@ -39,34 +39,34 @@ def test_failed_task_with_probe() -> None:
     assert transform.raised(ValueError)
     assert transform.error is not None
     assert transform.error.message == "validation failed for explode"
-    assert transform.values == {"stage": "validation"}
-    assert transform.values["stage"] == "validation"
-    assert transform.missing_values == ["rows_written"]
+    assert transform.task_values == {"stage": "validation"}
+    assert transform.task_values["stage"] == "validation"
+    assert transform.missing_task_values == ["rows_written"]
     with pytest.raises(KeyError, match="Task 'transform' never set value 'rows_written'"):
-        transform.values["rows_written"]
+        transform.task_values["rows_written"]
     assert run.task("extract").output == '{"task": "extract", "marker": "extract"}'
-    assert run.task("extract").values == {}
+    assert run.task("extract").task_values == {}
 
 
 def test_successful_run_with_probe() -> None:
-    run, _ = build("probe_success", capture_values=CAPTURE)
+    run, _ = build("probe_success", capture_task_values=CAPTURE)
     assert run.succeeded
     transform = run.task("transform")
-    assert transform.values == {"stage": "done", "rows_written": 7}
-    assert transform.missing_values == []
+    assert transform.task_values == {"stage": "done", "rows_written": 7}
+    assert transform.missing_task_values == []
     assert transform.error is None
     assert transform.output is not None and '"greeting": "hello world"' in transform.output
 
 
 def test_values_of_a_task_that_did_not_run() -> None:
-    run, _ = build("probe_upstream_failed", capture_values={**CAPTURE, "load": ["rows_written"]})
+    run, _ = build("probe_upstream_failed", capture_task_values={**CAPTURE, "load": ["rows_written"]})
     load = run.task("load")
     assert (load.result_state, load.termination_code, load.ran) == ("UPSTREAM_FAILED", "SKIPPED", False)
     assert load.error is None
-    assert load.missing_values == ["rows_written"]
+    assert load.missing_task_values == ["rows_written"]
     with pytest.raises(KeyError, match=r"Task 'load' did not run \(UPSTREAM_FAILED\), so value 'rows_written'"):
-        load.values["rows_written"]
-    assert run.task("transform").values["stage"] == "validation"
+        load.task_values["rows_written"]
+    assert run.task("transform").task_values["stage"] == "validation"
 
 
 def test_failed_parent() -> None:
@@ -115,11 +115,11 @@ def test_values_when_the_probe_is_missing_or_fails() -> None:
     run = make_run(1, {"transform": "SUCCESS", "__pytest_probe__transform": "FAILED", "other": "SUCCESS"})
     assert run.tasks is not None
     ws.jobs.outputs[run.tasks[1].run_id or 0] = jobs.RunOutput(error="PermissionError: cannot read {values}")
-    result = build_from(ws, run, capture_values={"transform": ["k"], "other": ["k"]})
+    result = build_from(ws, run, capture_task_values={"transform": ["k"], "other": ["k"]})
     with pytest.raises(KeyError, match=r"probe task __pytest_probe__transform ended FAILED: PermissionError"):
-        result.task("transform").values["k"]
+        result.task("transform").task_values["k"]
     with pytest.raises(KeyError, match="its probe task was not part of the run"):
-        result.task("other").values["k"]
+        result.task("other").task_values["k"]
 
 
 def test_unreadable_probe_output() -> None:
@@ -128,9 +128,9 @@ def test_unreadable_probe_output() -> None:
     assert run.tasks is not None
     notebook = jobs.NotebookOutput(result='{"values": {"k": "', truncated=True)
     ws.jobs.outputs[run.tasks[1].run_id or 0] = jobs.RunOutput(notebook_output=notebook)
-    result = build_from(ws, run, capture_values={"transform": ["k"]})
+    result = build_from(ws, run, capture_task_values={"transform": ["k"]})
     with pytest.raises(KeyError, match=r"returned unreadable output \(truncated\)"):
-        result.task("transform").values["k"]
+        result.task("transform").task_values["k"]
 
 
 def test_output_errors_do_not_hide_the_run(caplog: pytest.LogCaptureFixture) -> None:

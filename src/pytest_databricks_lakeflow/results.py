@@ -122,8 +122,8 @@ class TaskRun:
         logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks.
         logs_truncated: Whether `logs` holds only the last 5 MB.
         error: The task's error, or `None` if it succeeded or did not run.
-        values: Task values captured by a probe.
-        missing_values: Keys that were requested from the probe but not captured.
+        task_values: Task values captured by a probe.
+        missing_task_values: Keys that were requested from the probe but not captured.
         attempt: The attempt number, 0 for the first attempt.
     """
 
@@ -139,8 +139,8 @@ class TaskRun:
     logs: str = ""
     logs_truncated: bool = False
     error: TaskError | None = None
-    values: TaskValues = field(default_factory=TaskValues)
-    missing_values: list[str] = field(default_factory=list)
+    task_values: TaskValues = field(default_factory=TaskValues)
+    missing_task_values: list[str] = field(default_factory=list)
     attempt: int = 0
 
     @property
@@ -253,7 +253,7 @@ def build_job_run(
     job_key: str,
     job_id: int,
     stubs: Collection[str] = (),
-    capture_values: Mapping[str, Sequence[str]] | None = None,
+    capture_task_values: Mapping[str, Sequence[str]] | None = None,
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output.
 
@@ -266,7 +266,7 @@ def build_job_run(
         job_key: The bundle resource key of the job.
         job_id: The ephemeral job's id.
         stubs: Keys of stub tasks, which count as injected tasks.
-        capture_values: The value keys requested from each probed task, by task key.
+        capture_task_values: The value keys requested from each probed task, by task key.
 
     Returns:
         The run's outcome.
@@ -281,7 +281,7 @@ def build_job_run(
     task_runs = {key: _task_run(task, outputs.get(task.run_id or 0)) for key, task in latest.items()}
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
-    for target, keys in (capture_values or {}).items():
+    for target, keys in (capture_task_values or {}).items():
         if target in user:
             user[target] = _with_values(user[target], injected.get(f"{PROBE_PREFIX}{target}"), keys)
     details = run.status.termination_details if run.status else None
@@ -338,14 +338,14 @@ def _with_values(target: TaskRun, probe: TaskRun | None, keys: Sequence[str]) ->
     name = target.task_key
     if not target.ran:
         why = {k: f"Task {name!r} did not run ({target.result_state}), so value {k!r} was not captured" for k in keys}
-        return replace(target, values=TaskValues({}, why), missing_values=list(keys))
+        return replace(target, task_values=TaskValues({}, why), missing_task_values=list(keys))
     captured = _probe_output(probe)
     if isinstance(captured, str):
         why = {k: f"Value {k!r} of task {name!r} was not captured: {captured}" for k in keys}
-        return replace(target, values=TaskValues({}, why), missing_values=list(keys))
+        return replace(target, task_values=TaskValues({}, why), missing_task_values=list(keys))
     values, missing = captured
     why = {k: f"Task {name!r} never set value {k!r}" for k in missing}
-    return replace(target, values=TaskValues(values, why), missing_values=missing)
+    return replace(target, task_values=TaskValues(values, why), missing_task_values=missing)
 
 
 def _probe_output(probe: TaskRun | None) -> tuple[dict[str, object], list[str]] | str:

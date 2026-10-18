@@ -140,7 +140,7 @@ class Lakeflow:
         self,
         key: str,
         params: Mapping[str, str] | None = None,
-        capture_values: Mapping[str, Sequence[str]] | None = None,
+        capture_task_values: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
@@ -148,7 +148,7 @@ class Lakeflow:
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
             params: Job parameters for every run of the copy.
-            capture_values: The task value keys to capture, by task key.
+            capture_task_values: The task value keys to capture, by task key.
             name: Replaces the test node id in the job name.
 
         Returns:
@@ -156,32 +156,32 @@ class Lakeflow:
 
         Raises:
             KeyError: If the bundle has no job `key`.
-            LakeflowError: If called outside a test, `capture_values` names a task that is not in the job, or a
+            LakeflowError: If called outside a test, `capture_task_values` names a task that is not in the job, or a
                 parameter name is reserved.
         """
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
-        inject_probes(settings, capture_values or {}, self._helpers())
-        return self._ephemeral(item, key, settings, params, capture_values, (), name)
+        inject_probes(settings, capture_task_values or {}, self._helpers())
+        return self._ephemeral(item, key, settings, params, capture_task_values, (), name)
 
     def task(
         self,
         ref: str,
         params: Mapping[str, str] | None = None,
-        upstream_values: Mapping[str, Mapping[str, object]] | None = None,
-        capture_values: Sequence[str] | None = None,
+        upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
+        capture_task_values: Sequence[str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
-        Each upstream task named in `upstream_values` is replaced by a stub task with the same key, so the task's
+        Each upstream task named in `upstream_task_values` is replaced by a stub task with the same key, so the task's
         `{{tasks.<key>.values.<name>}}` references and `taskValues.get` calls resolve against the stub.
 
         Args:
             ref: The job and task as `"job_key.task_key"`.
             params: Job parameters for every run.
-            upstream_values: The task values each stub sets, by upstream task key.
-            capture_values: The task value keys to capture from the task.
+            upstream_task_values: The task values each stub sets, by upstream task key.
+            capture_task_values: The task value keys to capture from the task.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -197,9 +197,9 @@ class Lakeflow:
             raise LakeflowError(f"Expected 'job_key.task_key', got {ref!r}")
         settings = self.template(job_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
-        upstream = dict(upstream_values or {})
-        wrap_task(settings, task_key, upstream, list(capture_values or []), self._helpers())
-        capture = {task_key: list(capture_values)} if capture_values else {}
+        upstream = dict(upstream_task_values or {})
+        wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
+        capture = {task_key: list(capture_task_values)} if capture_task_values else {}
         return self._ephemeral(item, job_key, settings, params, capture, upstream, None)
 
     @contextmanager
@@ -267,7 +267,7 @@ class Lakeflow:
         key: str,
         settings: jobs.JobSettings,
         params: Mapping[str, str] | None,
-        capture_values: Mapping[str, Sequence[str]] | None,
+        capture_task_values: Mapping[str, Sequence[str]] | None,
         stubs: Collection[str],
         name: str | None,
     ) -> EphemeralJob:
@@ -284,6 +284,6 @@ class Lakeflow:
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
         )
-        job = EphemeralJob(self, key, settings, params, capture_values, stubs)
+        job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
         return job

@@ -11,7 +11,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 
 - `key` is the bundle resource key of the job.
 - `params` are job parameters for every run of the copy. The job must declare them, because the Jobs API accepts undeclared parameters silently. Pass `allow_undeclared_params=True` to `Lakeflow` to allow them anyway. Names starting with `__pytest_` are reserved.
-- `capture_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
+- `capture_task_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
@@ -60,7 +60,7 @@ Each `TaskRun` has:
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message` and `trace`, or `None`.
-- `values` and `missing_values`, task values captured by a probe.
+- `task_values` and `missing_task_values`, task values captured by a probe.
 - `duration`, `attempt` and `run_url`.
 
 A failure test reads like this:
@@ -94,27 +94,29 @@ Asking for a skipped task raises a `KeyError` that says it was skipped by `only`
 
 ## Capture task values
 
-Task values are not exposed by the Jobs API. `capture_values` adds a probe task after each task you name. The probe depends on the task, runs even when the task failed, and reports the values it finds:
+Task values are not exposed by the Jobs API. `capture_task_values` adds a probe task after each task you name. The probe depends on the task, runs even when the task failed, and reports the values it finds:
 
 ```python
 def test_values_captured_even_on_failure(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", params={"param1": "explode"}, capture_values={"transform": ["stage"]}) as job:
+    with lakeflow.job(
+        "my_example_job", params={"param1": "explode"}, capture_task_values={"transform": ["stage"]}
+    ) as job:
         run = job.run()
         assert run.failed
-        assert run.task("transform").values["stage"] == "validation"
+        assert run.task("transform").task_values["stage"] == "validation"
 ```
 
 A missing value raises a `KeyError` whose message says why: the task never set it, the task did not run, or the probe failed:
 
 ```python
-def test_missing_values_explain_themselves(lakeflow: Lakeflow) -> None:
-    job = lakeflow.job("my_example_job", capture_values={"transform": ["never_set"], "load": ["anything"]})
+def test_missing_task_values_explain_themselves(lakeflow: Lakeflow) -> None:
+    job = lakeflow.job("my_example_job", capture_task_values={"transform": ["never_set"], "load": ["anything"]})
     run = job.run(params={"param1": "explode"})
-    assert run.task("transform").missing_values == ["never_set"]
+    assert run.task("transform").missing_task_values == ["never_set"]
     with pytest.raises(KeyError, match="Task 'transform' never set value 'never_set'"):
-        run.task("transform").values["never_set"]
+        run.task("transform").task_values["never_set"]
     with pytest.raises(KeyError, match=r"Task 'load' did not run \(UPSTREAM_FAILED\)"):
-        run.task("load").values["anything"]
+        run.task("load").task_values["anything"]
 ```
 
 Each probe is a serverless notebook task and costs 7 to 30 seconds, even when its task did not run. [Writing task tests](task-tests.md) explains the probe and stub mechanics.
