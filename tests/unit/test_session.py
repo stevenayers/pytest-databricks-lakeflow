@@ -367,6 +367,15 @@ def test_setup_passes_deploy_flags(fake_ws: FakeWorkspaceClient, fake_cli: FakeC
     assert fake_cli.calls[2] == ["bundle", "summary", "-t", "test", "-o", "json"]
 
 
+def test_setup_passes_variables_before_deploy_flags(
+    fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    key = bundle_key(bundle_dir, variables=(("catalog", "dev"),), deploy_flags=("--fail-on-active-runs",))
+    session.setup(as_client(fake_ws), key)
+    assert fake_cli.calls[1] == [*DEPLOY, "--var", "catalog=dev", "--fail-on-active-runs"]
+    assert fake_cli.calls[2] == ["bundle", "summary", "-t", "test", "-o", "json", "--var", "catalog=dev"]
+
+
 def test_deploy_flags_from_the_fixture(
     pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
 ) -> None:
