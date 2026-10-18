@@ -43,14 +43,14 @@ A string that contains `@` names a user and any other string names a service pri
 A task that notifies people or refreshes a downstream system can be switched off in the copy without changing the bundle. `disable` sets `disabled` on those tasks, so every run of the copy skips them:
 
 ```python
-def test_without_notifications(lakeflow: Lakeflow) -> None:
+def test_without_load(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", disable=["load"]) as job:
         run = job.run()
         assert run.succeeded
         assert run.skipped_tasks["load"].disabled
 ```
 
-A disabled task ends `DISABLED` and lands in `run.skipped_tasks` with `disabled` set, and `run.task("load")` raises a `KeyError` that says it was disabled with `disable=`. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
+A disabled task ends `DISABLED` and lands in `run.skipped_tasks` with `disabled` set, and `run.task("load")` raises a `KeyError` that says it was disabled, in the job or with `disable=`. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
 
 ## Run it
 

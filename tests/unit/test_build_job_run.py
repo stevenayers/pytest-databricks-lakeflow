@@ -97,7 +97,7 @@ def test_disabled_task_is_reported_as_disabled() -> None:
     assert "load" not in run.tasks
     assert run.skipped_tasks["load"].disabled
     assert not run.task("extract").disabled
-    with pytest.raises(KeyError, match="disabled with disable=") as raised:
+    with pytest.raises(KeyError, match=r"was disabled \(in the job or with disable=\)") as raised:
         run.task("load")
     assert "Skipped by only" not in str(raised.value)
 

@@ -313,7 +313,7 @@ class JobRun:
             skipped = ""
             if key in self.skipped_tasks:
                 if self.skipped_tasks[key].disabled:
-                    skipped = f" Task {key!r} was disabled with disable=."
+                    skipped = f" Task {key!r} was disabled (in the job or with disable=)."
                 else:
                     skipped = f" Skipped by only: {sorted(k for k, t in self.skipped_tasks.items() if not t.disabled)}."
             raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{skipped}")
