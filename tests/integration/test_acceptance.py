@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+import warnings
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,8 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         if transform is not None:
             assert isinstance(transform, dict)
             assert transform["row_count"] == "7"
+        else:
+            warnings.warn("The workspace returned no resolved values for transform", stacklevel=1)
         assert job.job_id is not None
         settings = lakeflow.ws.jobs.get(job.job_id).settings
         tags = (settings.tags if settings else None) or {}
