@@ -8,9 +8,7 @@ import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import session
-
-from .conftest import FakeCli, configure_lakeflow
+from .conftest import GITHUB, FakeCli, configure_lakeflow, make_repository, set_ci
 from .fakes import HOST, FakeWorkspaceClient, make_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -53,23 +51,6 @@ def test_run_requests_resolved_values(pytester: pytest.Pytester, fake_ws: FakeWo
     assert all(call.get("include_resolved_values") is True for call in fake_ws.jobs.get_run_calls)
 
 
-GITHUB = {
-    "GITHUB_SERVER_URL": "https://github.com",
-    "GITHUB_REPOSITORY": "o/r",
-    "GITHUB_RUN_ID": "9",
-    "GITHUB_SHA": "abc",
-    "GITHUB_REF_NAME": "main",
-    "GITHUB_ACTOR": "someone",
-}
-
-
-def set_ci(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
-    for name in (*session.RUN_ID_VARIABLES, *session.ATTRIBUTION_VARIABLES):
-        monkeypatch.delenv(name, raising=False)
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
-
-
 def test_jobs_carry_attribution_tags(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
 ) -> None:
@@ -109,15 +90,11 @@ def test_attribution_from_git_in_the_rootdir(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
 ) -> None:
     set_ci(monkeypatch, {})
-    pytester.run("git", "init", "-q")
-    pytester.run(
-        "git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"
-    )
-    pytester.run("git", "checkout", "-q", "-b", "topic")
+    sha = make_repository(pytester.path)
     result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
     result.assert_outcomes(passed=1)
     tags = fake_ws.jobs.created[0]["tags"]
-    assert re.fullmatch(r"[0-9a-f]{40}", tags["pytest_git_sha"])
+    assert tags["pytest_git_sha"] == sha
     assert tags["pytest_git_branch"] == "topic"
 
 

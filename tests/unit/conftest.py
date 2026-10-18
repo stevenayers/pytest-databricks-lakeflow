@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,60 @@ from pytest_databricks_lakeflow import Lakeflow
 def lakeflow():
     return Lakeflow({arguments})
 """
+
+
+ATTRIBUTION_VARIABLES = (
+    "GITHUB_SERVER_URL",
+    "GITHUB_REPOSITORY",
+    "GITHUB_RUN_ID",
+    "GITHUB_SHA",
+    "GITHUB_HEAD_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_ACTOR",
+    "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI",
+    "SYSTEM_TEAMPROJECT",
+    "BUILD_BUILDID",
+    "BUILD_SOURCEVERSION",
+    "BUILD_SOURCEBRANCHNAME",
+    "BUILD_REQUESTEDFOREMAIL",
+)
+GITHUB = {
+    "GITHUB_SERVER_URL": "https://github.com",
+    "GITHUB_REPOSITORY": "o/r",
+    "GITHUB_RUN_ID": "9",
+    "GITHUB_SHA": "abc",
+    "GITHUB_REF_NAME": "main",
+    "GITHUB_ACTOR": "someone",
+}
+AZURE_DEVOPS = {
+    "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI": "https://dev.azure.com/org/",
+    "SYSTEM_TEAMPROJECT": "proj",
+    "BUILD_BUILDID": "42",
+    "BUILD_SOURCEVERSION": "def",
+    "BUILD_SOURCEBRANCHNAME": "feature",
+    "BUILD_REQUESTEDFOREMAIL": "person@example.com",
+}
+
+
+def set_ci(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """Clear every CI variable that the run id and attribution read, then set `env`."""
+    for name in (*session.RUN_ID_VARIABLES, *ATTRIBUTION_VARIABLES):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def make_repository(path: Path, branch: str = "topic") -> str:
+    """Make a git repository in `path` with one empty commit on `branch`, and return the commit's sha."""
+    git(path, "init", "-q")
+    identity = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+    git(path, *identity, "commit", "-q", "--allow-empty", "-m", "x")
+    git(path, "checkout", "-q", "-b", branch)
+    return git(path, "rev-parse", "HEAD")
 
 
 class FakeCli:

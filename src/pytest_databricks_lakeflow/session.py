@@ -34,11 +34,6 @@ AZURE_DEVOPS_URL_VARIABLES = ("SYSTEM_TEAMFOUNDATIONCOLLECTIONURI", "SYSTEM_TEAM
 SHA_VARIABLES = ("GITHUB_SHA", "BUILD_SOURCEVERSION")
 BRANCH_VARIABLES = ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "BUILD_SOURCEBRANCHNAME")
 USER_VARIABLES = ("GITHUB_ACTOR", "BUILD_REQUESTEDFOREMAIL")
-ATTRIBUTION_VARIABLES = tuple(
-    dict.fromkeys(
-        (*GITHUB_URL_VARIABLES, *AZURE_DEVOPS_URL_VARIABLES, *SHA_VARIABLES, *BRANCH_VARIABLES, *USER_VARIABLES)
-    )
-)
 GIT_TIMEOUT_SECONDS = 10
 CLIENT_ATTEMPTS = 4
 
@@ -216,7 +211,7 @@ def resolve_attribution(rootpath: Path) -> dict[str, str]:
     """Find out which CI run, commit, branch and person a session belongs to, for tagging ephemeral jobs.
 
     Reads the GitHub Actions and Azure DevOps variables, and falls back to `git` in `rootpath` for the commit and
-    branch. Errors from `git`, including a missing `git`, are ignored.
+    branch. Errors from `git`, including a missing `git`, are ignored, and a detached HEAD has no branch.
 
     Args:
         rootpath: The pytest rootdir.
@@ -235,7 +230,7 @@ def resolve_attribution(rootpath: Path) -> dict[str, str]:
     attribution = {
         "pytest_ci_url": ci_url,
         "pytest_git_sha": _first(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
-        "pytest_git_branch": _first(BRANCH_VARIABLES) or _git(rootpath, "rev-parse", "--abbrev-ref", "HEAD"),
+        "pytest_git_branch": _first(BRANCH_VARIABLES) or _git_branch(rootpath),
         "pytest_user": _first(USER_VARIABLES),
     }
     return {key: value for key, value in attribution.items() if value}
@@ -243,6 +238,11 @@ def resolve_attribution(rootpath: Path) -> dict[str, str]:
 
 def _first(names: tuple[str, ...]) -> str | None:
     return next((value for name in names if (value := os.environ.get(name))), None)
+
+
+def _git_branch(cwd: Path) -> str | None:
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    return None if branch == "HEAD" else branch
 
 
 def _git(cwd: Path, *args: str) -> str | None:

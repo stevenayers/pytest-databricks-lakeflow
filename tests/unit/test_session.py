@@ -12,7 +12,7 @@ from databricks.sdk import WorkspaceClient
 from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 
-from .conftest import FakeCli, configure_lakeflow
+from .conftest import AZURE_DEVOPS, GITHUB, FakeCli, configure_lakeflow, git, make_repository, set_ci
 from .fakes import FakeWorkspaceClient, example_settings
 
 UNIT_TESTS = Path(__file__).parent
@@ -100,32 +100,6 @@ def test_random_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_id != session.resolve_run_id()
 
 
-GITHUB = {
-    "GITHUB_SERVER_URL": "https://github.com",
-    "GITHUB_REPOSITORY": "o/r",
-    "GITHUB_RUN_ID": "9",
-    "GITHUB_SHA": "abc",
-    "GITHUB_REF_NAME": "main",
-    "GITHUB_ACTOR": "someone",
-}
-AZURE_DEVOPS = {
-    "SYSTEM_TEAMFOUNDATIONCOLLECTIONURI": "https://dev.azure.com/org/",
-    "SYSTEM_TEAMPROJECT": "proj",
-    "BUILD_BUILDID": "42",
-    "BUILD_SOURCEVERSION": "def",
-    "BUILD_SOURCEBRANCHNAME": "feature",
-    "BUILD_REQUESTEDFOREMAIL": "person@example.com",
-}
-
-
-def set_ci(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
-    """Clear every CI variable that attribution reads, then set `env`."""
-    for name in session.ATTRIBUTION_VARIABLES:
-        monkeypatch.delenv(name, raising=False)
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
-
-
 def test_attribution_from_github(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     set_ci(monkeypatch, {**AZURE_DEVOPS, **GITHUB})
     assert session.resolve_attribution(tmp_path) == {
@@ -148,22 +122,17 @@ def test_attribution_from_azure_devops(monkeypatch: pytest.MonkeyPatch, tmp_path
     }
 
 
-def git(cwd: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
-
-
-def make_repository(path: Path, branch: str = "topic") -> str:
-    """Make a git repository in `path` with one empty commit on `branch`, and return the commit's sha."""
-    git(path, "init", "-q")
-    git(path, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x")
-    git(path, "checkout", "-q", "-b", branch)
-    return git(path, "rev-parse", "HEAD")
-
-
 def test_attribution_from_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     set_ci(monkeypatch, {})
     sha = make_repository(tmp_path)
     assert session.resolve_attribution(tmp_path) == {"pytest_git_sha": sha, "pytest_git_branch": "topic"}
+
+
+def test_attribution_on_a_detached_head_has_no_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {})
+    sha = make_repository(tmp_path)
+    git(tmp_path, "checkout", "-q", "--detach")
+    assert session.resolve_attribution(tmp_path) == {"pytest_git_sha": sha}
 
 
 def test_attribution_without_git_is_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -591,12 +560,14 @@ def test_xdist_workers_share_attribution(
         "    with lakeflow.job('my_job'):\n"
         "        pass\n"
         f"    with open({str(tags)!r}, 'a') as f:\n"
-        "        f.write(json.dumps(lakeflow.ws.jobs.created[-1]['tags']) + '\\n')\n"
+        "        tags = lakeflow.ws.jobs.created[-1]['tags']\n"
+        "        f.write(json.dumps({{**tags, 'worker': os.environ['PYTEST_XDIST_WORKER']}}) + '\\n')\n"
     )
-    pytester.makepyfile("import json\n\n" + "\n".join(test.format(i=i) for i in range(6)))
+    pytester.makepyfile("import json\nimport os\n\n" + "\n".join(test.format(i=i) for i in range(6)))
     pytester.runpytest("-n", "2").assert_outcomes(passed=6)
     created = [json.loads(line) for line in tags.read_text().splitlines()]
     assert len(created) == 6
+    assert {t["worker"] for t in created} == {"gw0", "gw1"}
     assert {t["pytest_git_sha"] for t in created} == {sha}
     assert {t["pytest_git_branch"] for t in created} == {"topic"}
     assert {t["pytest_user"] for t in created} == {"someone@example.com"}
