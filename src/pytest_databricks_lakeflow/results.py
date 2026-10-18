@@ -29,6 +29,11 @@ ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 EXC_LINE = re.compile(r"^(?P<name>[A-Za-z_]\w*(?:\.(?:<locals>|[A-Za-z_]\w*))*)(?:: ?(?P<msg>.*))?$")
 JAVA_FRAME = re.compile(r"^\s+at \S")
 CAUSED_BY = re.compile(r"^\s*Caused by:\s?(?P<cause>.*)$")
+CHAIN_MARKERS = re.compile(
+    r"^(?:The above exception was the direct cause of the following exception:"
+    r"|During handling of the above exception, another exception occurred:)[ \t\r]*$",
+    re.MULTILINE,
+)
 ERROR_CLASS = re.compile(r"^\[([A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*)\]")
 
 
@@ -86,11 +91,27 @@ class TaskError:
 
     @property
     def root_cause(self) -> str | None:
-        """The text after the last `Caused by:` line of `trace`, or `None` when the trace has no such line."""
-        for line in reversed(self.trace.splitlines()):
+        """The first thing that went wrong, read from `trace`.
+
+        A Python chained traceback, from `raise ... from e` or an exception raised while handling another, prints
+        the innermost exception first, so only the part of `trace` before the first chain marker is read. In that
+        part, the text after the last `Caused by:` line wins, as in a Py4J or Spark trace. Otherwise, when the
+        trace is chained, it is the innermost exception as `Name: message`, such as
+        `ZeroDivisionError: division by zero`, while `type` and `message` still describe the outer exception.
+        `None` when the trace has neither a `Caused by:` line nor a chain.
+        """
+        innermost, *outer = CHAIN_MARKERS.split(self.trace, maxsplit=1)
+        lines = innermost.splitlines()
+        for line in reversed(lines):
             match = CAUSED_BY.match(line)
             if match:
                 return match["cause"].strip()
+        if outer:
+            for line in reversed(lines):
+                match = EXC_LINE.match(line)
+                if match and match["msg"] is not None:
+                    msg = match["msg"].strip()
+                    return f"{match['name']}: {msg}" if msg else match["name"]
         return None
 
     @property
