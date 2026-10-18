@@ -14,7 +14,7 @@ TAGS = {"pytest": "", "pytest_run_id": "r1", "pytest_nodeid": "tests/test_x.py::
 
 
 def sanitised(settings: jobs.JobSettings | None = None, **kwargs: Any) -> jobs.JobSettings:
-    options = {"disable_auto_optimization": True, "performance_optimized": False, **kwargs}
+    options: dict[str, Any] = {"disable_auto_optimization": True, "performance_optimized": False, **kwargs}
     return sanitise(settings or example_settings(), "tests/test_x.py::test_y", TAGS, **options)
 
 
@@ -30,6 +30,31 @@ def test_sanitise_strips_what_would_run_notify_or_lock_the_copy() -> None:
     assert settings.max_concurrent_runs == 1
     assert settings.name == "[pytest] tests/test_x.py::test_y"
     assert settings.tags == {"dev": "someone", "purpose": "pytest", **TAGS}
+
+
+def test_run_as_is_stripped_by_default() -> None:
+    assert sanitised().run_as is None
+    assert sanitised(run_as=None).run_as is None
+
+
+def test_run_as_keep_preserves_the_template() -> None:
+    assert sanitised(run_as="keep").run_as == jobs.JobRunAs(user_name="someone@example.com")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("me@example.com", jobs.JobRunAs(user_name="me@example.com")),
+        ("0000-app-id", jobs.JobRunAs(service_principal_name="0000-app-id")),
+    ],
+)
+def test_run_as_string_picks_user_or_service_principal(value: str, expected: jobs.JobRunAs) -> None:
+    assert sanitised(run_as=value).run_as == expected
+
+
+def test_run_as_object_is_used_as_is() -> None:
+    run_as = jobs.JobRunAs(group_name="g")
+    assert sanitised(run_as=run_as).run_as is run_as
 
 
 def test_sanitise_keeps_the_rest() -> None:

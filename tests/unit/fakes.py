@@ -21,6 +21,7 @@ class FakeJobs:
     def __init__(self) -> None:
         self.settings: dict[int, jobs.JobSettings] = {}
         self.created: list[dict[str, Any]] = []
+        self.acls: list[list[jobs.JobAccessControlRequest] | None] = []
         self.deleted: list[int] = []
         self.cancelled: list[int] = []
         self.run_now_calls: list[dict[str, Any]] = []
@@ -50,6 +51,7 @@ class FakeJobs:
         return jobs.Job(job_id=job_id, settings=self.settings[job_id])
 
     def create(self, **kwargs: Any) -> jobs.CreateResponse:
+        self.acls.append(kwargs.pop("access_control_list", None))
         self.created.append(kwargs)
         return jobs.CreateResponse(job_id=self.add(jobs.JobSettings(**kwargs)))
 

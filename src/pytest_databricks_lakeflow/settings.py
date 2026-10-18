@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, Literal
 
 from databricks.sdk.service import compute, jobs
 
@@ -23,7 +23,6 @@ STRIPPED = (
     "email_notifications",
     "webhook_notifications",
     "notification_settings",
-    "run_as",
     "parent_path",
 )
 TASK_STRIPPED = ("email_notifications", "webhook_notifications", "notification_settings")
@@ -63,11 +62,13 @@ def sanitise(
     *,
     disable_auto_optimization: bool,
     performance_optimized: bool,
+    run_as: Literal["keep"] | str | jobs.JobRunAs | None = None,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
-    Removes what would make the copy run on its own, notify people, run as someone else, or count as
-    bundle-managed. Names the job, adds `tags` to the template's tags and allows one run at a time.
+    Removes what would make the copy run on its own, notify people, or count as bundle-managed, and removes
+    `run_as` unless `run_as` says otherwise. Names the job, adds `tags` to the template's tags and allows one run at
+    a time.
 
     Args:
         settings: A copy of a template. It is changed in place.
@@ -75,6 +76,9 @@ def sanitise(
         tags: Tags to add. Values are made acceptable as tag values.
         disable_auto_optimization: Stop serverless from retrying failed code tasks.
         performance_optimized: Override the performance target with `PERFORMANCE_OPTIMIZED`.
+        run_as: `None` removes the template's `run_as`, so the job runs as its creator. `"keep"` keeps it. A
+            `jobs.JobRunAs` replaces it. Any other string names a user when it contains `@`, and otherwise a
+            service principal by its application id.
 
     Returns:
         `settings`.
@@ -84,6 +88,8 @@ def sanitise(
     """
     for attr in STRIPPED:
         setattr(settings, attr, None)
+    if run_as != "keep":
+        settings.run_as = _run_as(run_as)
     for task in settings.tasks or []:
         for attr in TASK_STRIPPED:
             setattr(task, attr, None)
@@ -100,6 +106,14 @@ def sanitise(
             f"Remove {len(settings.tags) - MAX_TAGS} from the template: {sorted(settings.tags)}"
         )
     return settings
+
+
+def _run_as(run_as: str | jobs.JobRunAs | None) -> jobs.JobRunAs | None:
+    if run_as is None or isinstance(run_as, jobs.JobRunAs):
+        return run_as
+    if "@" in run_as:
+        return jobs.JobRunAs(user_name=run_as)
+    return jobs.JobRunAs(service_principal_name=run_as)
 
 
 def tag_value(value: str) -> str:
