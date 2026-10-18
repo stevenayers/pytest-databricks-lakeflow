@@ -396,6 +396,20 @@ def test_lakeflows_with_different_deploy_flags_deploy_separately(
     assert deploys == [DEPLOY, [*DEPLOY, "--fail-on-active-runs"]]
 
 
+def test_deploy_flags_do_not_split_sessions_that_do_not_deploy(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    pytester.makeconftest(
+        "import pytest\nfrom pytest_databricks_lakeflow import Lakeflow\n\n"
+        "@pytest.fixture(scope='session')\ndef plain():\n    return Lakeflow(sync='sync')\n\n"
+        "@pytest.fixture(scope='session')\ndef flagged():\n"
+        "    return Lakeflow(sync='sync', deploy_flags=['--fail-on-active-runs'])\n"
+    )
+    pytester.makepyfile("def test_one(plain, flagged):\n    assert plain.templates == flagged.templates\n")
+    pytester.runpytest().assert_outcomes(passed=1)
+    assert [call[:2] for call in fake_cli.calls].count(["bundle", "sync"]) == 1
+
+
 def test_helper_sources_use_prefixed_widgets() -> None:
     assert f'dbutils.widgets.get("{helpers.VALUES_WIDGET}")' in helpers.SET_VALUES
     assert f'dbutils.widgets.get("{helpers.TASK_KEY_WIDGET}")' in helpers.GET_VALUES

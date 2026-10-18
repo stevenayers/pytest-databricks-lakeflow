@@ -110,19 +110,27 @@ def test_rejects_an_unknown_sync_strategy() -> None:
 
 
 @pytest.mark.parametrize(
-    ("flags", "argument"),
+    ("flags", "name", "argument"),
     [
-        (["-t", "other"], "target="),
-        (["--target", "other"], "target="),
-        (["--target=other"], "target="),
-        (["--profile", "x"], "profile="),
-        (["--var", "catalog=dev"], "variables="),
-        (["--auto-approve"], "always passes --auto-approve"),
+        (["-t", "other"], "-t", "target="),
+        (["-tother"], "-t", "target="),
+        (["--target", "other"], "--target", "target="),
+        (["--target=other"], "--target", "target="),
+        (["-p", "x"], "-p", "profile="),
+        (["-pother"], "-p", "profile="),
+        (["--profile", "x"], "--profile", "profile="),
+        (["--var", "catalog=dev"], "--var", "variables="),
+        (["--auto-approve"], "--auto-approve", "always passes --auto-approve"),
     ],
 )
-def test_deploy_flags_reject_plugin_owned_flags(flags: list[str], argument: str) -> None:
-    with pytest.raises(ValueError, match=f"deploy_flags cannot contain {flags[0].split('=')[0]}.*{argument}"):
+def test_deploy_flags_reject_plugin_owned_flags(flags: list[str], name: str, argument: str) -> None:
+    with pytest.raises(ValueError, match=f"deploy_flags cannot contain {name}\\..*{argument}"):
         Lakeflow(deploy_flags=flags)
+
+
+def test_deploy_flags_reject_a_bare_string() -> None:
+    with pytest.raises(ValueError, match="deploy_flags must be a list of flags, not a string"):
+        Lakeflow(deploy_flags="--fail-on-active-runs")
 
 
 def test_deploy_flags_accept_other_flags() -> None:

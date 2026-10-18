@@ -55,12 +55,12 @@ os.environ.setdefault("BUNDLE_VAR_lakeflow_suffix", re.sub(r"[^A-Za-z0-9_-]", "-
 
 @pytest.fixture(scope="session")
 def lakeflow() -> Lakeflow:
-    return Lakeflow()
+    return Lakeflow(deploy_flags=["--fail-on-active-runs"])
 ```
 
 Each branch then leaves its own deployment behind, so end the pipeline with `pytest --lakeflow-destroy`, which runs `databricks bundle destroy` for the targets the session deployed.
 
-`Lakeflow(deploy_flags=["--fail-on-active-runs"])` passes the flag to `bundle deploy`, which then refuses to deploy while a job that the bundle deploys has an active run. It catches someone running the deployed test target's jobs by hand. It does not catch a concurrent test session, because the plugin never runs the deployed jobs: every test runs a separate `[pytest]` copy, and the CLI does not look at those. Only separate deployments protect one session from another.
+The `deploy_flags` argument passes `--fail-on-active-runs` to `bundle deploy`, which then refuses to deploy while a job that the bundle deploys has an active run. It catches someone running the deployed test target's jobs by hand. It does not catch a concurrent test session, because the plugin never runs the deployed jobs: every test runs a separate `[pytest]` copy, and the CLI does not look at those. Only separate deployments protect one session from another.
 
 ## One ephemeral job
 
