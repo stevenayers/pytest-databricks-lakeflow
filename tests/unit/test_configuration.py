@@ -76,6 +76,7 @@ def test_defaults() -> None:
     assert (lakeflow.modify_settings, lakeflow.run_finished) == (None, None)
     assert lakeflow.permissions is None
     assert lakeflow.access_control_list() is None
+    assert lakeflow.variables is None
 
 
 def test_permissions_accept_dicts() -> None:

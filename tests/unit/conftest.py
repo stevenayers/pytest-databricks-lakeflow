@@ -81,12 +81,13 @@ def make_repository(path: Path, branch: str = "topic") -> str:
 
 
 class FakeCli:
-    """Stands in for `bundle.run_cli`. Summary reports every job registered in `deployed`."""
+    """Stands in for `bundle.run_cli`. Summary reports every job registered in `deployed`, merged into `summary`."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.invocations: list[tuple[list[str], Path, str | None]] = []
         self.deployed: dict[str, int] = {}
+        self.summary: dict[str, Any] = {}
         self.validate: dict[str, Any] = {}
         self.errors: dict[str, Exception] = {}
         self.before: Callable[[list[str]], None] = lambda args: None
@@ -101,7 +102,7 @@ class FakeCli:
             return "Databricks CLI v1.7.0\n"
         if args[:2] == ["bundle", "summary"]:
             jobs = {key: {"id": str(job_id)} for key, job_id in self.deployed.items()}
-            return json.dumps({"resources": {"jobs": jobs}})
+            return json.dumps({**self.summary, "resources": {"jobs": jobs}})
         if args[:2] == ["bundle", "validate"]:
             return json.dumps(self.validate)
         return ""

@@ -13,6 +13,7 @@ All arguments are keyword-only.
 | `profile` | SDK default resolution | The Databricks config profile for both the CLI and the SDK. Without it, both read `DATABRICKS_CONFIG_PROFILE` and the other `DATABRICKS_*` variables. |
 | `workspace_client` | made from `profile` | A `WorkspaceClient` to use instead. The CLI still uses `profile`, or else the client's profile. |
 | `sync` | `"deploy"` | How to prepare the bundle: `"deploy"`, `"sync"` or `"none"`. See [sync strategies](#sync-strategies). |
+| `variables` | `None` | Bundle variables as a mapping of name to value, passed as `--var name=value`, sorted by name, to every `bundle deploy`, `summary`, `validate`, `sync` and `destroy` call. Two `Lakeflow` instances for the same target with different variables are set up, and deployed, separately. See [Bundle targets and variables](#bundle-targets-and-variables). |
 | `timeout` | 30 minutes | The default `timedelta` to wait for one run. Each job is created with `timeout_seconds` equal to this timeout plus 60 seconds, so the platform stops a run that the plugin can no longer cancel, for example after the pytest process was killed. A template with a smaller `timeout_seconds` keeps it. |
 | `catalog` | `None` | The catalog in which `schema()` creates temporary schemas. |
 | `helpers_path` | `/Users/<you>/.pytest-databricks-lakeflow` | The workspace folder for the two helper notebooks. |
@@ -69,6 +70,33 @@ These apply to one pytest run and win over the matching arguments.
 | `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_SHA`, `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`, `GITHUB_ACTOR` | On GitHub Actions, fill the `pytest_ci_url`, `pytest_git_sha`, `pytest_git_branch` and `pytest_user` tags of every job. `GITHUB_HEAD_REF` wins over `GITHUB_REF_NAME` for the branch. |
 | `SYSTEM_TEAMFOUNDATIONCOLLECTIONURI`, `SYSTEM_TEAMPROJECT`, `BUILD_BUILDID`, `BUILD_SOURCEVERSION`, `BUILD_SOURCEBRANCHNAME`, `BUILD_REQUESTEDFOREMAIL` | The same on Azure DevOps, when the GitHub variables are not set. Without either, the commit and branch come from `git` in the rootdir and the user from the workspace. |
 | `DATABRICKS_CONFIG_PROFILE`, `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` and the rest of the SDK's resolution | Credentials, when `profile` is not set. The CLI reads the same variables. |
+| `BUNDLE_VAR_<name>` | Read by the CLI, not by the plugin, as the value of the bundle variable `<name>`. The plugin's CLI calls inherit the environment, so these work, but they are not part of the setup cache key: two `Lakeflow` instances for one target share one deploy whatever these say. Use `variables` when instances need different values. |
+
+## Bundle targets and variables
+
+The plugin always passes `-t <target>` to the CLI. It does not read `DATABRICKS_BUNDLE_TARGET` or any other variable for the target, so choose it in the fixture:
+
+```python
+import os
+
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(
+        target=os.environ.get("LAKEFLOW_TARGET", "test"),
+        variables={"catalog": "dev_sandbox"},
+    )
+```
+
+The CLI takes the target's host from `databricks.yml`, while the SDK client takes it from `profile` or the `DATABRICKS_*` variables. At setup the plugin compares the `workspace.host` that `bundle summary` (with `sync="deploy"`) or `bundle validate` (with `sync` and `none`) reports with the client's host, ignoring scheme, trailing slash and case, and fails the session's tests with a `LakeflowError` naming both hosts when they differ. A target without a host is not checked. To give pytest the same credentials as the bundle target, run it through the CLI, which sets the target's `DATABRICKS_*` variables for the command:
+
+```bash
+databricks bundle run -t test -- uv run pytest
+```
 
 ## Sync strategies
 

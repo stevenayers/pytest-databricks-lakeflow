@@ -13,7 +13,7 @@ from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 
 from .conftest import AZURE_DEVOPS, GITHUB, FakeCli, configure_lakeflow, git, make_repository, set_ci
-from .fakes import FakeWorkspaceClient, example_settings
+from .fakes import HOST, FakeWorkspaceClient, example_settings
 
 UNIT_TESTS = Path(__file__).parent
 DEPLOY = ["bundle", "deploy", "-t", "test", "--auto-approve"]
@@ -74,6 +74,10 @@ def test_bundle_keys_name_distinct_state_files(tmp_path: Path) -> None:
     names = {bundle_key(tmp_path).file_name(), bundle_key(tmp_path, target="ci").file_name()}
     assert len(names) == 2
     assert bundle_key(tmp_path).file_name() == bundle_key(tmp_path).file_name()
+    a = bundle_key(tmp_path, variables=(("catalog", "a"),))
+    b = bundle_key(tmp_path, variables=(("catalog", "b"),))
+    assert len({a.file_name(), b.file_name(), bundle_key(tmp_path).file_name()}) == 3
+    assert a.file_name() == bundle_key(tmp_path, variables=(("catalog", "a"),)).file_name()
 
 
 @pytest.mark.parametrize(
@@ -250,6 +254,108 @@ def test_setup_with_none_uses_validate(fake_ws: FakeWorkspaceClient, fake_cli: F
 def test_setup_with_sync_syncs_first(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path) -> None:
     session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync="sync"))
     assert [call[:2] for call in fake_cli.calls] == [["--version"], ["bundle", "sync"], ["bundle", "validate"]]
+
+
+def test_setup_fails_on_host_mismatch(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path) -> None:
+    fake_cli.summary = {"workspace": {"host": "https://other.cloud.databricks.com"}}
+    with pytest.raises(LakeflowError) as excinfo:
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+    message = str(excinfo.value)
+    assert "'test'" in message
+    assert "https://other.cloud.databricks.com" in message
+    assert HOST in message
+    assert "Pass profile= to Lakeflow" in message
+    assert fake_ws.jobs.gets == []
+    assert fake_ws.workspace.uploads == {}
+
+
+def test_setup_checks_the_host_from_validate(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path) -> None:
+    fake_cli.validate = {"workspace": {"host": "other.cloud.databricks.com"}}
+    with pytest.raises(LakeflowError, match="deploys to other.cloud.databricks.com but the workspace client is for"):
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync="none"))
+
+
+@pytest.mark.parametrize(
+    "bundle_host",
+    [
+        f"{HOST}/",
+        HOST.removeprefix("https://"),
+        HOST.upper(),
+        "http://example.cloud.databricks.com",
+        None,
+    ],
+)
+def test_check_host_normalises(bundle_host: str | None) -> None:
+    session.check_host("test", bundle_host, HOST)
+
+
+def test_check_host_skips_a_client_without_a_host() -> None:
+    session.check_host("test", "https://other.cloud.databricks.com", None)
+
+
+@pytest.mark.parametrize("sync", ["deploy", "none"])
+def test_setup_skips_the_host_check_for_a_null_workspace(
+    fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str
+) -> None:
+    fake_cli.summary = {**fake_cli.summary, "workspace": None}
+    fake_cli.validate = {**fake_cli.validate, "workspace": None}
+    session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
+
+
+def test_check_host_names_both_hosts_and_the_target() -> None:
+    with pytest.raises(LakeflowError) as excinfo:
+        session.check_host("ci", "https://adb-1.azuredatabricks.net", "https://adb-2.azuredatabricks.net")
+    assert str(excinfo.value) == (
+        "Bundle target 'ci' deploys to https://adb-1.azuredatabricks.net but the workspace client is for "
+        "https://adb-2.azuredatabricks.net. Pass profile= to Lakeflow, or set DATABRICKS_HOST and "
+        "DATABRICKS_CONFIG_PROFILE to match the target."
+    )
+
+
+def test_setup_passes_variables_to_every_cli_call(
+    fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    for sync, commands in (("deploy", 2), ("sync", 2), ("none", 1)):
+        fake_cli.calls.clear()
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync, variables=(("catalog", "dev"),)))
+        bundle_calls = [call for call in fake_cli.calls if call[0] == "bundle"]
+        assert len(bundle_calls) == commands
+        assert all(call[-2:] == ["--var", "catalog=dev"] for call in bundle_calls)
+
+
+def test_host_mismatch_fails_later_tests_too(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    fake_cli.summary = {"workspace": {"host": "https://other.cloud.databricks.com"}}
+    test = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
+    pytester.makepyfile(test.format("a") + "\n" + test.format("b"))
+    result = pytester.runpytest()
+    result.assert_outcomes(failed=2)
+    result.stdout.fnmatch_lines(
+        ["*LakeflowError: Bundle target 'test' deploys to*", "*failed earlier in this session: LakeflowError*"]
+    )
+    assert fake_cli.calls.count(DEPLOY) == 1
+    assert fake_ws.jobs.gets == []
+
+
+def test_variables_are_part_of_the_bundle_target(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+) -> None:
+    configure_lakeflow(
+        pytester,
+        'variables={"catalog": "a"}',
+        '\n\n@pytest.fixture(scope="session")\ndef same():\n    return Lakeflow(variables={"catalog": "a"})\n'
+        '\n\n@pytest.fixture(scope="session")\ndef other():\n    return Lakeflow(variables={"catalog": "b"})\n',
+    )
+    pytester.makepyfile(
+        "def test_a(lakeflow, same, other):\n"
+        "    lakeflow.template('my_job')\n    same.template('my_job')\n    other.template('my_job')\n"
+    )
+    pytester.runpytest().assert_outcomes(passed=1)
+    assert [call for call in fake_cli.calls if call[:2] == ["bundle", "deploy"]] == [
+        [*DEPLOY, "--var", "catalog=a"],
+        [*DEPLOY, "--var", "catalog=b"],
+    ]
 
 
 def test_helper_sources_use_prefixed_widgets() -> None:

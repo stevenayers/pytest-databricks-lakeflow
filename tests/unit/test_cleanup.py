@@ -19,6 +19,7 @@ pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
 DESTROY = ["bundle", "destroy", "-t", "test", "--auto-approve"]
 DESTROY_STAGING = ["bundle", "destroy", "-t", "staging", "--auto-approve"]
+DEPLOY_WITH_VARIABLES = ["bundle", "deploy", "-t", "test", "--auto-approve", "--var", "catalog=dev"]
 HOUR_MS = 3_600_000
 USES_LAKEFLOW = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
 
@@ -154,6 +155,31 @@ def test_destroy_each_deployed_target(pytester: pytest.Pytester, fake_cli: FakeC
     pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=1)
     destroys = [(args, profile) for args, _, profile in fake_cli.invocations if args[:2] == ["bundle", "destroy"]]
     assert destroys == [(DESTROY, "dev"), (DESTROY_STAGING, None)]
+
+
+def test_destroy_uses_the_deploy_variables(pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
+    configure_lakeflow(pytester, 'variables={"catalog": "dev"}')
+    pytester.makepyfile(uses_lakeflow("a"))
+    pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=1)
+    assert fake_cli.calls[-1] == [*DESTROY, "--var", "catalog=dev"]
+    assert DEPLOY_WITH_VARIABLES in fake_cli.calls
+
+
+VARIABLES_FIXTURE = """
+
+@pytest.fixture(scope="session")
+def lakeflow():
+    return Lakeflow(variables={"catalog": "dev"})
+"""
+
+
+def test_xdist_destroy_uses_the_deploy_variables(pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
+    pytest.importorskip("xdist")
+    log = make_xdist_conftest(pytester, VARIABLES_FIXTURE)
+    pytester.makepyfile(uses_lakeflow(*map(str, range(4))))
+    pytester.runpytest("-n", "2", "--lakeflow-destroy").assert_outcomes(passed=4)
+    assert log.read_text().splitlines().count(" ".join(DEPLOY_WITH_VARIABLES)) == 1
+    assert fake_cli.calls == [[*DESTROY, "--var", "catalog=dev"]]
 
 
 def test_no_destroy_without_the_flag(pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
