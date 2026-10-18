@@ -40,6 +40,8 @@ SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
+    "-e": "Pass target= to Lakeflow instead",
+    "--environment": "Pass target= to Lakeflow instead",
     "-p": "Pass profile= to Lakeflow instead",
     "--profile": "Pass profile= to Lakeflow instead",
     "--var": "Pass variables= to Lakeflow instead",
@@ -73,7 +75,8 @@ class Lakeflow:
             included. Instances with different variables set the target up separately.
         deploy_flags: Extra flags for `databricks bundle deploy`, added at the end of the command, such as
             `["--fail-on-active-runs"]`. Instances with different flags deploy separately. Used only when `sync`
-            is `deploy`. `-t`, `--target`, `-p`, `--profile`, `--var` and `--auto-approve` are not allowed.
+            is `deploy`. `-t`, `--target`, `-e`, `--environment`, `-p`, `--profile`, `--var` and `--auto-approve` are
+            not allowed.
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
         catalog: The catalog in which `schema()` creates temporary schemas.
@@ -144,6 +147,8 @@ class Lakeflow:
         if isinstance(self.deploy_flags, str):
             raise ValueError(f"deploy_flags must be a list of flags, not a string: [{self.deploy_flags!r}]")
         for flag in self.deploy_flags:
+            if not isinstance(flag, str):
+                raise ValueError(f"deploy_flags must contain only strings, got {flag!r}")
             name = flag.split("=", 1)[0]
             if not name.startswith("--") and len(name) > 2:
                 name = name[:2]

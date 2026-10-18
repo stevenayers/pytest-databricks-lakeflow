@@ -116,6 +116,10 @@ def test_rejects_an_unknown_sync_strategy() -> None:
         (["-tother"], "-t", "target="),
         (["--target", "other"], "--target", "target="),
         (["--target=other"], "--target", "target="),
+        (["-e", "other"], "-e", "target="),
+        (["-eother"], "-e", "target="),
+        (["--environment", "other"], "--environment", "target="),
+        (["--environment=other"], "--environment", "target="),
         (["-p", "x"], "-p", "profile="),
         (["-pother"], "-p", "profile="),
         (["--profile", "x"], "--profile", "profile="),
@@ -131,6 +135,11 @@ def test_deploy_flags_reject_plugin_owned_flags(flags: list[str], name: str, arg
 def test_deploy_flags_reject_a_bare_string() -> None:
     with pytest.raises(ValueError, match="deploy_flags must be a list of flags, not a string"):
         Lakeflow(deploy_flags="--fail-on-active-runs")
+
+
+def test_deploy_flags_reject_a_flag_that_is_not_a_string() -> None:
+    with pytest.raises(ValueError, match="deploy_flags must contain only strings, got 1"):
+        Lakeflow(deploy_flags=cast(Any, [1]))
 
 
 def test_deploy_flags_accept_other_flags() -> None:
