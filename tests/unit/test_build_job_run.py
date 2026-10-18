@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any, cast
@@ -11,7 +12,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.results import JobRun, Timing, build_job_run
+from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run
 
 from .fakes import DATA, FakeWorkspaceClient, make_run, recorded
 
@@ -457,3 +458,120 @@ def test_build_job_run_reuses_given_outputs() -> None:
     assert result.task("extract").output == "fetched while polling"
     assert result.task("transform").task_values == {"stage": "done", "rows_written": 7}
     assert sorted(ws.jobs.output_calls) == sorted(set(outputs) - {extract.run_id})
+
+
+NEW_ALERT_TASK = pytest.mark.skipif(
+    not hasattr(jobs, "AlertTaskOutput"), reason="this databricks-sdk has no alert task output"
+)
+
+
+def _built_task(output: jobs.RunOutput, key: str = "t") -> TaskRun:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {key: "SUCCESS"})
+    ws.jobs.outputs[100] = output
+    return build_from(ws, run).task(key)
+
+
+def test_sql_query_output_is_exposed() -> None:
+    query = jobs.SqlQueryOutput(warehouse_id="w1", output_link="https://x/q")
+    task = _built_task(jobs.RunOutput(sql_output=jobs.SqlOutput(query_output=query)), "daily_query")
+    assert task.sql_output is not None and task.sql_output.query_output is not None
+    assert task.sql_output.query_output.warehouse_id == "w1"
+    assert task.sql_output.query_output.output_link == "https://x/q"
+    assert task.alert_state is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        pytest.param(
+            lambda: jobs.RunOutput(alert_output=jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.TRIGGERED)),
+            marks=NEW_ALERT_TASK,
+            id="alert-task",
+        ),
+        pytest.param(
+            lambda: jobs.RunOutput(
+                sql_output=jobs.SqlOutput(alert_output=jobs.SqlAlertOutput(alert_state=jobs.SqlAlertState.TRIGGERED))
+            ),
+            id="legacy-sql-alert",
+        ),
+    ],
+)
+def test_alert_state_from_new_and_legacy_alert_outputs(output: Callable[[], jobs.RunOutput]) -> None:
+    assert _built_task(output(), "check").alert_state == "TRIGGERED"
+
+
+def test_legacy_sql_alert_state_ok() -> None:
+    alert = jobs.SqlAlertOutput(alert_state=jobs.SqlAlertState.OK)
+    assert _built_task(jobs.RunOutput(sql_output=jobs.SqlOutput(alert_output=alert))).alert_state == "OK"
+
+
+@NEW_ALERT_TASK
+def test_alert_task_output_is_exposed() -> None:
+    alert = jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.OK)
+    task = _built_task(jobs.RunOutput(alert_output=alert), "check")
+    assert task.alert_output == alert
+    assert task.alert_state == "OK"
+
+
+def test_run_job_and_dbt_outputs() -> None:
+    trigger = _built_task(jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=42)), "trigger")
+    assert trigger.run_job_output is not None and trigger.run_job_output.run_id == 42
+    dbt = jobs.DbtOutput(artifacts_link="https://x/artifacts", artifacts_headers={"h": "v"})
+    models = _built_task(jobs.RunOutput(dbt_output=dbt), "models")
+    assert models.dbt_output is not None and models.dbt_output.artifacts_link == "https://x/artifacts"
+
+
+def test_dashboard_output_is_exposed() -> None:
+    dashboard = jobs.DashboardTaskOutput(page_snapshots=[])
+    assert _built_task(jobs.RunOutput(dashboard_output=dashboard)).dashboard_output == dashboard
+
+
+def test_clean_room_notebook_output_fills_output() -> None:
+    clean = jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput(
+        notebook_output=jobs.NotebookOutput(result='{"n": 3}', truncated=False)
+    )
+    task = _built_task(jobs.RunOutput(clean_rooms_notebook_output=clean), "clean")
+    assert task.clean_rooms_notebook_output == clean
+    assert task.output == '{"n": 3}'
+    assert task.output_json == {"n": 3}
+    assert task.output_truncated is False
+
+
+def test_top_level_notebook_output_wins_over_clean_room_output() -> None:
+    clean = jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput(notebook_output=jobs.NotebookOutput(result="b"))
+    output = jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="a"), clean_rooms_notebook_output=clean)
+    assert _built_task(output).output == "a"
+
+
+def test_truncated_clean_room_output() -> None:
+    clean = jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput(
+        notebook_output=jobs.NotebookOutput(result="x", truncated=True)
+    )
+    with pytest.warns(UserWarning, match="The output of task 'clean' was cut"):
+        task = _built_task(jobs.RunOutput(clean_rooms_notebook_output=clean), "clean")
+    assert task.output_truncated is True
+
+
+def test_task_outputs_are_none_for_an_empty_run_output() -> None:
+    task = _built_task(jobs.RunOutput())
+    assert task.sql_output is None
+    assert task.alert_output is None
+    assert task.dbt_output is None
+    assert task.run_job_output is None
+    assert task.dashboard_output is None
+    assert task.clean_rooms_notebook_output is None
+    assert task.alert_state is None
+    assert task.output is None
+
+
+@pytest.mark.parametrize("name", sorted(p.stem for p in (DATA / "runs").glob("*.json")))
+def test_recorded_runs_have_no_task_outputs(name: str) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run, _ = build(name)
+    for task in run.tasks.values():
+        fields = (task.sql_output, task.alert_output, task.dbt_output, task.run_job_output, task.dashboard_output)
+        assert fields == (None,) * 5
+        assert task.clean_rooms_notebook_output is None
+        assert task.alert_state is None

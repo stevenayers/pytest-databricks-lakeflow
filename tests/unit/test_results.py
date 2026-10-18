@@ -332,3 +332,21 @@ def test_timing_from_a_task_converts_milliseconds() -> None:
     timing = Timing.from_run(task)
     assert timing == Timing(timedelta(milliseconds=500), timedelta(seconds=1), timedelta(seconds=2.5), timedelta(0))
     assert timing.total == timedelta(seconds=4)
+
+
+def test_alert_state_is_none_without_alert_output() -> None:
+    assert task("a").alert_state is None
+    assert task("a", sql_output=jobs.SqlOutput(query_output=jobs.SqlQueryOutput(warehouse_id="w1"))).alert_state is None
+    assert task("a", sql_output=jobs.SqlOutput(alert_output=jobs.SqlAlertOutput())).alert_state is None
+
+
+def test_new_output_fields_default_to_none() -> None:
+    t = task("a")
+    outputs = (t.sql_output, t.alert_output, t.dbt_output, t.run_job_output, t.dashboard_output)
+    assert outputs == (None,) * 5
+    assert t.clean_rooms_notebook_output is None
+
+
+def test_outputs_are_left_out_of_the_repr() -> None:
+    t = task("a", run_job_output=jobs.RunJobOutput(run_id=42), dbt_output=jobs.DbtOutput(artifacts_link="l"))
+    assert repr(t) == "TaskRun('a', SUCCESS, https://example.com/a)"

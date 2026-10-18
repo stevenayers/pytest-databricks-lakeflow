@@ -186,7 +186,8 @@ class TaskRun:
         termination_message: The termination message.
         run_url: The task run's page in the workspace.
         duration: The time from start to end.
-        output: The value the notebook passed to `dbutils.notebook.exit()`.
+        output: The value the notebook passed to `dbutils.notebook.exit()`. For a clean room notebook task, the
+            value from `clean_rooms_notebook_output` when the run has no top-level notebook output.
         output_truncated: Whether `output` was cut at 5 MB.
         logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks.
         logs_truncated: Whether `logs` holds only the last 5 MB.
@@ -207,6 +208,16 @@ class TaskRun:
             `PERFORMANCE_OPTIMIZED`, or `None` when the platform did not say.
         condition_outcome: The outcome of an if/else condition task: `True` when the condition held, `False` when it
             did not, `None` for any other task or when the platform reported no outcome.
+        sql_output: The output of a SQL task as the platform reported it: `query_output` (with `warehouse_id`,
+            `output_link`, `query_text` and `sql_statements`), `alert_output` or `dashboard_output`. Holds no query
+            rows. `None` for any other task or when the platform reported none.
+        alert_output: The output of an alert task, with its `alert_state`. `None` for any other task, when the
+            platform reported none, or with a databricks-sdk too old to know the field.
+        dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`.
+        run_job_output: The output of a run-job task, with the triggered run's `run_id`, or `None`.
+        dashboard_output: The output of a dashboard task, with its `page_snapshots`, or `None`.
+        clean_rooms_notebook_output: The output of a clean room notebook task, with `notebook_output` and
+            `clean_room_job_run_state`, or `None`.
     """
 
     task_key: str
@@ -229,6 +240,12 @@ class TaskRun:
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
     condition_outcome: bool | None = None
+    sql_output: jobs.SqlOutput | None = None
+    alert_output: jobs.AlertTaskOutput | None = None
+    dbt_output: jobs.DbtOutput | None = None
+    run_job_output: jobs.RunJobOutput | None = None
+    dashboard_output: jobs.DashboardTaskOutput | None = None
+    clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -267,6 +284,20 @@ class TaskRun:
     def cancelled(self) -> bool:
         """Whether the task ended `CANCELED`."""
         return self.result_state == "CANCELED"
+
+    @property
+    def alert_state(self) -> str | None:
+        """The state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`.
+
+        Read from `alert_output` for an alert task, else from `sql_output.alert_output` for a legacy SQL alert task.
+        `None` for any other task or when the platform reported no state. An alert task succeeds whether or not the
+        alert triggered, so assert on this rather than on `succeeded`.
+        """
+        alert = self.alert_output
+        if alert is not None and alert.alert_state is not None:
+            return _enum(alert.alert_state)
+        legacy = self.sql_output.alert_output if self.sql_output else None
+        return _enum(legacy.alert_state) if legacy else None
 
     @property
     def output_json(self) -> object:
@@ -563,7 +594,8 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
     out = out or jobs.RunOutput()
     state = _enum(_result_state(task))
     details = task.status.termination_details if task.status else None
-    notebook = out.notebook_output
+    clean_room = out.clean_rooms_notebook_output
+    notebook = out.notebook_output or (clean_room.notebook_output if clean_room else None)
     key = task.task_key or ""
     truncated = [
         what for what, cut in (("output", notebook and notebook.truncated), ("logs", out.logs_truncated)) if cut
@@ -589,6 +621,13 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         timing=Timing.from_run(task),
         effective_performance_target=_enum(task.effective_performance_target),
         condition_outcome=_condition_outcome(task.condition_task),
+        sql_output=out.sql_output,
+        # Older databricks-sdk releases have no alert task, so `RunOutput` may lack the field.
+        alert_output=getattr(out, "alert_output", None),
+        dbt_output=out.dbt_output,
+        run_job_output=out.run_job_output,
+        dashboard_output=out.dashboard_output,
+        clean_rooms_notebook_output=clean_room,
     )
 
 
