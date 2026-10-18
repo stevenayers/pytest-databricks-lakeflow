@@ -13,7 +13,15 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
-from .fakes import HOST, FakeWorkspaceClient, make_run, parent_settings, pipeline_settings, running_run
+from .fakes import (
+    HOST,
+    FakeWorkspaceClient,
+    example_settings,
+    make_run,
+    parent_settings,
+    pipeline_settings,
+    running_run,
+)
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -1333,3 +1341,31 @@ def test_children_rejects_unknown_values(pytester: pytest.Pytester, children: st
                 lakeflow.job("my_job", children="{children}")
     """
     run_tests(pytester, source).assert_outcomes(passed=1)
+
+
+def test_child_run_of_a_run_job_task_is_a_job_run(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, parent: int
+) -> None:
+    fake_ws.jobs.start_ids_at(123)
+    fake_cli.deployed["child"] = fake_ws.jobs.add(example_settings())
+    fake_ws.jobs.start_ids_at(2000)
+    child = make_run(777, {"load": "SUCCESS"})
+    child.job_id = 123
+    fake_ws.jobs.add_run(child)
+    output = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
+    fake_ws.jobs.queue(make_run(5, {"prepare": "SUCCESS", "trigger_child": "SUCCESS"}), {501: output})
+    source = """
+        def test_job(lakeflow):
+            with lakeflow.job("parent") as job:
+                run = job.run()
+            child = run.task("trigger_child").child_run
+            assert child is not None
+            assert (child.job_key, child.job_id, child.run_id) == ("child", 123, 777)
+            assert child.task("load").succeeded
+            assert run.task("prepare").child_run is None
+    """
+    run_tests(pytester, source).assert_outcomes(passed=1, warnings=1)
+    [created] = fake_ws.jobs.created
+    assert fake_ws.jobs.cancelled == []
+    assert fake_ws.jobs.deleted == [2000]
+    assert created["name"].startswith("[pytest]")
