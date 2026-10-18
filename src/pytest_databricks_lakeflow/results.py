@@ -215,6 +215,9 @@ class TaskRun:
             platform reported none, or with a databricks-sdk too old to know the field.
         dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`.
         run_job_output: The output of a run-job task, with the triggered run's `run_id`, or `None`.
+        child_run_id: The id of the job run that a run-job task triggered, from `run_job_output.run_id`. The run is
+            of the deployed child job, not a copy, so the plugin does not cancel or delete it. `None` for any other
+            task or when the platform reported no run id.
         dashboard_output: The output of a dashboard task, with its `page_snapshots`, or `None`.
         clean_rooms_notebook_output: The output of a clean room notebook task, with `notebook_output` and
             `clean_room_job_run_state`, or `None`.
@@ -244,6 +247,7 @@ class TaskRun:
     alert_output: jobs.AlertTaskOutput | None = None
     dbt_output: jobs.DbtOutput | None = None
     run_job_output: jobs.RunJobOutput | None = None
+    child_run_id: int | None = None
     dashboard_output: jobs.DashboardTaskOutput | None = None
     clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
 
@@ -628,6 +632,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         alert_output=getattr(out, "alert_output", None),
         dbt_output=out.dbt_output,
         run_job_output=out.run_job_output,
+        child_run_id=out.run_job_output.run_id if out.run_job_output else None,
         dashboard_output=out.dashboard_output,
         clean_rooms_notebook_output=clean_room,
     )

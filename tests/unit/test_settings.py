@@ -15,13 +15,14 @@ from pytest_databricks_lakeflow.settings import (
     create_kwargs,
     disable_tasks,
     pipeline_params,
+    run_job_tasks,
     sanitise,
     select,
     tag_value,
 )
 
 from .conftest import NEEDS_REFRESH_SELECTION
-from .fakes import example_settings, pipeline_settings, reporting_settings
+from .fakes import example_settings, parent_settings, pipeline_settings, reporting_settings
 
 CLUSTER = "0123-456789-abcdef"
 TAGS = {"pytest": "", "pytest_run_id": "r1", "pytest_nodeid": "tests/test_x.py::test_y"}
@@ -584,3 +585,35 @@ def test_sanitise_leaves_pipeline_tasks_alone() -> None:
     copied = task(sanitised(settings), "refresh").pipeline_task
     assert copied is not None
     assert copied.as_dict() == expected == {"pipeline_id": "abc", "full_refresh": True}
+
+
+def test_run_job_tasks_is_empty_without_run_job_tasks() -> None:
+    assert run_job_tasks(example_settings()) == []
+
+
+def test_run_job_tasks_finds_run_job_tasks() -> None:
+    [found] = run_job_tasks(parent_settings())
+    assert found.task_key == "trigger_child"
+    assert found.run_job_task is not None and found.run_job_task.job_id == 123
+
+
+def test_run_job_tasks_includes_tasks_nested_in_for_each() -> None:
+    settings = parent_settings()
+    nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
+    loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1, 2]", task=nested))
+    settings.tasks = [*(settings.tasks or []), loop]
+    assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
+
+
+def test_run_job_tasks_skips_disabled_tasks_and_tasks_in_disabled_loops() -> None:
+    settings = parent_settings()
+    nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
+    loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1, 2]", task=nested))
+    settings.tasks = [*(settings.tasks or []), loop]
+    assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
+    assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+
+
+def test_sanitise_keeps_run_job_tasks_as_deployed() -> None:
+    expected = task(parent_settings(), "trigger_child").run_job_task
+    assert task(sanitised(parent_settings()), "trigger_child").run_job_task == expected
