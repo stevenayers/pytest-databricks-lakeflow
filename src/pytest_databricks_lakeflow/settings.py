@@ -194,6 +194,8 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
     for key in keys:
         tasks[key].disabled = True
     return settings
+
+
 def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
     for env in settings.environments or []:
         if env.environment_key == ENV_KEY or (env.spec and getattr(env.spec, "base_environment", None)):
