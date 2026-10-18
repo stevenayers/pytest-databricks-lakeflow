@@ -362,6 +362,9 @@ class Lakeflow:
         self._state_cache = (current, state)
         return state
 
+    def _job_keys(self) -> dict[int, str]:
+        return {job_id: key for key, job_id in self._state().get("job_ids", {}).items()}
+
     def _helpers(self) -> Helpers:
         paths = self._state()["helpers"]
         return Helpers(

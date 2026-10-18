@@ -209,6 +209,7 @@ class EphemeralJob:
             capture_task_values=self.capture_task_values,
             disabled={t.task_key for t in self.settings.tasks or [] if t.disabled and t.task_key},
             outputs=outputs,
+            job_keys=self.lakeflow._job_keys(),
         )
         self.runs.append(result)
         item.user_properties.extend(

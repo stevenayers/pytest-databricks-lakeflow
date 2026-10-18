@@ -239,6 +239,7 @@ def test_setup_with_deploy(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bund
         "template_errors": {},
         "helpers": {"set_values": f"{folder}/set_values", "get_values": f"{folder}/get_values"},
         "user": "someone@example.com",
+        "job_ids": {"my_job": fake_cli.deployed["my_job"]},
     }
     assert set(fake_ws.workspace.uploads) == {f"{folder}/set_values", f"{folder}/get_values"}
     assert all(upload["overwrite"] for upload in fake_ws.workspace.uploads.values())
@@ -252,6 +253,7 @@ def test_setup_with_none_uses_validate(fake_ws: FakeWorkspaceClient, fake_cli: F
     assert [call[:2] for call in fake_cli.calls] == [["--version"], ["bundle", "validate"]]
     assert state["templates"] == {"other": {"name": "o", "tasks": [{"task_key": "t"}]}}
     assert state["helpers"]["get_values"] == "/Shared/helpers/get_values"
+    assert state["job_ids"] == {}
 
 
 def test_setup_with_sync_syncs_first(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path) -> None:
