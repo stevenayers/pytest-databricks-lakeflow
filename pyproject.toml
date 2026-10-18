@@ -24,7 +24,7 @@ classifiers = [
 keywords = ["pytest", "databricks", "lakeflow", "asset-bundles", "testing"]
 dependencies = [
     "pytest>=8",
-    "databricks-sdk>=0.108",
+    "databricks-sdk>=0.66",
     "filelock>=3",
 ]
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -195,9 +195,11 @@ def make_run(
     result_state: str = "SUCCESS",
     code: str = "SUCCESS",
     attempts: Mapping[str, Sequence[str]] | None = None,
-    disabled: Collection[str] = (),
 ) -> jobs.Run:
-    """Build a terminated run whose tasks ended in `states`, keyed by task key, flagging the `disabled` tasks.
+    """Build a terminated run whose tasks ended in `states`, keyed by task key.
+
+    Like the Jobs API, a `DISABLED` task run never carries `disabled`, whether the job disabled it or `only` left it
+    out: only the job's settings say which tasks are disabled.
 
     `attempts` gives the state of every attempt of the tasks it names, in order, numbered from attempt 0. Task run
     ids are `run_id * 100` plus the position of the attempt among all task runs.
@@ -207,7 +209,6 @@ def make_run(
     tasks = [
         jobs.RunTask(
             task_key=key,
-            disabled=True if key in disabled else None,
             run_id=(task_run_id := run_id * 100 + next(numbered)),
             attempt_number=attempt,
             state=jobs.RunState(result_state=jobs.RunResultState(state)),
@@ -295,7 +296,6 @@ def reporting_settings() -> jobs.JobSettings:
                     "dashboard_task": {
                         "dashboard_id": "d1",
                         "warehouse_id": "w1",
-                        "filters": {"region": "emea"},
                         "subscription": {
                             "custom_subject": "Daily report",
                             "subscribers": [{"user_name": "someone@example.com"}, {"destination_id": "slack"}],

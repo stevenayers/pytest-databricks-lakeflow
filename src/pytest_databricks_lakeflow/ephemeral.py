@@ -173,6 +173,7 @@ class EphemeralJob:
             job_id=self.job_id,
             stubs=self.stubs,
             capture_task_values=self.capture_task_values,
+            disabled={t.task_key for t in self.settings.tasks or [] if t.disabled and t.task_key},
         )
         self.runs.append(result)
         item.user_properties.extend(

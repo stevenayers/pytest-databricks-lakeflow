@@ -92,7 +92,7 @@ def test_tasks_left_out_by_only_are_skipped() -> None:
 
 def test_disabled_task_is_reported_as_disabled() -> None:
     ws = FakeWorkspaceClient()
-    run = build_from(ws, make_run(3, {"extract": "SUCCESS", "load": "DISABLED"}, disabled=["load"]))
+    run = build_from(ws, make_run(3, {"extract": "SUCCESS", "load": "DISABLED"}), disabled=["load"])
     assert run.succeeded
     assert "load" not in run.tasks
     assert run.skipped_tasks["load"].disabled
