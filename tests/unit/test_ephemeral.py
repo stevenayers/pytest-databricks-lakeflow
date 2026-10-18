@@ -813,3 +813,30 @@ def test_create_errors_pass_through(
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(["*PermissionDenied: User is not authorised to set run_as to 0000-app-id*"])
     assert fake_ws.jobs.run_now_calls == []
+
+
+def test_compute_knobs_reach_jobs_create(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, 'environment_version="5", budget_policy_id="0123", existing_cluster_id="c-1"')
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["budget_policy_id"] == "0123"
+    assert [e.spec.environment_version for e in created["environments"]] == ["5"]
+    assert "job_clusters" not in created
+    tasks = {t.task_key: t for t in created["tasks"]}
+    assert (tasks["classic"].existing_cluster_id, tasks["classic"].job_cluster_key) == ("c-1", None)
+    assert tasks["load"].environment_key == "default"
+    assert tasks["load"].existing_cluster_id is None
+
+
+def test_check_compute_runs_after_modify_settings(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    callback = """
+
+def drop_environment(settings, item):
+    next(t for t in settings.tasks if t.task_key == "load").environment_key = None
+"""
+    configure_lakeflow(pytester, "modify_settings=drop_environment", callback)
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*LakeflowError*['load']*environment_key*"])
+    assert fake_ws.jobs.created == []

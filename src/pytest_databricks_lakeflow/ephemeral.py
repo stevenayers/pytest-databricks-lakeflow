@@ -15,7 +15,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.results import JobRun, build_job_run, describe_failing
-from pytest_databricks_lakeflow.settings import check_params, create_kwargs, select
+from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, select
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -88,8 +88,8 @@ class EphemeralJob:
         """Create the job if it does not exist yet.
 
         Raises:
-            LakeflowError: If the job has been closed, or `params` names a parameter that the job does not
-                declare after `modify_settings` has run.
+            LakeflowError: If the job has been closed, `params` names a parameter that the job does not
+                declare after `modify_settings` has run, or a serverless task that needs an environment has none.
         """
         if self._closed:
             raise LakeflowError(f"The ephemeral job for {self.job_key!r} has already been closed")
@@ -99,6 +99,7 @@ class EphemeralJob:
         if self.lakeflow.modify_settings is not None:
             self.lakeflow.modify_settings(self.settings, item)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
+        check_compute(self.settings)
         acl = self.lakeflow.access_control_list()
         self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings), access_control_list=acl).job_id
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
