@@ -98,10 +98,9 @@ def pytest_runtest_protocol(item: pytest.Item) -> Generator[None, object, object
 def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestReport, pytest.TestReport]:
     report = yield
     item.stash.setdefault(REPORTS, {})[str(report.when)] = report
-    if report.when == "call":
-        urls = [f"{name}: {value}" for name, value in item.user_properties if name.startswith("lakeflow_")]
-        if urls:
-            report.sections.append(("lakeflow", "\n".join(urls)))
+    lines = [f"{name}: {value}" for name, value in item.user_properties if name.startswith("lakeflow_")]
+    if lines:
+        report.sections.append(("lakeflow", "\n".join(lines)))
     return report
 
 
@@ -120,9 +119,14 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     for used in state.lakeflows:
         for run_id in sorted(used.active_runs):
             cancel_run(used.ws, run_id)
+        state.cancelled_runs += len(used.active_runs)
         used.active_runs.clear()
     if hasattr(config, "workerinput"):
-        cast(Any, config).workeroutput["lakeflow_deployed"] = state.deployed
+        workeroutput = cast(Any, config).workeroutput
+        workeroutput["lakeflow_deployed"] = state.deployed
+        workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
+        workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
+        workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
         return
     if not state.destroy:
         return
@@ -140,5 +144,31 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node: Any, error: object) -> None:
-    deployed = getattr(node, "workeroutput", {}).get("lakeflow_deployed", [])
-    node.config.stash[STATE].deployed.extend(tuple(entry) for entry in deployed)
+    output = getattr(node, "workeroutput", {})
+    state = node.config.stash[STATE]
+    state.deployed.extend(tuple(entry) for entry in output.get("lakeflow_deployed", []))
+    state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
+    state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
+    state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
+    state = config.stash.get(STATE, None)
+    if state is None or hasattr(config, "workerinput"):
+        return
+    if not (state.kept_jobs or state.kept_schemas or state.cancelled_runs):
+        return
+    terminalreporter.write_sep("=", "lakeflow")
+    for noun, names in (("job", state.kept_jobs), ("schema", state.kept_schemas)):
+        if names:
+            terminalreporter.write_line(f"lakeflow: {_count(len(names), noun)} kept")
+            for name in names:
+                terminalreporter.write_line(f"  {name}")
+    if state.cancelled_runs:
+        terminalreporter.write_line(f"lakeflow: {_count(state.cancelled_runs, 'run')} cancelled at session end")
+    if state.kept_jobs:
+        terminalreporter.write_line("hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours")
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"

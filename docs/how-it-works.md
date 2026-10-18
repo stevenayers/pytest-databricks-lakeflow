@@ -37,15 +37,16 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 
 ### Tear down
 
-1. Leaving the `with` block cancels any run of this job that is still active, then deletes the job unless a keep rule applies. The rules, in order: `--lakeflow-keep` or `keep=True` keeps everything; `--lakeflow-keep-failed` and `--no-lakeflow-keep-failed` override `keep_failed`; otherwise a job is kept when the block raised anything other than `pytest.skip` or `pytest.xfail` and `keep_failed` is on. Kept jobs are logged at WARNING with every run URL.
+1. Leaving the `with` block cancels any run of this job that is still active, then deletes the job unless a keep rule applies. The rules, in order: `--lakeflow-keep` or `keep=True` keeps everything; `--lakeflow-keep-failed` and `--no-lakeflow-keep-failed` override `keep_failed`; otherwise a job is kept when the block raised anything other than `pytest.skip` or `pytest.xfail` and `keep_failed` is on. Kept jobs are logged at WARNING with every run URL, and collected for the terminal summary.
 2. Without `with`, the finaliser applies the same rules, treating the test as failed if its setup, call or teardown report failed.
-3. `lakeflow.schema()` drops its schema with `force=True` in a `finally` block, unless `keep` or `--lakeflow-keep` is set.
+3. `lakeflow.schema()` drops its schema with `force=True` in a `finally` block, unless `keep` or `--lakeflow-keep` is set. A kept schema is logged at WARNING and collected for the terminal summary.
 
 ## Session end
 
-1. Every process cancels the runs it started that are still active.
-2. xdist workers report the bundle targets they deployed to the controller.
+1. Every process cancels the runs it started that are still active, and counts them.
+2. xdist workers report the bundle targets they deployed, the jobs and schemas they kept and the number of runs they cancelled to the controller.
 3. With `--lakeflow-destroy`, the controller, or the single process, runs `databricks bundle destroy -t <target> --auto-approve` for each target deployed with `sync="deploy"`. A failed destroy is printed with the summary and turns a passing session into a failed one.
+4. The controller, or the single process, prints a `lakeflow` block in the terminal summary with the kept jobs and schemas and the cancelled runs, when there are any. See [logging and reports](configuration.md#logging-and-reports).
 
 ## What is left in the workspace
 
