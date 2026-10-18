@@ -49,6 +49,11 @@ MAX_KEY_CHARS = 512
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
 TIMEOUT_GRACE_SECONDS = 60
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
+SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
+SINGLE_NODE_TAGS = {"ResourceClass": "SingleNode"}
+SHARED_ACCESS_MODES = frozenset(
+    {compute.DataSecurityMode.USER_ISOLATION, compute.DataSecurityMode.DATA_SECURITY_MODE_STANDARD}
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,7 @@ def sanitise(
     environment_version: str | None = None,
     budget_policy_id: str | None = None,
     existing_cluster_id: str | None = None,
+    single_node: bool = False,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
@@ -113,12 +119,17 @@ def sanitise(
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
             cluster, helper tasks and tasks nested in a `for_each_task` included. The job clusters are removed.
             Serverless and warehouse tasks are left alone.
+        single_node: Make every job cluster and every task's `new_cluster` a single node cluster, tasks nested in a
+            `for_each_task` included: no workers, no autoscaling, and the `SINGLE_NODE_CONF` Spark configuration
+            and `SINGLE_NODE_TAGS` tags merged over the cluster's own. Applied after `existing_cluster_id`, which
+            leaves no cluster to change.
 
     Returns:
         `settings`.
 
     Raises:
-        LakeflowError: If the job would have more than 25 tags without the attribution tags.
+        LakeflowError: If the job would have more than 25 tags without the attribution tags, or `single_node` is
+            set and a cluster uses standard access mode, which single node compute does not support.
     """
     for attr in STRIPPED:
         setattr(settings, attr, None)
@@ -137,6 +148,8 @@ def sanitise(
         settings.budget_policy_id = budget_policy_id
     if existing_cluster_id is not None:
         _use_existing_cluster(settings, existing_cluster_id)
+    if single_node:
+        _single_node_clusters(settings)
     if performance_optimized:
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
@@ -279,6 +292,27 @@ def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
             task.job_cluster_key = None
             task.new_cluster = None
     settings.job_clusters = None
+
+
+def _single_node_clusters(settings: jobs.JobSettings) -> None:
+    clusters = [(c.job_cluster_key, c.new_cluster) for c in settings.job_clusters or [] if c.new_cluster]
+    clusters += [(t.task_key, t.new_cluster) for t in _with_nested(settings.tasks) if t.new_cluster]
+    for key, cluster in clusters:
+        if cluster.data_security_mode in SHARED_ACCESS_MODES:
+            raise LakeflowError(
+                f"single_node cannot change cluster {key!r}: its data_security_mode is "
+                f"{cluster.data_security_mode.value}, and single node compute needs dedicated access mode. Set "
+                "data_security_mode to SINGLE_USER or DATA_SECURITY_MODE_DEDICATED, or leave single_node off."
+            )
+    for _, cluster in clusters:
+        _single_node(cluster)
+
+
+def _single_node(cluster: compute.ClusterSpec) -> None:
+    cluster.num_workers = 0
+    cluster.autoscale = None
+    cluster.spark_conf = {**(cluster.spark_conf or {}), **SINGLE_NODE_CONF}
+    cluster.custom_tags = {**(cluster.custom_tags or {}), **SINGLE_NODE_TAGS}
 
 
 def _run_as(run_as: str | jobs.JobRunAs | None) -> jobs.JobRunAs | None:
