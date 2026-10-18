@@ -107,8 +107,15 @@ class FakeJobs:
             self.tokens[idempotency_token] = run_id
         return SimpleNamespace(response=jobs.RunNowResponse(run_id=run_id))
 
+    def add_run(self, run: jobs.Run) -> None:
+        """Make `get_run` report `run`, a run started outside the plugin such as a Run Job task's child run."""
+        assert run.run_id is not None
+        self.polls[run.run_id] = [run]
+
     def get_run(self, run_id: int, **kwargs: Any) -> jobs.Run:
         self.get_run_calls.append({"run_id": run_id, **kwargs})
+        if run_id not in self.polls:
+            raise NotFound(f"Run {run_id} does not exist.")
         polls = self.polls[run_id]
         return polls.pop(0) if len(polls) > 1 else polls[0]
 

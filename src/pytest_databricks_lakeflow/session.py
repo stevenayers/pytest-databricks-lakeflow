@@ -134,8 +134,8 @@ class SessionState:
             sweep_hours: The age after which leftover jobs are swept.
 
         Returns:
-            The target's state: its job templates, the errors of jobs that cannot be used, the helper paths, and the
-                workspace user.
+            The target's state: its job templates, the errors of jobs that cannot be used, the job ids by bundle key,
+                the helper paths, and the workspace user.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -342,15 +342,23 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
         check_host(key.target, (bundle_summary.get("workspace") or {}).get("host"), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
+        job_ids = bundle.job_ids(bundle_summary)[0]
     else:
         if key.sync == "sync":
             bundle.sync(root, key.target, key.profile, variables)
         config = bundle.validate(root, key.target, key.profile, variables)
         check_host(key.target, (config.get("workspace") or {}).get("host"), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
+        job_ids = {}
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
-    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder), "user": user}
+    state = {
+        "templates": templates,
+        "template_errors": errors,
+        "helpers": helpers.upload(ws, folder),
+        "user": user,
+        "job_ids": job_ids,
+    }
     log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
     return state
 
