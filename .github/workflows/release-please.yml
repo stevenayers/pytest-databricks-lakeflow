@@ -1,11 +1,13 @@
 name: release-please
 
-# Opens and updates the release PR from conventional commits on main. Merging that PR makes release-please
-# create the vX.Y.Z tag and the GitHub release, after which this workflow dispatches release.yml for the tag.
-# Needs "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General.
+# Opens and updates the release PR from conventional commits on main, then enables auto-merge on it so it
+# squash-merges itself once the checks pass. That merge runs this workflow again: release-please creates the
+# vX.Y.Z tag and the GitHub release, and the last step dispatches release.yml for the tag.
+# Needs "Allow GitHub Actions to create and approve pull requests" and "Allow auto-merge" in the repository settings.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}
@@ -20,7 +22,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write # push the release branch, create the tag and the GitHub release
-      pull-requests: write # open and update the release PR
+      pull-requests: write # open and update the release PR, enable auto-merge on it
       issues: write # label the release PR
       actions: write # dispatch release.yml for the new tag
     steps:
@@ -30,6 +32,20 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           target-branch: main
+      - name: Enable auto-merge on the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          number="$(jq -r '.number' <<< "$PR_JSON")"
+          enabled="$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$enabled" = "true" ]; then
+            echo "Auto-merge is already enabled on release PR #$number"
+            exit 0
+          fi
+          gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --auto --squash
+          echo "Enabled auto-merge on release PR #$number"
       - name: Start the release workflow for the new tag
         if: steps.release.outputs.release_created == 'true'
         env:
