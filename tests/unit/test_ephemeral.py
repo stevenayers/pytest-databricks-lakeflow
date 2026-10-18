@@ -177,9 +177,38 @@ def test_disabled_tasks_come_from_the_copy_not_the_run(pytester: pytest.Pytester
         """
         def test_job(lakeflow):
             run = lakeflow.job("my_job", disable=["load"]).run()
-            assert run.skipped_tasks["load"].disabled is True
-            assert run.skipped_tasks["transform"].disabled is False
-            assert run.task("extract").disabled is False
+            assert sorted(run.disabled_tasks) == ["load"]
+            assert sorted(run.skipped_tasks) == ["transform"]
+            assert not run.task("extract").disabled
+        """,
+    )
+    result.assert_outcomes(passed=1)
+
+
+def test_template_disabled_tasks_are_reported_separately(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
+    callback = """
+
+def disable_classic(settings, item):
+    next(t for t in settings.tasks if t.task_key == "classic").disabled = True
+"""
+    configure_lakeflow(pytester, "modify_settings=disable_classic", callback)
+    states = {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS", "classic": "DISABLED"}
+    fake_ws.jobs.queue(make_run(77, states))
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        def test_job(lakeflow):
+            run = lakeflow.job("my_job").run()
+            assert run.succeeded
+            assert sorted(run.disabled_tasks) == ["classic"]
+            assert run.skipped_tasks == {}
+            assert run.executed_tasks == ["extract", "load", "transform"]
+            with pytest.raises(KeyError, match="Disabled in the job"):
+                run.task("classic")
         """,
     )
     result.assert_outcomes(passed=1)

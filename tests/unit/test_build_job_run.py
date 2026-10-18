@@ -91,21 +91,26 @@ def test_tasks_left_out_by_only_are_skipped() -> None:
         run.task("load")
 
 
-def test_disabled_task_is_reported_as_disabled() -> None:
+def test_disabled_in_the_template_is_not_skipped_by_only() -> None:
     ws = FakeWorkspaceClient()
-    run = build_from(ws, make_run(3, {"extract": "SUCCESS", "load": "DISABLED"}), disabled=["load"])
+    run = build_from(ws, make_run(1, {"a": "SUCCESS", "b": "DISABLED", "c": "DISABLED"}), disabled={"c"})
     assert run.succeeded
-    assert "load" not in run.tasks
-    assert run.skipped_tasks["load"].disabled
-    assert not run.task("extract").disabled
-    with pytest.raises(KeyError, match=r"was disabled \(in the job or with disable=\)") as raised:
-        run.task("load")
+    assert sorted(run.tasks) == ["a"]
+    assert sorted(run.skipped_tasks) == ["b"]
+    assert sorted(run.disabled_tasks) == ["c"]
+    assert run.disabled_tasks["c"].disabled
+    with pytest.raises(KeyError, match=r"Disabled in the job: \['c'\]") as raised:
+        run.task("c")
     assert "Skipped by only" not in str(raised.value)
+    with pytest.raises(KeyError, match=r"Skipped by only: \['b'\]") as raised:
+        run.task("b")
+    assert "Disabled in the job" not in str(raised.value)
 
 
 def test_only_skipped_task_is_still_skipped_by_only() -> None:
     run, _ = build("only_plus_transform")
-    assert not run.skipped_tasks["load"].disabled
+    assert sorted(run.skipped_tasks) == ["load"]
+    assert run.disabled_tasks == {}
     with pytest.raises(KeyError, match="Skipped by only"):
         run.task("load")
 
@@ -176,6 +181,27 @@ def test_untaken_branches_do_not_fail_the_run() -> None:
     assert result.task("on_false").excluded
     assert not result.task("on_true").excluded
     assert repr(result).endswith("failing=[])")
+
+
+def test_condition_outcome_and_branch_helpers() -> None:
+    ws = FakeWorkspaceClient()
+    states = {"check": "SUCCESS", "on_true": "SUCCESS", "on_false": "EXCLUDED"}
+    run = build_from(ws, make_run(1, states, condition_outcomes={"check": "true"}))
+    assert run.task("check").condition_outcome is True
+    assert run.task("on_true").condition_outcome is None
+    assert run.branch_taken("check") is True
+    assert run.task("on_false").excluded
+    assert run.executed_tasks == ["check", "on_true"]
+    assert run.succeeded
+    false = build_from(ws, make_run(2, {"check": "SUCCESS"}, condition_outcomes={"check": "false"}))
+    assert false.task("check").condition_outcome is False
+    assert false.branch_taken("check") is False
+
+
+def test_condition_without_a_recognised_outcome() -> None:
+    ws = FakeWorkspaceClient()
+    run = build_from(ws, make_run(1, {"check": "SUCCESS"}, condition_outcomes={"check": ""}))
+    assert run.task("check").condition_outcome is None
 
 
 def test_output_json_of_a_recorded_run() -> None:

@@ -96,9 +96,10 @@ def test_disabled_task_does_not_run(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", disable=["load"]) as job:
         run = job.run()
         assert run.succeeded, run
-        assert "load" in run.skipped_tasks
-        assert run.skipped_tasks["load"].disabled
-        with pytest.raises(KeyError, match="disabled"):
+        assert sorted(run.disabled_tasks) == ["load"]
+        assert "load" not in run.skipped_tasks
+        assert run.disabled_tasks["load"].disabled
+        with pytest.raises(KeyError, match="Disabled in the job"):
             run.task("load")
 
 
