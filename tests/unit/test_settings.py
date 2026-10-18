@@ -317,6 +317,7 @@ def test_sanitise_replaces_a_zero_template_timeout() -> None:
 def test_sanitise_without_timeout() -> None:
     assert sanitised().timeout_seconds is None
 
+
 def test_sanitise_pauses_dashboard_and_alert_subscriptions() -> None:
     before, after = reporting_settings(), sanitised(reporting_settings())
     dashboard, alert = task(after, "dashboard").dashboard_task, task(after, "alert").sql_task
