@@ -57,9 +57,9 @@ Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`.
 - `termination_code` and `termination_message`, from the task's termination details.
-- `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`.
+- `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
-- `error`, a `TaskError` with `type`, `message` and `trace`, or `None`.
+- `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
 - `duration`, `attempt` and `run_url`.
 
@@ -78,6 +78,45 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
 `raised()` compares class names, because the exception happened in another process. `error.type` keeps the name as Python printed it, so `json.decoder.JSONDecodeError` matches `raised(json.JSONDecodeError)`.
 
 `repr(run)` names the failing tasks with the first line of their errors and links to the run, so `assert run.succeeded, run` gives a useful failure message.
+
+`run.raise_for_failure()` gives the full detail in one call. It returns the run when `run.succeeded` is true, so `run = job.run().raise_for_failure()` works, and otherwise raises `LakeflowRunFailed`. The message is `repr(run)` followed by one line per failing task with its whole error, its root cause when there is one, and its run URL. The exception's `run` attribute holds the `JobRun`.
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
+
+
+def test_failure_detail(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
+        with pytest.raises(LakeflowRunFailed, match="PermissionError") as excinfo:
+            job.run().raise_for_failure()
+        assert excinfo.value.run.task("transform").raised(PermissionError)
+```
+
+### Errors from Spark
+
+A Py4J or Spark failure often wraps the real problem. `error.root_cause` is the text of the last `Caused by:` line in `error.trace`, or `None` when the trace has none. Python's own chained exceptions do not produce `Caused by:` lines. `error.code` is the Spark error class, such as `TABLE_OR_VIEW_NOT_FOUND` or `DELTA_INVALID_FORMAT.X`, when `error.message` or `error.root_cause` starts with one in square brackets, and `None` otherwise:
+
+```python
+error = run.task("transform").error
+assert error is not None
+assert error.code == "TABLE_OR_VIEW_NOT_FOUND"
+```
+
+### JSON output
+
+A notebook can return structured data with `dbutils.notebook.exit(json.dumps({...}))`. `task.output_json` parses it:
+
+```python
+assert run.task("transform").output_json == {"rows_written": 7}
+```
+
+`output_json` raises a `ValueError` that names the task when the notebook never called `dbutils.notebook.exit()`, when the output was cut at 5 MB, or when the output is not JSON.
+
+### Truncated output and logs
+
+The Jobs API returns at most 5 MB of notebook output and of logs. When a task's output or logs were cut, building the run emits a `UserWarning` that names the task, so it shows up in the pytest warnings summary. `output_truncated` and `logs_truncated` say which one was cut.
 
 ## Run part of a job
 

@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from pytest_databricks_lakeflow import Lakeflow
+from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("LAKEFLOW_INTEGRATION") != "1", reason="set LAKEFLOW_INTEGRATION=1 to run against a workspace"
@@ -35,6 +35,24 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
         assert run.task("transform").raised(PermissionError)
         assert run.task("load").result_state == "UPSTREAM_FAILED"
         assert run.task("transform").attempt == 0
+
+
+def test_raise_for_failure_names_the_permission_error(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
+        run = job.run()
+        with pytest.raises(LakeflowRunFailed) as excinfo:
+            run.raise_for_failure()
+        assert excinfo.value.run is run
+        assert "PermissionError" in str(excinfo.value)
+        assert "transform" in str(excinfo.value)
+
+
+def test_output_json_refuses_a_plain_exit_value(lakeflow: Lakeflow) -> None:
+    # extract.py exits with the plain string "extracted 7 rows", so there is no JSON output to parse.
+    with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
+        run = job.run().raise_for_failure()
+        with pytest.raises(ValueError, match="Output of task 'extract' is not JSON"):
+            _ = run.task("extract").output_json
 
 
 def test_subset_of_job(lakeflow: Lakeflow) -> None:
