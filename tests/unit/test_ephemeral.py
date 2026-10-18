@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 from datetime import timedelta
 from pathlib import Path
@@ -9,8 +10,10 @@ import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
-from .conftest import GITHUB, FakeCli, configure_lakeflow, make_repository, set_ci
-from .fakes import HOST, FakeWorkspaceClient, make_run, running_run
+from pytest_databricks_lakeflow.ephemeral import EphemeralJob
+
+from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
+from .fakes import HOST, FakeWorkspaceClient, make_run, pipeline_settings, running_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -43,6 +46,7 @@ def test_with_block_creates_runs_and_deletes(pytester: pytest.Pytester, fake_ws:
     [call] = fake_ws.jobs.run_now_calls
     assert call["job_parameters"] == {"param1": "hi", "schema": "s"}
     assert call["only"] is None
+    assert call["pipeline_params"] is None
     assert fake_ws.jobs.deleted == [call["job_id"]]
 
 
@@ -1020,3 +1024,57 @@ def test_late_result_state_does_not_log_a_second_line(pytester: pytest.Pytester,
     assert len(progress) == 1
     assert progress[0].endswith(" transform: RUN_EXECUTION_ERROR in 0:00:02")
     assert fake_ws.jobs.output_calls == [7700]
+
+
+def test_run_passes_full_refresh(pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient) -> None:
+    fake_cli.deployed["pipeline_job"] = fake_ws.jobs.add(pipeline_settings())
+    source = 'def test_job(lakeflow):\n    lakeflow.job("pipeline_job").run(full_refresh=True)\n'
+    run_tests(pytester, source).assert_outcomes(passed=1)
+    assert [c["pipeline_params"] for c in fake_ws.jobs.run_now_calls] == [jobs.PipelineParams(full_refresh=True)]
+
+
+@NEEDS_REFRESH_SELECTION
+def test_run_passes_pipeline_refresh_selections(
+    pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient
+) -> None:
+    fake_cli.deployed["pipeline_job"] = fake_ws.jobs.add(pipeline_settings())
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("pipeline_job") as job:
+                job.run(refresh_selection=["bronze"])
+                job.run(full_refresh_selection=["silver"], only=["refresh"])
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert [c["pipeline_params"] for c in fake_ws.jobs.run_now_calls] == [
+        jobs.PipelineParams(refresh_selection=["bronze"]),
+        jobs.PipelineParams(full_refresh_selection=["silver"]),
+    ]
+    assert [c["only"] for c in fake_ws.jobs.run_now_calls] == [None, ["refresh"]]
+    assert [c["job_parameters"] for c in fake_ws.jobs.run_now_calls] == [None, None]
+
+
+def test_pipeline_refresh_options_are_keyword_only() -> None:
+    parameters = inspect.signature(EphemeralJob.run).parameters
+    names = ("full_refresh", "full_refresh_selection", "refresh_selection")
+    assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY for name in names)
+
+
+def test_pipeline_refresh_options_need_a_pipeline_task(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowError
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowError, match="no pipeline task.*'extract', 'load'"):
+                    job.run(full_refresh=True)
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.run_now_calls == []
