@@ -90,7 +90,7 @@ Do not use `run.result_state`, the parent run's state, as the verdict. A job wit
 Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`. `timed_out` is true when the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`.
-- `disabled`, true when the task was disabled, for example with `disable`. Tasks left out by `only` also end `DISABLED` but are not flagged.
+- `disabled`, true when the task was disabled, with `disable` or in the bundle. The run itself does not say, so the plugin reads it from the copy's settings. Tasks left out by `only` also end `DISABLED` but are not flagged.
 - `excluded`, true when the task ended `EXCLUDED` because its `run_if` or if/else condition was not met. Excluded tasks stay in `run.tasks` and do not fail the run.
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.

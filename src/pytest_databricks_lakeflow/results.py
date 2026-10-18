@@ -158,8 +158,8 @@ class TaskRun:
             reported no resolved values.
         attempts: One `TaskRun` per attempt, in attempt order, each with empty `attempts`. The last equals this
             task apart from `attempts`.
-        disabled: Whether the task was disabled, for example with `disable=` on `Lakeflow.job()`. Tasks left out
-            by `only` are not flagged.
+        disabled: Whether the task was disabled, with `disable=` on `Lakeflow.job()` or in the bundle, read from the
+            job's settings because the run does not say. Tasks left out by `only` are not flagged.
     """
 
     task_key: str
@@ -359,6 +359,7 @@ def build_job_run(
     job_id: int,
     stubs: Collection[str] = (),
     capture_task_values: Mapping[str, Sequence[str]] | None = None,
+    disabled: Collection[str] = (),
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output.
 
@@ -372,6 +373,8 @@ def build_job_run(
         job_id: The ephemeral job's id.
         stubs: Keys of stub tasks, which count as injected tasks.
         capture_task_values: The value keys requested from each probed task, by task key.
+        disabled: Keys of the tasks disabled in the job's settings. The Jobs API does not flag them on the run, where
+            a disabled task and one left out by `only` both end `DISABLED`.
 
     Returns:
         The run's outcome.
@@ -386,7 +389,10 @@ def build_job_run(
     attempts = {
         key: [_task_run(task, outputs.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()
     }
-    task_runs = {key: runs[-1] for key, runs in attempts.items()}
+    task_runs = {
+        key: replace(runs[-1], disabled=key in disabled and runs[-1].result_state == "DISABLED")
+        for key, runs in attempts.items()
+    }
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
     for target, keys in (capture_task_values or {}).items():
@@ -462,7 +468,6 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
         attempt=task.attempt_number or 0,
         parameters=_parameters(task.resolved_values),
-        disabled=bool(task.disabled),
     )
 
 
