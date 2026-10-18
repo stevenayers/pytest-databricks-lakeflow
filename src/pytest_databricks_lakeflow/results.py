@@ -109,6 +109,49 @@ class TaskError:
         return f"{self.type}: {self.message}" if self.type else self.message
 
 
+@dataclass(frozen=True)
+class Timing:
+    """Where the time of a run or task run went, as `runs/get` reports it.
+
+    Attributes:
+        queue: Time spent waiting in the queue.
+        setup: Time spent setting up compute and the environment.
+        execution: Time spent running the task's code.
+        cleanup: Time spent cleaning up afterwards.
+    """
+
+    queue: timedelta = timedelta(0)
+    setup: timedelta = timedelta(0)
+    execution: timedelta = timedelta(0)
+    cleanup: timedelta = timedelta(0)
+
+    @property
+    def total(self) -> timedelta:
+        """The sum of `queue`, `setup`, `execution` and `cleanup`.
+
+        It differs from the `duration` of `JobRun` and `TaskRun`, which is wall clock from start to end, for example
+        when a run waited in the queue.
+        """
+        return self.queue + self.setup + self.execution + self.cleanup
+
+    @classmethod
+    def from_run(cls, run: jobs.Run | jobs.RunTask) -> Timing:
+        """Read the timing of a run or task run.
+
+        Args:
+            run: The run or task run from `get_run`. Its durations are in milliseconds.
+
+        Returns:
+            The timing, with `timedelta(0)` for every duration the run does not report.
+        """
+        return cls(
+            queue=_millis(run.queue_duration),
+            setup=_millis(run.setup_duration),
+            execution=_millis(run.execution_duration),
+            cleanup=_millis(run.cleanup_duration),
+        )
+
+
 class TaskValues(dict[str, object]):
     """Task values captured by a probe task.
 
@@ -160,6 +203,10 @@ class TaskRun:
             task apart from `attempts`.
         disabled: Whether the task was disabled, with `disable=` on `Lakeflow.job()` or in the bundle, read from the
             job's settings because the run does not say. Tasks left out by `only` are not flagged.
+        timing: The queue, setup, execution and cleanup durations of the task run. Zero where the platform reported
+            none.
+        effective_performance_target: The serverless performance mode the task ran with, `STANDARD` or
+            `PERFORMANCE_OPTIMIZED`, or `None` when the platform did not say.
     """
 
     task_key: str
@@ -180,6 +227,8 @@ class TaskRun:
     parameters: dict[str, str] | list[str] | None = None
     attempts: list[TaskRun] = field(default_factory=list)
     disabled: bool = False
+    timing: Timing = field(default_factory=Timing)
+    effective_performance_target: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -262,6 +311,10 @@ class JobRun:
         skipped_tasks: Tasks left out by `only` or disabled, by task key. A disabled task has `disabled` set.
         parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
             Parameters the plugin injects are left out.
+        timing: The queue, setup, execution and cleanup durations of the parent run. Zero where the platform
+            reported none; a run with several tasks reports its time on the tasks instead.
+        effective_performance_target: The serverless performance mode the run used, `STANDARD` or
+            `PERFORMANCE_OPTIMIZED`, or `None` when the platform did not say.
     """
 
     job_key: str
@@ -276,6 +329,8 @@ class JobRun:
     injected_tasks: dict[str, TaskRun]
     skipped_tasks: dict[str, TaskRun] = field(default_factory=dict)
     parameters: dict[str, str] = field(default_factory=dict)
+    timing: Timing = field(default_factory=Timing)
+    effective_performance_target: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -414,6 +469,8 @@ def build_job_run(
         injected_tasks=injected,
         skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
         parameters=_job_parameters(run.job_parameters),
+        timing=Timing.from_run(run),
+        effective_performance_target=_enum(run.effective_performance_target),
     )
 
 
@@ -468,6 +525,8 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
         attempt=task.attempt_number or 0,
         parameters=_parameters(task.resolved_values),
+        timing=Timing.from_run(task),
+        effective_performance_target=_enum(task.effective_performance_target),
     )
 
 
@@ -529,3 +588,7 @@ def _enum(value: Enum | str | None) -> str | None:
 
 def _duration(start: int | None, end: int | None) -> timedelta:
     return timedelta(milliseconds=end - start) if start and end and end >= start else timedelta(0)
+
+
+def _millis(value: int | None) -> timedelta:
+    return timedelta(milliseconds=value) if value else timedelta(0)

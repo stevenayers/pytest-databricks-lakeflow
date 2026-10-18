@@ -12,6 +12,7 @@ import dataclasses
 import os
 import re
 import warnings
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,14 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
             assert transform["row_count"] == "7"
         else:
             warnings.warn("The workspace returned no resolved values for transform", stacklevel=1)
+        # A run with several tasks reports its durations on the tasks and zero on the run itself.
+        if run.timing.execution == timedelta(0):
+            warnings.warn("The workspace reported no execution duration on the parent run", stacklevel=1)
+        assert run.task("transform").timing.execution > timedelta(0)
+        if run.effective_performance_target is not None:
+            assert run.effective_performance_target in {"STANDARD", "PERFORMANCE_OPTIMIZED"}
+        else:
+            warnings.warn("The workspace returned no effective performance target", stacklevel=1)
         assert job.job_id is not None
         settings = lakeflow.ws.jobs.get(job.job_id).settings
         tags = (settings.tags if settings else None) or {}

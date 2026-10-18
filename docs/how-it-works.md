@@ -62,5 +62,7 @@ Measured in one Azure workspace:
 - A trivial serverless notebook test takes about 20 to 35 seconds end to end, of which about 2 seconds is API overhead.
 - A probe or stub task adds 7 to 30 seconds.
 - A job with `performance_target: STANDARD` adds 3 to 4 minutes to every run.
+
+To measure your own workspace, read `run.task(key).timing`, which splits each task's time into queue, setup, execution and cleanup, and `run.effective_performance_target`.
 - A classic job cluster takes 2 to 10 minutes to start.
 - Five jobs run at once took no longer than one.
