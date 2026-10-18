@@ -99,6 +99,11 @@ class Lakeflow:
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
             cluster, stub and probe tasks and tasks nested in a `for_each_task` included, so that tests skip
             cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their compute.
+        single_node: Make every job cluster and every task's `new_cluster` in each ephemeral job a single node
+            cluster, so that runs start faster and cost one node: no workers, no autoscaling, and the single node
+            Spark configuration and `ResourceClass` tag. The job fails to build if one of those clusters uses
+            standard access mode, because single node compute needs dedicated access mode. Serverless tasks and
+            `existing_cluster_id` are left alone.
         allow_undeclared_params: Allow parameters that the job does not declare.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
@@ -131,6 +136,7 @@ class Lakeflow:
     environment_version: str | None = None
     budget_policy_id: str | None = None
     existing_cluster_id: str | None = None
+    single_node: bool = False
     allow_undeclared_params: bool = False
     sweep_hours: float = 24
     keep: bool = False
@@ -400,6 +406,7 @@ class Lakeflow:
             environment_version=self.environment_version,
             budget_policy_id=self.budget_policy_id,
             existing_cluster_id=self.existing_cluster_id,
+            single_node=self.single_node,
         )
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))

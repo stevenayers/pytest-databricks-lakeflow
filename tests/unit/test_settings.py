@@ -617,3 +617,114 @@ def test_run_job_tasks_skips_disabled_tasks_and_tasks_in_disabled_loops() -> Non
 def test_sanitise_keeps_run_job_tasks_as_deployed() -> None:
     expected = task(parent_settings(), "trigger_child").run_job_task
     assert task(sanitised(parent_settings()), "trigger_child").run_job_task == expected
+
+
+SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
+
+
+def with_inline_cluster(cluster: dict[str, Any] | None = None) -> jobs.JobSettings:
+    settings = example_settings()
+    spec = cluster or {"spark_version": "17.3.x-scala2.13", "num_workers": 8}
+    inline = {"task_key": "inline", "new_cluster": spec, "notebook_task": {"notebook_path": "/x"}}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(inline)]
+    return settings
+
+
+def assert_single_node(cluster: compute.ClusterSpec | None) -> None:
+    assert cluster is not None
+    assert (cluster.num_workers, cluster.autoscale) == (0, None)
+    assert {k: (cluster.spark_conf or {}).get(k) for k in SINGLE_NODE_CONF} == SINGLE_NODE_CONF
+    assert (cluster.custom_tags or {}).get("ResourceClass") == "SingleNode"
+
+
+def test_single_node_rewrites_job_clusters() -> None:
+    settings = example_settings()
+    [classic] = settings.job_clusters or []
+    assert classic.new_cluster is not None
+    classic.new_cluster.autoscale = compute.AutoScale(min_workers=2, max_workers=8)
+    after = sanitised(settings, single_node=True)
+    [cluster] = after.job_clusters or []
+    assert cluster.job_cluster_key == "classic"
+    assert_single_node(cluster.new_cluster)
+    assert cluster.new_cluster is not None and cluster.new_cluster.spark_version == "17.3.x-scala2.13"
+
+
+def test_single_node_merges_existing_conf_and_tags() -> None:
+    settings = example_settings()
+    [classic] = settings.job_clusters or []
+    assert classic.new_cluster is not None
+    classic.new_cluster.spark_conf = {"spark.sql.shuffle.partitions": "8"}
+    classic.new_cluster.custom_tags = {"team": "data"}
+    cluster = (sanitised(settings, single_node=True).job_clusters or [])[0].new_cluster
+    assert_single_node(cluster)
+    assert cluster is not None and cluster.spark_conf and cluster.custom_tags
+    assert cluster.spark_conf["spark.sql.shuffle.partitions"] == "8"
+    assert cluster.custom_tags["team"] == "data"
+
+
+def test_single_node_rewrites_inline_task_clusters() -> None:
+    after = sanitised(with_inline_cluster(), single_node=True)
+    assert_single_node(task(after, "inline").new_cluster)
+
+
+def test_single_node_rewrites_inline_clusters_in_for_each_tasks() -> None:
+    settings = example_settings()
+    inner = {"task_key": "inner", "new_cluster": {"spark_version": "17.3.x"}, "notebook_task": {"notebook_path": "/x"}}
+    loop = {"task_key": "loop", "for_each_task": {"inputs": "[1, 2]", "task": inner}}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(loop)]
+    for_each = task(sanitised(settings, single_node=True), "loop").for_each_task
+    assert for_each is not None and for_each.task is not None
+    assert_single_node(for_each.task.new_cluster)
+
+
+def test_single_node_leaves_serverless_tasks_alone() -> None:
+    before, after = sanitised(), sanitised(single_node=True)
+    for key in ("extract", "transform", "load", "classic"):
+        assert task(after, key) == task(before, key)
+    assert after.environments == before.environments
+    assert [c.job_cluster_key for c in after.job_clusters or []] == ["classic"]
+
+
+@pytest.mark.parametrize(
+    "mode", [compute.DataSecurityMode.USER_ISOLATION, compute.DataSecurityMode.DATA_SECURITY_MODE_STANDARD]
+)
+def test_single_node_rejects_standard_access_mode(mode: compute.DataSecurityMode) -> None:
+    settings = example_settings()
+    [classic] = settings.job_clusters or []
+    assert classic.new_cluster is not None
+    classic.new_cluster.data_security_mode = mode
+    with pytest.raises(LakeflowError, match=r"'classic'.*dedicated"):
+        sanitised(settings, single_node=True)
+
+
+def test_single_node_rejects_standard_access_mode_on_inline_clusters() -> None:
+    settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "USER_ISOLATION"})
+    with pytest.raises(LakeflowError, match=r"'inline'.*dedicated"):
+        sanitised(settings, single_node=True)
+
+
+def test_single_node_changes_no_cluster_when_any_is_rejected() -> None:
+    settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "USER_ISOLATION"})
+    [classic] = settings.job_clusters or []
+    before = classic.new_cluster.as_dict() if classic.new_cluster else None
+    with pytest.raises(LakeflowError, match=r"'inline'.*dedicated"):
+        sanitised(settings, single_node=True)
+    assert classic.new_cluster is not None and classic.new_cluster.as_dict() == before
+
+
+def test_single_node_accepts_dedicated_access_mode() -> None:
+    settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "SINGLE_USER"})
+    assert_single_node(task(sanitised(settings, single_node=True), "inline").new_cluster)
+
+
+def test_single_node_with_existing_cluster_id_has_nothing_to_rewrite() -> None:
+    settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "USER_ISOLATION"})
+    after = sanitised(settings, single_node=True, existing_cluster_id=CLUSTER)
+    assert after.job_clusters is None
+    assert task(after, "inline").new_cluster is None
+    assert after == sanitised(with_inline_cluster(), existing_cluster_id=CLUSTER)
+
+
+def test_sanitise_without_single_node_changes_no_cluster() -> None:
+    assert sanitised(single_node=False) == sanitised()
+    assert sanitised().job_clusters == example_settings().job_clusters
