@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import warnings
 from dataclasses import replace
 from datetime import timedelta
@@ -10,9 +11,9 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.results import JobRun, build_job_run
+from pytest_databricks_lakeflow.results import JobRun, Timing, build_job_run
 
-from .fakes import FakeWorkspaceClient, make_run, recorded
+from .fakes import DATA, FakeWorkspaceClient, make_run, recorded
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
 
@@ -358,3 +359,63 @@ def test_task_keys_keep_the_order_the_run_lists_them() -> None:
     result = build_from(FakeWorkspaceClient(), run)
     assert list(result.tasks) == ["b", "a"]
     assert [t.attempt for t in result.task("b").attempts] == [0, 1]
+
+
+def _recorded_task(data: dict[str, Any], key: str) -> dict[str, Any]:
+    return next(t for t in data["tasks"] if t["task_key"] == key)
+
+
+def test_timing_breakdown_from_a_recorded_run() -> None:
+    data = json.loads((DATA / "runs" / "probe_success.json").read_text())["run"]
+    run, _ = build("probe_success", capture_task_values=CAPTURE)
+    assert "queue_duration" not in data
+    # probe_success has several tasks, so its parent run reports zero for setup, execution and cleanup. The
+    # comparisons below check those zeros; test_timing_on_a_single_task_parent_run covers non-zero parent values.
+    assert run.timing.queue == timedelta(0)
+    assert run.timing.setup == timedelta(milliseconds=data["setup_duration"])
+    assert run.timing.execution == timedelta(milliseconds=data["execution_duration"])
+    assert run.timing.cleanup == timedelta(milliseconds=data["cleanup_duration"])
+    assert run.effective_performance_target == data["effective_performance_target"]
+    transform = _recorded_task(data, "transform")
+    assert run.task("transform").timing.execution == timedelta(milliseconds=transform["execution_duration"])
+    assert run.task("transform").timing.setup == timedelta(milliseconds=transform["setup_duration"])
+    assert run.task("transform").effective_performance_target == transform["effective_performance_target"]
+    assert run.task("transform").timing.total == sum(
+        (timedelta(milliseconds=transform[f"{k}_duration"]) for k in ("setup", "execution", "cleanup")), timedelta(0)
+    )
+
+
+def test_timing_on_a_single_task_parent_run() -> None:
+    data = json.loads((DATA / "runs" / "cancelled.json").read_text())["run"]
+    assert data["setup_duration"] and data["execution_duration"]
+    run, _ = build("cancelled")
+    assert run.timing.setup == timedelta(milliseconds=data["setup_duration"])
+    assert run.timing.execution == timedelta(milliseconds=data["execution_duration"])
+    assert run.timing.cleanup == timedelta(milliseconds=data["cleanup_duration"])
+    assert run.timing.total == timedelta(milliseconds=data["setup_duration"] + data["execution_duration"])
+    assert run.effective_performance_target == data["effective_performance_target"]
+
+
+def test_timing_defaults_to_zero_without_fields() -> None:
+    run = build_from(FakeWorkspaceClient(), make_run(1, {"t": "SUCCESS"}))
+    zero = Timing(timedelta(0), timedelta(0), timedelta(0), timedelta(0))
+    assert run.timing == zero
+    assert run.effective_performance_target is None
+    assert run.task("t").timing == zero
+    assert run.task("t").effective_performance_target is None
+
+
+def test_effective_performance_target_on_run_and_task() -> None:
+    data = json.loads((DATA / "runs" / "wheel_logs.json").read_text())["run"]
+    run, _ = build("wheel_logs")
+    assert run.effective_performance_target == data["effective_performance_target"]
+    for key, task in run.tasks.items():
+        assert task.effective_performance_target == _recorded_task(data, key)["effective_performance_target"]
+
+
+def test_timing_leaves_duration_and_repr_alone() -> None:
+    run, _ = build("probe_failure", capture_task_values=CAPTURE)
+    assert run.duration == timedelta(milliseconds=60_355)
+    assert "timing" not in repr(run)
+    assert "timing" not in repr(run.task("transform"))
+    assert "performance" not in repr(run) + repr(run.task("transform"))

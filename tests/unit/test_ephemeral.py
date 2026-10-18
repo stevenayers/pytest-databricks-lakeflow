@@ -633,7 +633,16 @@ def test_package_exports() -> None:
     import pytest_databricks_lakeflow
 
     assert Path(pytest_databricks_lakeflow.__file__).name == "__init__.py"
-    for name in ("Lakeflow", "EphemeralJob", "JobRun", "TaskRun", "TaskError", "LakeflowTimeout", "LakeflowRunFailed"):
+    for name in (
+        "Lakeflow",
+        "EphemeralJob",
+        "JobRun",
+        "TaskRun",
+        "TaskError",
+        "Timing",
+        "LakeflowTimeout",
+        "LakeflowRunFailed",
+    ):
         assert hasattr(pytest_databricks_lakeflow, name)
         assert name in pytest_databricks_lakeflow.__all__
     assert issubclass(pytest_databricks_lakeflow.LakeflowRunFailed, pytest_databricks_lakeflow.LakeflowError)

@@ -42,6 +42,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 
 ::: pytest_databricks_lakeflow.TaskError
 
+## `Timing`
+
+::: pytest_databricks_lakeflow.Timing
+
 ## Errors
 
 ::: pytest_databricks_lakeflow.LakeflowError

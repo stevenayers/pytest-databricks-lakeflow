@@ -64,3 +64,5 @@ Measured in one Azure workspace:
 - A job with `performance_target: STANDARD` adds 3 to 4 minutes to every run.
 - A classic job cluster takes 2 to 10 minutes to start.
 - Five jobs run at once took no longer than one.
+
+To measure your own workspace, read `run.task(key).timing`, which splits each task's time into queue, setup, execution and cleanup. `run.effective_performance_target` shows which performance mode the run used.

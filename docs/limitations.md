@@ -32,7 +32,7 @@ The Jobs API accepts undeclared parameters silently, so a typo would pass unnoti
 
 ### Why is every run 3 to 4 minutes slower than in the UI?
 
-The job's `performance_target` is `STANDARD`. The plugin warns about it. Pass `performance_optimized=True` to run tests with `PERFORMANCE_OPTIMIZED`, or `job.run(performance_target="PERFORMANCE_OPTIMIZED")` to speed up one run without changing the job's settings.
+The job's `performance_target` is `STANDARD`. The plugin warns about it. Pass `performance_optimized=True` to run tests with `PERFORMANCE_OPTIMIZED`, or `job.run(performance_target="PERFORMANCE_OPTIMIZED")` to speed up one run without changing the job's settings. `run.effective_performance_target` and each task's `effective_performance_target` show which mode the run actually used.
 
 ### How do I clean up after a crashed session?
 
