@@ -5,12 +5,23 @@ description = "Run Lakeflow Jobs from a Databricks Asset Bundle as throwaway job
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Steven Ayers", email = "steven@ayers.io" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
 ]
+keywords = ["pytest", "databricks", "lakeflow", "asset-bundles", "testing"]
 dependencies = [
     "pytest>=8",
     "databricks-sdk>=0.54",
@@ -19,6 +30,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/stevenayers/pytest-databricks-lakeflow"
+Documentation = "https://stevenayers.github.io/pytest-databricks-lakeflow/"
+Changelog = "https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/CHANGELOG.md"
+Source = "https://github.com/stevenayers/pytest-databricks-lakeflow"
 Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
 
 [project.optional-dependencies]
@@ -29,10 +43,18 @@ pytester = ["databricks-labs-pytester>=0.7"]
 databricks_lakeflow = "pytest_databricks_lakeflow.plugin"
 
 [dependency-groups]
+audit = [
+    "pip-audit>=2.9",
+]
 dev = [
+    "pytest-cov>=6",
     "pytest-xdist>=3",
     "ruff>=0.5",
     "ty==0.0.89",
+]
+docs = [
+    "mkdocs-material>=9.6",
+    "mkdocstrings[python]>=0.30",
 ]
 
 [build-system]
@@ -43,7 +65,7 @@ build-backend = "hatchling.build"
 packages = ["src/pytest_databricks_lakeflow"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "examples", "README.md", "pyproject.toml"]
+include = ["src", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 120
@@ -65,4 +87,6 @@ include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-lakeflow_bundle_root = "examples/bundle"
+
+[tool.coverage.run]
+source = ["src/pytest_databricks_lakeflow"]

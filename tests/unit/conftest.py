@@ -11,12 +11,26 @@ from pytest_databricks_lakeflow import bundle, ephemeral, session
 
 from .fakes import FakeWorkspaceClient, example_settings
 
+LAKEFLOW_CONFTEST = """
+from datetime import timedelta
+
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow():
+    return Lakeflow({arguments})
+"""
+
 
 class FakeCli:
     """Stands in for `bundle.run_cli`. Summary reports every job registered in `deployed`."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.invocations: list[tuple[list[str], Path, str | None]] = []
         self.deployed: dict[str, int] = {}
         self.validate: dict[str, Any] = {}
         self.errors: dict[str, Exception] = {}
@@ -24,6 +38,7 @@ class FakeCli:
 
     def __call__(self, args: list[str], root: Path, profile: str | None = None) -> str:
         self.calls.append(args)
+        self.invocations.append((args, root, profile))
         self.before(args)
         if len(args) > 1 and args[1] in self.errors:
             raise self.errors[args[1]]
@@ -37,10 +52,20 @@ class FakeCli:
         return ""
 
 
+def configure_lakeflow(pytester: pytest.Pytester, arguments: str, extra: str = "") -> None:
+    """Write a conftest that overrides the `lakeflow` fixture with `Lakeflow(<arguments>)`, followed by `extra`."""
+    pytester.makeconftest(LAKEFLOW_CONFTEST.format(arguments=arguments) + extra)
+
+
 @pytest.fixture
 def fake_ws(monkeypatch: pytest.MonkeyPatch) -> FakeWorkspaceClient:
     ws = FakeWorkspaceClient()
-    monkeypatch.setattr(session, "make_workspace_client", lambda profile: ws)
+
+    def make_workspace_client(profile: str | None) -> FakeWorkspaceClient:
+        ws.profiles.append(profile)
+        return ws
+
+    monkeypatch.setattr(session, "make_workspace_client", make_workspace_client)
     monkeypatch.setattr(ephemeral, "POLL_SECONDS", 0)
     return ws
 

@@ -1,0 +1,59 @@
+name: Docs
+
+# Builds the mkdocs site on every pull request and push to main, and deploys it to GitHub Pages on push.
+# Pages must be set to deploy from GitHub Actions in the repository settings.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv run --group docs mkdocs build --strict
+      # Serve the repository's llms.txt from the site root as well.
+      - run: cp llms.txt site/llms.txt
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One Pages deployment at a time, and never cancel one that has started.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write # deploy the artifact to GitHub Pages
+      id-token: write # prove the deployment comes from this workflow (OIDC)
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

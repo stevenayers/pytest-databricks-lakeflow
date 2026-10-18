@@ -107,8 +107,9 @@ def test_create_kwargs() -> None:
 def test_check_params() -> None:
     settings = example_settings()
     check_params("my_job", settings, {"param1": "x", "schema": "y"}, allow_undeclared=False)
-    with pytest.raises(LakeflowError, match=r"does not declare the parameters \['parm1'\]. Declared: \['param1'"):
+    with pytest.raises(LakeflowError, match=r"does not declare the parameters \['parm1'\]. Declared: \['param1'") as e:
         check_params("my_job", settings, {"parm1": "x"}, allow_undeclared=False)
+    assert str(e.value).endswith("Pass allow_undeclared_params=True to Lakeflow to pass them anyway.")
     check_params("my_job", settings, {"parm1": "x"}, allow_undeclared=True)
     with pytest.raises(LakeflowError, match="reserved for the plugin"):
         check_params("my_job", settings, {"__pytest_values": "x"}, allow_undeclared=True)

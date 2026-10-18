@@ -11,6 +11,7 @@ import pytest
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
 
+from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.results import JobRun, build_job_run
 from pytest_databricks_lakeflow.settings import check_params, create_kwargs, select
@@ -30,8 +31,8 @@ class EphemeralJob:
     """A throwaway copy of a bundle job.
 
     The job is created on entering the `with` block, or by the first `run()` when used without `with`. It is
-    deleted on leaving the block, or at the end of the test, unless `--lakeflow-keep` is set or the test failed
-    and `--lakeflow-keep-failed` is on.
+    deleted on leaving the block, or at the end of the test that made it, unless `keep` is set or the test failed
+    and `keep_failed` is on.
 
     Attributes:
         lakeflow: The `Lakeflow` that made the job.
@@ -63,6 +64,7 @@ class EphemeralJob:
         self.runs: list[JobRun] = []
         self._run_urls: dict[int, str] = {}
         self._active: set[int] = set()
+        self._entered = False
         self._closed = False
 
     @property
@@ -72,6 +74,7 @@ class EphemeralJob:
 
     def __enter__(self) -> EphemeralJob:
         self.create()
+        self._entered = True
         return self
 
     def __exit__(
@@ -85,18 +88,19 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, or `params` names a parameter that the job does not
-                declare after the `pytest_lakeflow_modify_settings` hook has run.
+                declare after `modify_settings` has run.
         """
         if self._closed:
             raise LakeflowError(f"The ephemeral job for {self.job_key!r} has already been closed")
         if self.job_id is not None:
             return
-        request = self.lakeflow.current_request()
-        request.node.ihook.pytest_lakeflow_modify_settings(settings=self.settings, request=request)
-        check_params(self.job_key, self.settings, self.params, self.lakeflow.options.allow_undeclared_params)
+        item = session.current_item()
+        if self.lakeflow.modify_settings is not None:
+            self.lakeflow.modify_settings(self.settings, item)
+        check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings)).job_id
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
-        request.node.user_properties.append(("lakeflow_job_url", self.url))
+        item.user_properties.append(("lakeflow_job_url", self.url))
 
     def run(
         self,
@@ -109,7 +113,7 @@ class EphemeralJob:
         Args:
             params: Job parameters for this run only, merged over the job's params.
             only: Task keys to run. `+key`, `key+` and `+key+` add upstream and downstream tasks.
-            timeout: How long to wait. Defaults to `lakeflow_timeout_minutes`.
+            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`.
 
         Returns:
             The run's outcome.
@@ -121,8 +125,8 @@ class EphemeralJob:
         """
         self.create()
         assert self.job_id is not None
-        options = self.lakeflow.options
-        check_params(self.job_key, self.settings, params or {}, options.allow_undeclared_params)
+        item = session.current_item()
+        check_params(self.job_key, self.settings, params or {}, self.lakeflow.allow_undeclared_params)
         merged = {**self.params, **(params or {})}
         selected = select(self.settings, only, self.stubs) if only else None
         ws = self.lakeflow.ws
@@ -132,25 +136,25 @@ class EphemeralJob:
         self._active.add(run_id)
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
-        run = self._wait(run_id, options.timeout if timeout is None else timeout)
+        run = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
         self._forget(run_id)
         result = build_job_run(
             ws, run, job_key=self.job_key, job_id=self.job_id, stubs=self.stubs, capture_values=self.capture_values
         )
         self.runs.append(result)
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
-        request = self.lakeflow.current_request()
-        request.node.ihook.pytest_lakeflow_run_finished(run=result, request=request)
+        if self.lakeflow.run_finished is not None:
+            self.lakeflow.run_finished(result, item)
         return result
 
-    def _wait(self, run_id: int, timeout: timedelta) -> jobs.Run:
+    def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> jobs.Run:
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
         while True:
             run = ws.jobs.get_run(run_id)
             if run_id not in self._run_urls and run.run_page_url:
                 self._run_urls[run_id] = run.run_page_url
-                self.lakeflow.current_request().node.user_properties.append(("lakeflow_run_url", run.run_page_url))
+                item.user_properties.append(("lakeflow_run_url", run.run_page_url))
             if _terminated(run):
                 return run
             if time.monotonic() >= deadline:
@@ -165,7 +169,7 @@ class EphemeralJob:
         """Cancel active runs, then delete the job unless the keep rules say to keep it.
 
         Args:
-            failed: Whether the test failed, which keeps the job when `--lakeflow-keep-failed` is on.
+            failed: Whether the test failed, which keeps the job when `keep_failed` is on.
         """
         if self._closed:
             return
@@ -174,14 +178,18 @@ class EphemeralJob:
             self._cancel(run_id)
         if self.job_id is None:
             return
-        options = self.lakeflow.options
-        if options.keep or (failed and options.keep_failed):
+        if session.current().keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
             log.warning("Keeping job %s from %s: %s", self.job_id, self.job_key, self.url)
             for url in self._run_urls.values():
                 log.warning("Kept run: %s", url)
             return
         self.lakeflow.ws.jobs.delete(self.job_id)
         log.info("Deleted job %s", self.job_id)
+
+    def _teardown(self, item: pytest.Item) -> None:
+        """Close the job at the end of the test that made it, unless a `with` block closes it."""
+        if not self._entered:
+            self.close(failed=item_failed(item.stash))
 
     def _cancel(self, run_id: int) -> None:
         cancel_run(self.lakeflow.ws, run_id)

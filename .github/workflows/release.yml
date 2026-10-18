@@ -1,39 +1,62 @@
 name: Release
 
-# Publishes to PyPI when a version tag such as v0.1.0 is pushed. It runs the full CI first, and the tag must match
-# the version in pyproject.toml. Publishing uses PyPI trusted publishing, so no API token is stored in GitHub.
+# Publishes to PyPI for a version tag such as v0.2.0. release-please.yml dispatches this workflow for the tag
+# it creates when a release PR is merged, because tags pushed with the workflow token do not trigger `push`
+# events. A tag pushed by hand (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers it directly. The tag must
+# match the version in pyproject.toml. The build job lints and unit-tests the tagged commit before building, so a
+# release does not depend on the CI run on main having finished. Publishing uses PyPI trusted publishing (OIDC):
+# the trusted publisher on PyPI is this file, release.yml, with the environment `pypi`. No API token is stored in
+# GitHub.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
-permissions:
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-    secrets: inherit
-
   build:
     name: Build
-    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
-      - name: Check the tag matches the package version
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+          # No cache in a publishing workflow, so a poisoned cache cannot reach the artifacts.
+          enable-cache: false
+      - name: Check that this is a version tag matching pyproject.toml
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          version="v$(uv version --short)"
-          if [ "$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::Release must run on a version tag, not on $REF_TYPE $REF_NAME"
             exit 1
           fi
+          version="v$(uv version --short)"
+          if [ "$version" != "$REF_NAME" ]; then
+            echo "::error::Tag $REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          fi
+      - run: uv run ruff check
+      - run: uv run ty check
+      - run: uv run pytest -m "not lakeflow"
       - run: uv build
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI
@@ -44,10 +67,10 @@ jobs:
       name: pypi
       url: https://pypi.org/project/pytest-databricks-lakeflow/
     permissions:
-      id-token: write
+      id-token: write # PyPI trusted publishing exchanges the OIDC token for an upload token
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@v1.14.2
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

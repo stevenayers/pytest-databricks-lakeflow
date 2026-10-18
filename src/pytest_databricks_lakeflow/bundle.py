@@ -27,12 +27,12 @@ def find_root(start: Path) -> Path:
     for path in (start, *start.parents):
         if _has_bundle(path):
             return path
-    raise LakeflowBundleError(f"No databricks.yml in {start} or any parent directory. Set lakeflow_bundle_root.")
+    raise LakeflowBundleError(f"No databricks.yml in {start} or any parent directory. Pass bundle_root to Lakeflow.")
 
 
 def require_root(path: Path) -> Path:
     if not _has_bundle(path):
-        raise LakeflowBundleError(f"lakeflow_bundle_root {path} has no databricks.yml")
+        raise LakeflowBundleError(f"bundle_root {path} has no databricks.yml")
     return path
 
 
@@ -113,7 +113,7 @@ def job_ids(bundle_summary: Mapping[str, Any]) -> tuple[dict[str, int], dict[str
         if job.get("id"):
             ids[key] = int(job["id"])
         else:
-            errors[key] = f"Job {key!r} is not deployed. Run `databricks bundle deploy` or use lakeflow_sync = deploy."
+            errors[key] = f'Job {key!r} is not deployed. Run `databricks bundle deploy` or use Lakeflow(sync="deploy").'
     return ids, errors
 
 
@@ -143,14 +143,14 @@ def templates_from_validate(
         if refs:
             errors[key] = (
                 f"Job {key!r} contains {', '.join(refs)}, which `bundle validate` does not resolve. "
-                "Use lakeflow_sync = deploy."
+                'Use Lakeflow(sync="deploy").'
             )
             continue
         local = _local_libraries(job)
         if local and strategy == "sync":
             errors[key] = (
                 f"Job {key!r} uses local libraries ({', '.join(local)}), which `bundle sync` does not upload. "
-                "Use lakeflow_sync = deploy."
+                'Use Lakeflow(sync="deploy").'
             )
             continue
         patched = job

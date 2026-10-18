@@ -1,0 +1,50 @@
+name: Bug report
+description: Something does not work as the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Please check the [FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/limitations/) and existing issues first.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: Test code and job definition
+      description: The smallest test that shows the problem, and the relevant job from the bundle (`resources/*.yml`).
+      render: python
+  - type: textarea
+    id: output
+    attributes:
+      label: pytest output
+      description: Run with `--log-cli-level=INFO` and paste the output, with hosts and secrets removed.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: pytest-databricks-lakeflow version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Python, pytest, databricks-sdk and Databricks CLI versions
+      placeholder: "Python 3.12, pytest 8.3, databricks-sdk 0.60, Databricks CLI v1.7.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: compute
+    attributes:
+      label: Compute the job runs on
+      options:
+        - Serverless
+        - Classic job cluster
+        - Both
+    validations:
+      required: true
