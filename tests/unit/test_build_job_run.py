@@ -30,6 +30,18 @@ def build(name: str, **kwargs: Any) -> tuple[JobRun, FakeWorkspaceClient]:
     return build_from(ws, run, **kwargs), ws
 
 
+NEW_ALERT_TASK = pytest.mark.skipif(
+    not hasattr(jobs, "AlertTaskOutput"), reason="this databricks-sdk has no alert task output"
+)
+
+
+def _built_task(output: jobs.RunOutput, key: str = "t") -> TaskRun:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {key: "SUCCESS"})
+    ws.jobs.outputs[100] = output
+    return build_from(ws, run).task(key)
+
+
 def test_failed_task_with_probe() -> None:
     run, _ = build("probe_failure", capture_task_values=CAPTURE)
     assert run.failed
@@ -460,18 +472,6 @@ def test_build_job_run_reuses_given_outputs() -> None:
     assert sorted(ws.jobs.output_calls) == sorted(set(outputs) - {extract.run_id})
 
 
-NEW_ALERT_TASK = pytest.mark.skipif(
-    not hasattr(jobs, "AlertTaskOutput"), reason="this databricks-sdk has no alert task output"
-)
-
-
-def _built_task(output: jobs.RunOutput, key: str = "t") -> TaskRun:
-    ws = FakeWorkspaceClient()
-    run = make_run(1, {key: "SUCCESS"})
-    ws.jobs.outputs[100] = output
-    return build_from(ws, run).task(key)
-
-
 def test_sql_query_output_is_exposed() -> None:
     query = jobs.SqlQueryOutput(warehouse_id="w1", output_link="https://x/q")
     task = _built_task(jobs.RunOutput(sql_output=jobs.SqlOutput(query_output=query)), "daily_query")
@@ -542,6 +542,16 @@ def test_top_level_notebook_output_wins_over_clean_room_output() -> None:
     clean = jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput(notebook_output=jobs.NotebookOutput(result="b"))
     output = jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="a"), clean_rooms_notebook_output=clean)
     assert _built_task(output).output == "a"
+
+
+def test_empty_top_level_notebook_output_falls_back_to_clean_room_output() -> None:
+    output = jobs.RunOutput.from_dict(
+        {"notebook_output": {}, "clean_rooms_notebook_output": {"notebook_output": {"result": "b", "truncated": True}}}
+    )
+    with pytest.warns(UserWarning, match="The output of task 't' was cut"):
+        task = _built_task(output)
+    assert task.output == "b"
+    assert task.output_truncated is True
 
 
 def test_truncated_clean_room_output() -> None:

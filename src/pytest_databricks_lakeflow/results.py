@@ -187,7 +187,7 @@ class TaskRun:
         run_url: The task run's page in the workspace.
         duration: The time from start to end.
         output: The value the notebook passed to `dbutils.notebook.exit()`. For a clean room notebook task, the
-            value from `clean_rooms_notebook_output` when the run has no top-level notebook output.
+            value from `clean_rooms_notebook_output` when the top-level notebook output is missing or has no result.
         output_truncated: Whether `output` was cut at 5 MB.
         logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks.
         logs_truncated: Whether `logs` holds only the last 5 MB.
@@ -595,7 +595,9 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
     state = _enum(_result_state(task))
     details = task.status.termination_details if task.status else None
     clean_room = out.clean_rooms_notebook_output
-    notebook = out.notebook_output or (clean_room.notebook_output if clean_room else None)
+    notebook = out.notebook_output
+    if (notebook is None or notebook.result is None) and clean_room and clean_room.notebook_output:
+        notebook = clean_room.notebook_output
     key = task.task_key or ""
     truncated = [
         what for what, cut in (("output", notebook and notebook.truncated), ("logs", out.logs_truncated)) if cut
