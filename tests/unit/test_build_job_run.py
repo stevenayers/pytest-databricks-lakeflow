@@ -90,6 +90,25 @@ def test_tasks_left_out_by_only_are_skipped() -> None:
         run.task("load")
 
 
+def test_disabled_task_is_reported_as_disabled() -> None:
+    ws = FakeWorkspaceClient()
+    run = build_from(ws, make_run(3, {"extract": "SUCCESS", "load": "DISABLED"}, disabled=["load"]))
+    assert run.succeeded
+    assert "load" not in run.tasks
+    assert run.skipped_tasks["load"].disabled
+    assert not run.task("extract").disabled
+    with pytest.raises(KeyError, match="disabled with disable=") as raised:
+        run.task("load")
+    assert "Skipped by only" not in str(raised.value)
+
+
+def test_only_skipped_task_is_still_skipped_by_only() -> None:
+    run, _ = build("only_plus_transform")
+    assert not run.skipped_tasks["load"].disabled
+    with pytest.raises(KeyError, match="Skipped by only"):
+        run.task("load")
+
+
 def test_logs_of_wheel_and_script_tasks() -> None:
     run, _ = build("wheel_logs")
     assert "scr_a" in run.task("scr_a").logs
@@ -153,6 +172,8 @@ def test_untaken_branches_do_not_fail_the_run() -> None:
     result = build_from(ws, run)
     assert result.succeeded
     assert result.task("on_false").result_state == "EXCLUDED"
+    assert result.task("on_false").excluded
+    assert not result.task("on_true").excluded
     assert repr(result).endswith("failing=[])")
 
 

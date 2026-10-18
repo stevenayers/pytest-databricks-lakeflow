@@ -7,9 +7,16 @@ import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.settings import check_params, create_kwargs, sanitise, select, tag_value
+from pytest_databricks_lakeflow.settings import (
+    check_params,
+    create_kwargs,
+    disable_tasks,
+    sanitise,
+    select,
+    tag_value,
+)
 
-from .fakes import example_settings
+from .fakes import example_settings, reporting_settings
 
 TAGS = {"pytest": "", "pytest_run_id": "r1", "pytest_nodeid": "tests/test_x.py::test_y"}
 
@@ -309,3 +316,48 @@ def test_sanitise_replaces_a_zero_template_timeout() -> None:
 
 def test_sanitise_without_timeout() -> None:
     assert sanitised().timeout_seconds is None
+
+def test_sanitise_pauses_dashboard_and_alert_subscriptions() -> None:
+    before, after = reporting_settings(), sanitised(reporting_settings())
+    dashboard, alert = task(after, "dashboard").dashboard_task, task(after, "alert").sql_task
+    assert dashboard is not None and dashboard.subscription is not None
+    assert alert is not None and alert.alert is not None
+    assert dashboard.subscription.paused is True
+    assert alert.alert.pause_subscriptions is True
+    template = task(before, "dashboard").dashboard_task
+    assert template is not None and template.subscription is not None
+    assert (dashboard.dashboard_id, dashboard.warehouse_id, dashboard.filters) == ("d1", "w1", {"region": "emea"})
+    assert dashboard.subscription.subscribers == template.subscription.subscribers
+    assert alert.alert.subscriptions == [jobs.SqlTaskSubscription(user_name="someone@example.com")]
+    assert task(after, "notify").notebook_task == task(before, "notify").notebook_task
+
+
+def test_sanitise_keeps_side_effects_when_asked() -> None:
+    settings = sanitised(reporting_settings(), side_effects="keep")
+    dashboard, alert = task(settings, "dashboard").dashboard_task, task(settings, "alert").sql_task
+    assert dashboard is not None and dashboard.subscription is not None
+    assert alert is not None and alert.alert is not None
+    assert dashboard.subscription.paused is None
+    assert alert.alert.pause_subscriptions is None
+
+
+def test_sanitise_leaves_dashboards_without_a_subscription_alone() -> None:
+    settings = reporting_settings()
+    dashboard = task(settings, "dashboard").dashboard_task
+    assert dashboard is not None
+    dashboard.subscription = None
+    assert task(sanitised(settings), "dashboard").dashboard_task == jobs.DashboardTask(
+        dashboard_id="d1", warehouse_id="w1", filters={"region": "emea"}
+    )
+
+
+def test_disable_tasks() -> None:
+    settings = disable_tasks(example_settings(), ["load"])
+    assert {t.task_key: t.disabled for t in settings.tasks or []} == {
+        "extract": None,
+        "transform": None,
+        "load": True,
+        "classic": None,
+    }
+    with pytest.raises(LakeflowError, match=r"Unknown task 'nope' in disable. Available: \['classic', 'extract'"):
+        disable_tasks(example_settings(), ["nope"])

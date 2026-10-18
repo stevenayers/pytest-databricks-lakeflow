@@ -158,6 +158,8 @@ class TaskRun:
             reported no resolved values.
         attempts: One `TaskRun` per attempt, in attempt order, each with empty `attempts`. The last equals this
             task apart from `attempts`.
+        disabled: Whether the task was disabled, for example with `disable=` on `Lakeflow.job()`. Tasks left out
+            by `only` are not flagged.
     """
 
     task_key: str
@@ -177,6 +179,7 @@ class TaskRun:
     attempt: int = 0
     parameters: dict[str, str] | list[str] | None = None
     attempts: list[TaskRun] = field(default_factory=list)
+    disabled: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -192,6 +195,11 @@ class TaskRun:
     def ran(self) -> bool:
         """Whether the task ran. False if it was skipped, excluded, disabled or cancelled."""
         return self.result_state not in NOT_RUN
+
+    @property
+    def excluded(self) -> bool:
+        """Whether the task ended `EXCLUDED` because its `run_if` or if/else condition was not met."""
+        return self.result_state == "EXCLUDED"
 
     @property
     def output_json(self) -> object:
@@ -251,7 +259,7 @@ class JobRun:
         duration: The time from start to end of the parent run.
         tasks: The user's tasks that were part of the run, by task key.
         injected_tasks: The stub and probe tasks added by the plugin, by task key.
-        skipped_tasks: Tasks left out by `only`, by task key.
+        skipped_tasks: Tasks left out by `only` or disabled, by task key. A disabled task has `disabled` set.
         parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
             Parameters the plugin injects are left out.
     """
@@ -298,10 +306,16 @@ class JobRun:
             The task's outcome.
 
         Raises:
-            KeyError: If the task was not part of the run. The message lists the available keys.
+            KeyError: If the task was not part of the run. The message lists the available keys and says whether
+                the task was disabled or skipped by `only`.
         """
         if key not in self.tasks:
-            skipped = f" Skipped by only: {sorted(self.skipped_tasks)}." if key in self.skipped_tasks else ""
+            skipped = ""
+            if key in self.skipped_tasks:
+                if self.skipped_tasks[key].disabled:
+                    skipped = f" Task {key!r} was disabled with disable=."
+                else:
+                    skipped = f" Skipped by only: {sorted(k for k, t in self.skipped_tasks.items() if not t.disabled)}."
             raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{skipped}")
         return self.tasks[key]
 
@@ -448,6 +462,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
         attempt=task.attempt_number or 0,
         parameters=_parameters(task.resolved_values),
+        disabled=bool(task.disabled),
     )
 
 
