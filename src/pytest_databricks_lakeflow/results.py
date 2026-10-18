@@ -415,6 +415,7 @@ def build_job_run(
     stubs: Collection[str] = (),
     capture_task_values: Mapping[str, Sequence[str]] | None = None,
     disabled: Collection[str] = (),
+    outputs: Mapping[int, jobs.RunOutput] | None = None,
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output.
 
@@ -430,6 +431,7 @@ def build_job_run(
         capture_task_values: The value keys requested from each probed task, by task key.
         disabled: Keys of the tasks disabled in the job's settings. The Jobs API does not flag them on the run, where
             a disabled task and one left out by `only` both end `DISABLED`.
+        outputs: Task outputs already read, by task run id. Only the outputs missing from it are fetched.
 
     Returns:
         The run's outcome.
@@ -439,11 +441,10 @@ def build_job_run(
         by_key.setdefault(task.task_key or "", []).append(task)
     for tasks in by_key.values():
         tasks.sort(key=lambda t: t.attempt_number or 0)
-    ran = [task for tasks in by_key.values() for task in tasks if _enum(_result_state(task)) != "DISABLED"]
-    outputs = _outputs(ws, ran)
-    attempts = {
-        key: [_task_run(task, outputs.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()
-    }
+    ran = [task for tasks in by_key.values() for task in tasks if has_output(task)]
+    known = dict(outputs or {})
+    known.update(fetch_outputs(ws, [task for task in ran if (task.run_id or 0) not in known]))
+    attempts = {key: [_task_run(task, known.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()}
     task_runs = {
         key: replace(runs[-1], disabled=key in disabled and runs[-1].result_state == "DISABLED")
         for key, runs in attempts.items()
@@ -486,7 +487,16 @@ def _job_parameters(parameters: Sequence[jobs.JobParameter] | None) -> dict[str,
     }
 
 
-def _outputs(ws: WorkspaceClient, tasks: list[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
+def has_output(task: jobs.RunTask) -> bool:
+    """Whether a terminated task run has an output to read: every task run but a disabled one has."""
+    return _enum(_result_state(task)) != "DISABLED"
+
+
+def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
+    """Read the output of each task run in parallel, by task run id. An output that cannot be read is empty."""
+    if not tasks:
+        return {}
+
     def fetch(task: jobs.RunTask) -> jobs.RunOutput:
         try:
             return ws.jobs.get_run_output(task.run_id or 0)
@@ -496,6 +506,14 @@ def _outputs(ws: WorkspaceClient, tasks: list[jobs.RunTask]) -> dict[int, jobs.R
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         return {task.run_id or 0: output for task, output in zip(tasks, pool.map(fetch, tasks), strict=True)}
+
+
+def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
+    """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
+    if output is None or _enum(_result_state(task)) in NOT_RUN:
+        return None
+    error = TaskError.from_output(output.error, output.error_trace)
+    return _first_line(str(error)) if error else None
 
 
 def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:

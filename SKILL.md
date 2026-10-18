@@ -95,12 +95,12 @@ Use `@pytest.mark.parametrize` for input variations and `job.run(only=["+task"])
 ## Running
 
 ```bash
-pytest tests/ --log-cli-level=INFO          # first run deploys the target, then runs each test
+pytest tests/ --log-cli-level=INFO          # deploys the target, runs each test, logs each task's state changes
 pytest tests/ -n 4                          # parallel, needs the xdist extra
 pytest tests/ --lakeflow-keep               # keep jobs and schemas to inspect
 pytest tests/ --lakeflow-sweep              # delete leftovers from earlier runs first
 ```
 
-Kept jobs and schemas are listed in a `lakeflow` block at the end of the run. Every ephemeral job is tagged `pytest`, `pytest_run_id` and `pytest_nodeid`, plus `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` when they can be resolved.
+While a run is in flight, each task's change of state is logged at INFO, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: no rows`, and the same lines follow the job and run URLs in the test's `lakeflow` report section, shown for failures and with `-rA`. Kept jobs and schemas are listed in a `lakeflow` block at the end of the run. Every ephemeral job is tagged `pytest`, `pytest_run_id` and `pytest_nodeid`, plus `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` when they can be resolved.
 
 Needs the Databricks CLI v1.7.0 or later on `PATH`, credentials for the CLI and the SDK, and serverless jobs (or `helpers_compute="<job_cluster_key>"`).
