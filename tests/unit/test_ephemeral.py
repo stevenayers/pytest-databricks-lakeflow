@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
 from .conftest import FakeCli, configure_lakeflow
@@ -637,3 +638,63 @@ def lakeflow(lakeflow):
     assert [created.get("description") for created in fake_ws.jobs.created] == ["team a", None]
     assert fake_ws.jobs.deleted == [1001, 1003]
     assert fake_cli.calls.count(["bundle", "deploy", "-t", "test", "--auto-approve"]) == 1
+
+
+def test_permissions_reach_jobs_create(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, 'permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}]')
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").create()\n')
+    result.assert_outcomes(passed=1)
+    view = jobs.JobPermissionLevel.CAN_VIEW
+    assert fake_ws.jobs.acls == [[jobs.JobAccessControlRequest(group_name="data-eng", permission_level=view)]]
+    assert "access_control_list" not in fake_ws.jobs.created[0]
+
+
+def test_no_permissions_by_default(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").create()\n')
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.acls == [None]
+    assert "access_control_list" not in fake_ws.jobs.created[0]
+    assert "run_as" not in fake_ws.jobs.created[0]
+
+
+def test_run_as_keep_on_job_and_task(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        from databricks.sdk.service import jobs
+
+        def test_job(lakeflow):
+            lakeflow.job("my_job", run_as="keep").create()
+            lakeflow.task(
+                "my_job.transform", upstream_task_values={"extract": {"row_count": 1}}, run_as="keep"
+            ).create()
+            lakeflow.job("my_job", run_as="0000-app-id").create()
+            lakeflow.job("my_job", run_as="me@example.com").create()
+            lakeflow.job("my_job", run_as=jobs.JobRunAs(service_principal_name="1111-object-id")).create()
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    template = jobs.JobRunAs(user_name="someone@example.com")
+    assert [created["run_as"] for created in fake_ws.jobs.created] == [
+        template,
+        template,
+        jobs.JobRunAs(service_principal_name="0000-app-id"),
+        jobs.JobRunAs(user_name="me@example.com"),
+        jobs.JobRunAs(service_principal_name="1111-object-id"),
+    ]
+
+
+def test_create_errors_pass_through(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(**kwargs: object) -> jobs.CreateResponse:
+        raise PermissionDenied("User is not authorised to set run_as to 0000-app-id")
+
+    monkeypatch.setattr(fake_ws.jobs, "create", denied)
+    result = run_tests(
+        pytester,
+        'def test_job(lakeflow):\n    with lakeflow.job("my_job", run_as="0000-app-id") as job:\n        job.run()\n',
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*PermissionDenied: User is not authorised to set run_as to 0000-app-id*"])
+    assert fake_ws.jobs.run_now_calls == []

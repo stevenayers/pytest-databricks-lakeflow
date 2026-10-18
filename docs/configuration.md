@@ -24,6 +24,7 @@ All arguments are keyword-only.
 | `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
 | `keep` | `False` | Keep every ephemeral job and temporary schema. |
 | `keep_failed` | `True` | Keep the ephemeral job when its test fails. |
+| `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. See [Permissions](#permissions). |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
 | `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes. |
 
@@ -75,7 +76,26 @@ With `sync` and `none`, a job that still contains `${...}` references after `val
 
 `modify_settings(settings, item)` runs after the plugin has sanitised the copied settings and before `jobs.create`. Change `settings` in place, for example to shrink a cluster, swap an environment or add a tag. Job parameters it declares are accepted by `params`.
 
+`access_control_list` cannot be set from `modify_settings`: it is an argument of `jobs.create`, not a `JobSettings` field. Use `permissions` instead.
+
 `run_finished(run, item)` runs after each `JobRun` is built, after the run's URL has been added to the test's `user_properties`.
+
+## Permissions
+
+Only the identity that creates a job, and workspace admins, can open it. In CI that identity is usually a service principal, so the engineer reading the log cannot open a kept job's URL. `permissions` grants access on every ephemeral job when it is created:
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}])
+```
+
+The entries go to `jobs.create` unchanged, so they take `user_name`, `group_name` or `service_principal_name` and a `permission_level` such as `CAN_VIEW`, `CAN_MANAGE_RUN` or `CAN_MANAGE`. Errors from the API, for example for an unknown group or `IS_OWNER`, fail the test as they are. To choose who a job runs as, pass `run_as` to [`lakeflow.job()`](job-tests.md#make-a-job) or `lakeflow.task()`.
 
 ## Logging and reports
 

@@ -21,7 +21,7 @@ from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.results import JobRun
-from pytest_databricks_lakeflow.settings import Helpers, check_params, inject_probes, sanitise, wrap_task
+from pytest_databricks_lakeflow.settings import Helpers, RunAs, check_params, inject_probes, sanitise, wrap_task
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -65,6 +65,9 @@ class Lakeflow:
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
             `--no-lakeflow-keep-failed` override it.
+        permissions: The `access_control_list` applied to every ephemeral job when it is created, so that people
+            other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as
+            `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`.
         modify_settings: Called with each ephemeral job's settings and the test, just before the job is created.
             Change the settings in place.
         run_finished: Called with the outcome of each run and the test, after the run finishes.
@@ -87,6 +90,7 @@ class Lakeflow:
     sweep_hours: float = 24
     keep: bool = False
     keep_failed: bool = True
+    permissions: Sequence[Mapping[str, str] | jobs.JobAccessControlRequest] | None = None
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
     run_finished: Callable[[JobRun, pytest.Item], None] | None = field(default=None, repr=False)
     active_runs: set[int] = field(default_factory=set, init=False, repr=False)
@@ -105,6 +109,17 @@ class Lakeflow:
         if self._ws is None:
             self._ws = session.make_workspace_client(self.profile)
         return self._ws
+
+    def access_control_list(self) -> list[jobs.JobAccessControlRequest] | None:
+        """Get `permissions` as the `access_control_list` that `jobs.create` takes, or `None` if there are none."""
+        if self.permissions is None:
+            return None
+        return [
+            entry
+            if isinstance(entry, jobs.JobAccessControlRequest)
+            else jobs.JobAccessControlRequest.from_dict(dict(entry))
+            for entry in self.permissions
+        ]
 
     @property
     def run_id(self) -> str:
@@ -142,6 +157,7 @@ class Lakeflow:
         params: Mapping[str, str] | None = None,
         capture_task_values: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
+        run_as: RunAs = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -150,6 +166,9 @@ class Lakeflow:
             params: Job parameters for every run of the copy.
             capture_task_values: The task value keys to capture, by task key.
             name: Replaces the test node id in the job name.
+            run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
+                the template's. A string with `@` names a user, any other string names a service principal by its
+                application id, and a `jobs.JobRunAs` is used as given.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -163,7 +182,7 @@ class Lakeflow:
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        return self._ephemeral(item, key, settings, params, capture_task_values, (), name)
+        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as)
 
     def task(
         self,
@@ -171,6 +190,7 @@ class Lakeflow:
         params: Mapping[str, str] | None = None,
         upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
         capture_task_values: Sequence[str] | None = None,
+        run_as: RunAs = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -182,6 +202,7 @@ class Lakeflow:
             params: Job parameters for every run.
             upstream_task_values: The task values each stub sets, by upstream task key.
             capture_task_values: The task value keys to capture from the task.
+            run_as: Who the job runs as, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -200,7 +221,7 @@ class Lakeflow:
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         capture = {task_key: list(capture_task_values)} if capture_task_values else {}
-        return self._ephemeral(item, job_key, settings, params, capture, upstream, None)
+        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as)
 
     @contextmanager
     def schema(self, catalog: str | None = None) -> Generator[str, None, None]:
@@ -271,6 +292,7 @@ class Lakeflow:
         capture_task_values: Mapping[str, Sequence[str]] | None,
         stubs: Collection[str],
         name: str | None,
+        run_as: RunAs,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -284,6 +306,7 @@ class Lakeflow:
             tags={"pytest": "", "pytest_run_id": self.run_id, "pytest_nodeid": item.nodeid},
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
+            run_as=run_as,
         )
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
