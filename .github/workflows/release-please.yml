@@ -1,0 +1,38 @@
+name: release-please
+
+# Opens and updates the release PR from conventional commits on main. Merging that PR makes release-please
+# create the vX.Y.Z tag and the GitHub release, after which this workflow dispatches release.yml for the tag.
+# Needs "Allow GitHub Actions to create and approve pull requests" in Settings > Actions > General.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Release PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the release branch, create the tag and the GitHub release
+      pull-requests: write # open and update the release PR
+      issues: write # label the release PR
+      actions: write # dispatch release.yml for the new tag
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+      - name: Start the release workflow for the new tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

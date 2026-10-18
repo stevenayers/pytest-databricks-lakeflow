@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://stevenayers.github.io/pytest-databricks-lakeflow/
+    about: Guides, configuration reference, how it works, limitations and the API reference.
+  - name: Report a security problem
+    url: https://github.com/stevenayers/pytest-databricks-lakeflow/security/advisories/new
+    about: Report a vulnerability privately. Please do not open a public issue.

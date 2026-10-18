@@ -8,6 +8,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import ENV_KEY, Helpers, check_values, escape, inject_probes, wrap_task
 
+from .conftest import configure_lakeflow
 from .fakes import FakeWorkspaceClient, example_settings, recorded
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
@@ -68,7 +69,7 @@ def test_helpers_on_a_job_cluster() -> None:
     settings = wrap_task(example_settings(), "transform", UPSTREAM, ["k"], helpers)
     assert all(t.job_cluster_key == "classic" for t in settings.tasks or [] if t.task_key != "transform")
     assert ENV_KEY not in {e.environment_key for e in settings.environments or []}
-    with pytest.raises(LakeflowError, match=r"lakeflow_helpers_compute is 'gpu'.*Available: \['classic'\]"):
+    with pytest.raises(LakeflowError, match=r"^helpers_compute is 'gpu'.*Available: \['classic'\]"):
         wrap_task(example_settings(), "transform", UPSTREAM, [], Helpers("/s", "/g", job_cluster_key="gpu"))
 
 
@@ -161,3 +162,19 @@ def test_job_capture_values_end_to_end(pytester: pytest.Pytester, fake_ws: FakeW
     pytester.runpytest().assert_outcomes(passed=1)
     [created] = fake_ws.jobs.created
     assert [t.task_key for t in created["tasks"]][-1] == "__pytest_probe__transform"
+
+
+def test_helper_settings_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, 'helpers_path="/Shared/helpers", helpers_compute="classic"')
+    pytester.makepyfile(
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job", capture_values={"load": ["k"]}):
+                pass
+        """
+    )
+    pytester.runpytest().assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    probe = created["tasks"][-1]
+    assert probe.job_cluster_key == "classic"
+    assert probe.notebook_task.notebook_path == "/Shared/helpers/get_values"

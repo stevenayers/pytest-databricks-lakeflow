@@ -1,0 +1,20 @@
+name: Question
+description: Ask how to do something with the plugin.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: Please check the [docs](https://stevenayers.github.io/pytest-databricks-lakeflow/) first. If the answer should have been there, say where you looked.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What you want to achieve and what you have tried.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant test code, `conftest.py` and job definition, if any.
+      render: python

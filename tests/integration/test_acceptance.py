@@ -2,8 +2,8 @@ r"""The acceptance tests from the spec, run against examples/bundle in a real wo
 
 Run them with:
 
-    LAKEFLOW_INTEGRATION=1 uv run pytest tests/integration -n 4 \
-        -o lakeflow_profile=<profile> -o lakeflow_catalog=<catalog>
+    LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
+        uv run pytest tests/integration -n 4
 """
 
 from __future__ import annotations
@@ -49,23 +49,23 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
     ("greeting", "expected"),
     [("hello", "hello world"), ("goodbye", "goodbye world")],
 )
-def test_single_task(lakeflow: Lakeflow, lakeflow_schema: str, greeting: str, expected: str) -> None:
-    with lakeflow.task(
-        "my_example_job.transform",
-        params={"param1": greeting, "param2": "world", "schema": lakeflow_schema, "mode": "incremental"},
-        upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-        capture_values=["rows_written"],
-    ) as task:
-        run = task.run()
-        assert run.succeeded
-        assert run.task("transform").output == expected
-        assert run.task("transform").values["rows_written"] == 42
-    table = lakeflow.ws.tables.exists(f"{lakeflow_schema}.example_rows")
-    assert table.table_exists
+def test_single_task(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.task(
+            "my_example_job.transform",
+            params={"param1": greeting, "param2": "world", "schema": schema, "mode": "incremental"},
+            upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+            capture_values=["rows_written"],
+        ) as task:
+            run = task.run()
+            assert run.succeeded
+            assert run.task("transform").output == expected
+            assert run.task("transform").values["rows_written"] == 42
+        assert lakeflow.ws.tables.exists(f"{schema}.example_rows").table_exists
 
 
-def test_run_twice_in_one_job(lakeflow: Lakeflow, lakeflow_schema: str) -> None:
-    with lakeflow.job("my_example_job", params={"schema": lakeflow_schema}) as job:
+def test_run_twice_in_one_job(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema, lakeflow.job("my_example_job", params={"schema": schema}) as job:
         first = job.run()
         second = job.run(params={"mode": "incremental"})
         assert first.succeeded and second.succeeded

@@ -137,7 +137,7 @@ def check_params(job_key: str, settings: jobs.JobSettings, params: Mapping[str, 
     if undeclared and not allow_undeclared:
         raise LakeflowError(
             f"Job {job_key!r} does not declare the parameters {undeclared}. Declared: {sorted(declared)}. "
-            "Set lakeflow_allow_undeclared_params = true to pass them anyway."
+            "Pass allow_undeclared_params=True to Lakeflow to pass them anyway."
         )
 
 
@@ -332,7 +332,7 @@ def _add_helper_compute(settings: jobs.JobSettings, helpers: Helpers) -> None:
         clusters = sorted(c.job_cluster_key for c in settings.job_clusters or [])
         if helpers.job_cluster_key not in clusters:
             raise LakeflowError(
-                f"lakeflow_helpers_compute is {helpers.job_cluster_key!r}, but the job has no job cluster with "
+                f"helpers_compute is {helpers.job_cluster_key!r}, but the job has no job cluster with "
                 f"that key. Available: {clusters}"
             )
     elif not any(env.environment_key == ENV_KEY for env in settings.environments or []):
