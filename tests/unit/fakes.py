@@ -84,6 +84,7 @@ class FakeJobs:
         only: Sequence[str] | None = None,
         performance_target: jobs.PerformanceTarget | None = None,
         queue: jobs.QueueSettings | None = None,
+        pipeline_params: jobs.PipelineParams | None = None,
     ) -> SimpleNamespace:
         self.run_now_calls.append(
             {
@@ -93,6 +94,7 @@ class FakeJobs:
                 "only": only,
                 "performance_target": performance_target,
                 "queue": queue,
+                "pipeline_params": pipeline_params,
             }
         )
         if idempotency_token is not None and idempotency_token in self.tokens:
@@ -327,6 +329,24 @@ def example_settings() -> jobs.JobSettings:
                     "task_key": "classic",
                     "job_cluster_key": "classic",
                     "notebook_task": {"notebook_path": f"{nb}/classic"},
+                },
+            ],
+        }
+    )
+
+
+def pipeline_settings() -> jobs.JobSettings:
+    """Build a deployed bundle job with a pipeline task and a notebook task that depends on it."""
+    nb = "/Workspace/Users/someone@example.com/.bundle/example/test/files/src"
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] pipeline_job",
+            "tasks": [
+                {"task_key": "refresh", "pipeline_task": {"pipeline_id": "abc"}},
+                {
+                    "task_key": "check",
+                    "depends_on": [{"task_key": "refresh"}],
+                    "notebook_task": {"notebook_path": f"{nb}/check"},
                 },
             ],
         }
