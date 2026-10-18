@@ -50,6 +50,71 @@ def test_with_block_creates_runs_and_deletes(pytester: pytest.Pytester, fake_ws:
     assert fake_ws.jobs.deleted == [call["job_id"]]
 
 
+TEMPLATE_PARAMETERS = [
+    jobs.JobParameterDefinition(name="param1", default="hello"),
+    jobs.JobParameterDefinition(name="schema", default=""),
+]
+TEST_MARKER = jobs.JobParameterDefinition(name="__pytest_test_id", default="test_jobs.py::test_job")
+
+
+def test_test_marker_declares_the_node_id(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, "test_marker=True")
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            assert lakeflow.test_marker
+            with lakeflow.job("my_job", params={"param1": "hi"}) as job:
+                assert job.run(params={"schema": "s"}).succeeded
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["parameters"] == [*TEMPLATE_PARAMETERS, TEST_MARKER]
+    [call] = fake_ws.jobs.run_now_calls
+    assert call["job_parameters"] == {"param1": "hi", "schema": "s"}
+
+
+def test_test_marker_ignores_a_custom_name(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, "test_marker=True")
+    result = run_tests(
+        pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job", name="custom"):\n        pass\n'
+    )
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["name"] == "[pytest] custom"
+    assert created["parameters"][-1] == TEST_MARKER
+
+
+def test_test_marker_is_off_by_default(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["parameters"] == TEMPLATE_PARAMETERS
+
+
+@pytest.mark.parametrize("arguments", ["", "test_marker=True"])
+def test_test_marker_cannot_be_passed(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str) -> None:
+    configure_lakeflow(pytester, arguments)
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowError
+
+        def test_job(lakeflow):
+            with pytest.raises(LakeflowError, match="reserved for the plugin"):
+                lakeflow.job("my_job", params={"__pytest_test_id": "x"})
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowError, match="reserved for the plugin"):
+                    job.run(params={"__pytest_test_id": "x"})
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.run_now_calls == []
+
+
 def test_run_requests_resolved_values(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n').assert_outcomes(passed=1)
     assert fake_ws.jobs.get_run_calls
