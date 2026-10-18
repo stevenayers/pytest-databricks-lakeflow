@@ -976,3 +976,18 @@ def test_progress_lines_shown_for_passing_tests_with_ra(
     result = run_tests(pytester, 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n', "-rA")
     result.assert_outcomes(passed=1)
     result.stdout.fnmatch_lines(["*PASSES*", "*- lakeflow -*", f"lakeflow_job_url: {HOST}/jobs/1001", *PROGRESS_LINES])
+
+
+def test_late_result_state_does_not_log_a_second_line(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    details = jobs.TerminationDetails(code=jobs.TerminationCodeCode.RUN_EXECUTION_ERROR)
+    status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.TERMINATED, termination_details=details)
+    task = jobs.RunTask(task_key="transform", run_id=7700, status=status, start_time=1_000, end_time=3_000)
+    running = jobs.Run(run_id=77, status=jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING), tasks=[task])
+    fake_ws.jobs.queue_polls([running, make_run(77, {"transform": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR")])
+    source = 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n'
+    result = run_tests(pytester, source, "--log-cli-level=INFO")
+    result.assert_outcomes(passed=1)
+    progress = [line for line in result.stdout.lines if " transform: " in line and "INFO" in line]
+    assert len(progress) == 1
+    assert progress[0].endswith(" transform: RUN_EXECUTION_ERROR in 0:00:02")
+    assert fake_ws.jobs.output_calls == [7700]

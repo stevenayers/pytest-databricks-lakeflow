@@ -465,7 +465,7 @@ def build_job_run(
         result_state=_enum(run.state.result_state if run.state else None),
         termination_code=_enum(details.code if details else None),
         termination_message=details.message if details else None,
-        duration=_duration(run.start_time, run.end_time),
+        duration=duration(run.start_time, run.end_time),
         tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
         injected_tasks=injected,
         skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
@@ -535,7 +535,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         termination_code=_enum(details.code if details else None),
         termination_message=details.message if details else None,
         run_url=task.run_page_url,
-        duration=_duration(task.start_time, task.end_time),
+        duration=duration(task.start_time, task.end_time),
         output=notebook.result if notebook else None,
         output_truncated=bool(notebook and notebook.truncated),
         logs=out.logs or "",
@@ -604,7 +604,7 @@ def _enum(value: Enum | str | None) -> str | None:
     return value.value if isinstance(value, Enum) else value
 
 
-def _duration(start: int | None, end: int | None) -> timedelta:
+def duration(start: int | None, end: int | None) -> timedelta:
     return timedelta(milliseconds=end - start) if start and end and end >= start else timedelta(0)
 
 

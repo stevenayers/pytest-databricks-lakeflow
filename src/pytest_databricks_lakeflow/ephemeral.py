@@ -18,6 +18,7 @@ from pytest_databricks_lakeflow.results import (
     JobRun,
     build_job_run,
     describe_failing,
+    duration,
     error_line,
     fetch_outputs,
     has_output,
@@ -216,7 +217,7 @@ class EphemeralJob:
     def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
-        seen: dict[tuple[str, int], str] = {}
+        seen: dict[tuple[str, int], str | None] = {}
         outputs: dict[int, jobs.RunOutput] = {}
         progress = item.stash.setdefault(PROGRESS, [])
         while True:
@@ -236,9 +237,17 @@ class EphemeralJob:
             time.sleep(POLL_SECONDS)
 
     def _log_progress(
-        self, run: jobs.Run, seen: dict[tuple[str, int], str], outputs: dict[int, jobs.RunOutput], progress: list[str]
+        self,
+        run: jobs.Run,
+        seen: dict[tuple[str, int], str | None],
+        outputs: dict[int, jobs.RunOutput],
+        progress: list[str],
     ) -> None:
-        """Log each task run whose state changed since the last poll, reading the output of those that finished."""
+        """Log each task run whose state changed since the last poll, reading the output of those that finished.
+
+        `seen` holds the last state logged for each task attempt, or `None` once it has been logged as terminated, so
+        a result state that appears on a later poll does not log a second line.
+        """
         states = [(task, *_task_state(task)) for task in run.tasks or []]
         finished = [
             task
@@ -248,10 +257,11 @@ class EphemeralJob:
         outputs.update(fetch_outputs(self.lakeflow.ws, finished))
         for task, state, done in states:
             key = (task.task_key or "", task.attempt_number or 0)
-            if state is None or seen.get(key) == state:
+            previous = seen.get(key, "")
+            if state is None or previous is None or previous == state:
                 continue
-            line = _transition(task, seen.get(key), state, outputs.get(task.run_id or 0) if done else None, done)
-            seen[key] = state
+            line = _transition(task, previous, state, outputs.get(task.run_id or 0) if done else None, done)
+            seen[key] = None if done else state
             log.info("%s", line)
             progress.append(line)
 
@@ -335,8 +345,9 @@ def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jo
     line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
     if not done:
         return line
-    if task.start_time and task.end_time and task.end_time >= task.start_time:
-        line = f"{line} in {timedelta(seconds=(task.end_time - task.start_time) // 1000)}"
+    elapsed = duration(task.start_time, task.end_time)
+    if elapsed:
+        line = f"{line} in {timedelta(seconds=elapsed // timedelta(seconds=1))}"
     error = error_line(task, output)
     return f"{line} {error}" if error else line
 
