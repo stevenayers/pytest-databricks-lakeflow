@@ -177,6 +177,42 @@ def test_excluded_property() -> None:
     assert not task("load").excluded
 
 
+STATE_PROPERTIES = ("excluded", "upstream_failed", "disabled", "cancelled")
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("EXCLUDED", "excluded"),
+        ("UPSTREAM_FAILED", "upstream_failed"),
+        ("DISABLED", "disabled"),
+        ("CANCELED", "cancelled"),
+        ("SUCCESS", None),
+        ("UPSTREAM_CANCELED", None),
+        (None, None),
+    ],
+)
+def test_state_properties(state: str | None, expected: str | None) -> None:
+    run = task("t", state)
+    assert {name: getattr(run, name) for name in STATE_PROPERTIES} == {
+        name: name == expected for name in STATE_PROPERTIES
+    }
+
+
+def test_branch_taken_rejects_non_condition_tasks() -> None:
+    run = job_run([task("check", condition_outcome=True), task("notebook")])
+    assert run.branch_taken("check") is True
+    with pytest.raises(LakeflowError, match=r"Task 'notebook' is not a condition task.*result_state"):
+        run.branch_taken("notebook")
+    with pytest.raises(KeyError, match="No task 'nope'"):
+        run.branch_taken("nope")
+
+
+def test_executed_tasks_are_the_sorted_tasks_that_ran() -> None:
+    run = job_run([task("z"), task("a", "FAILED"), task("m", "EXCLUDED"), task("b", "UPSTREAM_FAILED")])
+    assert run.executed_tasks == ["a", "z"]
+
+
 def test_root_cause_is_the_last_caused_by_line() -> None:
     error = TaskError(type="Py4JJavaError", message="An error occurred while calling o123.save.", trace=PY4J_TRACE)
     assert error.root_cause == "java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)"
