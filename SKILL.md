@@ -19,13 +19,13 @@ The plugin deploys a bundle target once per session, then gives each test a thro
 Import from `pytest_databricks_lakeflow`: `Lakeflow`, `EphemeralJob`, `JobRun`, `TaskRun`, `TaskValues`, `TaskError`, `LakeflowError`, `LakeflowBundleError`, `LakeflowTimeout`.
 
 - `lakeflow` fixture (session scope) returns a `Lakeflow`. Override it to configure; all `Lakeflow` arguments are keyword-only: `bundle_root`, `target`, `profile`, `workspace_client`, `sync`, `timeout`, `catalog`, `helpers_path`, `helpers_compute`, `helpers_environment_version`, `disable_auto_optimization`, `performance_optimized`, `allow_undeclared_params`, `sweep_hours`, `keep`, `keep_failed`, `modify_settings`, `run_finished`.
-- `lakeflow.job(key, params=None, capture_values=None, name=None) -> EphemeralJob`. `capture_values` is `{task_key: [value_key, ...]}`.
-- `lakeflow.task("job_key.task_key", params=None, upstream_values=None, capture_values=None) -> EphemeralJob`. `upstream_values` is `{upstream_task_key: {value_key: value}}`; `capture_values` is a list.
+- `lakeflow.job(key, params=None, capture_task_values=None, name=None) -> EphemeralJob`. `capture_task_values` is `{task_key: [value_key, ...]}`.
+- `lakeflow.task("job_key.task_key", params=None, upstream_task_values=None, capture_task_values=None) -> EphemeralJob`. `upstream_task_values` is `{upstream_task_key: {value_key: value}}`; `capture_task_values` is a list.
 - `lakeflow.schema(catalog=None)`: context manager yielding a temporary `catalog.schema` name. Needs `catalog`.
 - `lakeflow.ws`: the `WorkspaceClient`. `lakeflow.template(key)`: a fresh `JobSettings` copy.
 - `EphemeralJob.run(params=None, only=None, timeout=None) -> JobRun`. `only` takes task keys with `+key`, `key+`, `+key+`. Also `job_id`, `url`, `runs`.
 - `JobRun`: `succeeded`, `failed`, `tasks`, `task(key)`, `skipped_tasks`, `injected_tasks`, `result_state`, `termination_code`, `termination_message`, `duration`, `run_id`, `run_url`.
-- `TaskRun`: `succeeded`, `ran`, `result_state`, `termination_code`, `termination_message`, `output`, `output_truncated`, `logs`, `log_lines`, `logs_truncated`, `error` (`type`, `message`, `trace`), `raised(ExcType)`, `values`, `missing_values`, `duration`, `attempt`, `run_url`.
+- `TaskRun`: `succeeded`, `ran`, `result_state`, `termination_code`, `termination_message`, `output`, `output_truncated`, `logs`, `log_lines`, `logs_truncated`, `error` (`type`, `message`, `trace`), `raised(ExcType)`, `task_values`, `missing_task_values`, `duration`, `attempt`, `run_url`.
 - Flags: `--lakeflow-keep`, `--lakeflow-keep-failed`, `--no-lakeflow-keep-failed`, `--lakeflow-sweep`, `--lakeflow-destroy`. There are no ini options and no other fixtures.
 
 Do not invent arguments, fixtures, markers or flags beyond these. Check the signature in the API reference when unsure.
@@ -63,12 +63,12 @@ def test_transform(lakeflow: Lakeflow) -> None:
     with lakeflow.task(
         "my_example_job.transform",
         params={"param1": "hello", "param2": "world"},
-        upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-        capture_values=["rows_written"],
+        upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+        capture_task_values=["rows_written"],
     ) as task:
         run = task.run()
         assert run.succeeded, run
-        assert run.task("transform").values["rows_written"] == 42
+        assert run.task("transform").task_values["rows_written"] == 42
 ```
 
 Tables in a temporary schema:

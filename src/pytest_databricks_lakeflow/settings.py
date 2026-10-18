@@ -186,13 +186,13 @@ def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
 
 
 def inject_probes(
-    settings: jobs.JobSettings, capture_values: Mapping[str, Sequence[str]], helpers: Helpers
+    settings: jobs.JobSettings, capture_task_values: Mapping[str, Sequence[str]], helpers: Helpers
 ) -> jobs.JobSettings:
-    """Add a probe task for each task in `capture_values`.
+    """Add a probe task for each task in `capture_task_values`.
 
     Args:
         settings: The job's settings. They are changed in place.
-        capture_values: The task value keys to capture, by task key.
+        capture_task_values: The task value keys to capture, by task key.
         helpers: Where the helper notebooks are and what they run on.
 
     Returns:
@@ -201,15 +201,17 @@ def inject_probes(
     Raises:
         LakeflowError: If a task is not in the job, or a key is longer than 512 characters.
     """
-    if not capture_values:
+    if not capture_task_values:
         return settings
     keys = {t.task_key for t in settings.tasks or []}
-    unknown = sorted(set(capture_values) - keys)
+    unknown = sorted(set(capture_task_values) - keys)
     if unknown:
-        raise LakeflowError(f"capture_values names tasks that are not in the job: {unknown}. Available: {sorted(keys)}")
-    for target, value_keys in capture_values.items():
+        raise LakeflowError(
+            f"capture_task_values names tasks that are not in the job: {unknown}. Available: {sorted(keys)}"
+        )
+    for target, value_keys in capture_task_values.items():
         _check_keys(target, value_keys)
-    probes = [_probe_task(target, value_keys, helpers) for target, value_keys in capture_values.items()]
+    probes = [_probe_task(target, value_keys, helpers) for target, value_keys in capture_task_values.items()]
     settings.tasks = [*(settings.tasks or []), *probes]
     _add_helper_compute(settings, helpers)
     return settings
@@ -218,11 +220,11 @@ def inject_probes(
 def wrap_task(
     settings: jobs.JobSettings,
     task_key: str,
-    upstream_values: Mapping[str, Mapping[str, object]],
-    capture_values: Sequence[str],
+    upstream_task_values: Mapping[str, Mapping[str, object]],
+    capture_task_values: Sequence[str],
     helpers: Helpers,
 ) -> jobs.JobSettings:
-    """Reduce the job to one task, a stub task for each upstream task in `upstream_values`, and a probe.
+    """Reduce the job to one task, a stub task for each upstream task in `upstream_task_values`, and a probe.
 
     A stub has the key of the task it replaces, so the target's `{{tasks.<key>.values.<name>}}` references and
     `taskValues.get` calls resolve against it.
@@ -230,8 +232,8 @@ def wrap_task(
     Args:
         settings: The job's settings. They are changed in place.
         task_key: The task to keep.
-        upstream_values: The task values each stub sets, by upstream task key.
-        capture_values: The task value keys to capture from the task. No probe is added if empty.
+        upstream_task_values: The task values each stub sets, by upstream task key.
+        capture_task_values: The task value keys to capture from the task. No probe is added if empty.
         helpers: Where the helper notebooks are and what they run on.
 
     Returns:
@@ -245,20 +247,20 @@ def wrap_task(
     if target is None:
         available = sorted(t.task_key for t in settings.tasks or [])
         raise LakeflowError(f"No task {task_key!r} in the job. Available: {available}")
-    if task_key in upstream_values:
-        raise LakeflowError(f"upstream_values cannot stub {task_key!r}, the task under test")
+    if task_key in upstream_task_values:
+        raise LakeflowError(f"upstream_task_values cannot stub {task_key!r}, the task under test")
     referenced = set(TASK_REFERENCE.findall(json.dumps(target.as_dict())))
-    missing = sorted(referenced - set(upstream_values))
+    missing = sorted(referenced - set(upstream_task_values))
     if missing:
         raise LakeflowError(
-            f"Task {task_key!r} refers to task values of {missing} in its settings. Pass them in upstream_values."
+            f"Task {task_key!r} refers to task values of {missing} in its settings. Pass them in upstream_task_values."
         )
-    for stub_key, values in upstream_values.items():
+    for stub_key, values in upstream_task_values.items():
         check_values(stub_key, values)
-    _check_keys(task_key, capture_values)
-    target.depends_on = [jobs.TaskDependency(task_key=key) for key in upstream_values] or None
-    stubs = [_stub_task(key, values, helpers) for key, values in upstream_values.items()]
-    probes = [_probe_task(task_key, capture_values, helpers)] if capture_values else []
+    _check_keys(task_key, capture_task_values)
+    target.depends_on = [jobs.TaskDependency(task_key=key) for key in upstream_task_values] or None
+    stubs = [_stub_task(key, values, helpers) for key, values in upstream_task_values.items()]
+    probes = [_probe_task(task_key, capture_task_values, helpers)] if capture_task_values else []
     settings.tasks = [*stubs, target, *probes]
     if stubs or probes:
         _add_helper_compute(settings, helpers)
