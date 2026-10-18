@@ -105,7 +105,7 @@ pytest --log-cli-level=INFO
 
 The plugin logs at INFO when it deploys, creates a job (with its URL), starts and finishes a run, and deletes the job. On the first run expect a `bundle deploy`, which builds and uploads any wheels, before the test itself starts. Later sessions deploy again, but an unchanged bundle deploys in seconds.
 
-When a test fails, its job is kept so you can open the run in the workspace. The job and run URLs are printed in a `lakeflow` section of the test report and recorded as JUnit XML properties.
+When a test fails, its job is kept so you can open the run in the workspace. The job and run URLs are printed in a `lakeflow` section of the test report and recorded as JUnit XML properties, and a `lakeflow` block at the end of the run lists every kept job with its URL.
 
 Tests that use the fixture get the `lakeflow` marker automatically, so `pytest -m "not lakeflow"` runs only your fast tests. Nothing is deployed in a session that never creates a job.
 

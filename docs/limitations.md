@@ -53,7 +53,7 @@ No. It raises `LakeflowError` outside a pytest session, and outside a test. Jobs
 
 ### How do I see what is happening?
 
-Run with `--log-cli-level=INFO` for the deploy, create, run and delete lines with their URLs. The URLs are also in the `lakeflow` section of each test report and in JUnit XML as the `lakeflow_job_url` and `lakeflow_run_url` properties.
+Run with `--log-cli-level=INFO` for the deploy, create, run and delete lines with their URLs. The URLs are also in the `lakeflow` section of each test report, for setup and teardown errors as well as failures, and in JUnit XML as the `lakeflow_job_url` and `lakeflow_run_url` properties, beside `lakeflow_job_id`, `lakeflow_run_id`, `lakeflow_result_state`, `lakeflow_duration` and, for a failed run, `lakeflow_failing`. At the end of the run, a `lakeflow` block in the terminal summary lists the kept jobs and schemas and the runs cancelled at session end. See [logging and reports](configuration.md#logging-and-reports).
 
 ### Which clouds and runtimes are supported?
 

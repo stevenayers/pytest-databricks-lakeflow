@@ -33,6 +33,10 @@ class FakeJobs:
         self.list_calls = 0
         self._ids = itertools.count(1000)
 
+    def start_ids_at(self, first: int) -> None:
+        """Number the jobs and runs made from now on from `first`."""
+        self._ids = itertools.count(first)
+
     def add(self, settings: jobs.JobSettings) -> int:
         job_id = next(self._ids)
         self.settings[job_id] = settings

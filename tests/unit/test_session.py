@@ -34,6 +34,13 @@ def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
     return cast(WorkspaceClient, ws)
 
 
+def test_session_state_defaults(tmp_path: Path) -> None:
+    state = session.SessionState(rootpath=tmp_path, run_id="r")
+    assert state.kept_jobs == []
+    assert state.kept_schemas == []
+    assert state.cancelled_runs == 0
+
+
 def test_shared_state_without_xdist_produces_directly() -> None:
     assert session.shared_state(None, lambda: {"templates": {}}) == {"templates": {}}
 
