@@ -47,10 +47,10 @@ def test_without_load(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", disable=["load"]) as job:
         run = job.run()
         assert run.succeeded
-        assert run.skipped_tasks["load"].disabled
+        assert "load" in run.disabled_tasks
 ```
 
-A disabled task ends `DISABLED` and lands in `run.skipped_tasks` with `disabled` set, and `run.task("load")` raises a `KeyError` that says it was disabled, in the job or with `disable=`. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
+A disabled task ends `DISABLED` and lands in `run.disabled_tasks`, and `run.task("load")` raises a `KeyError` that says `Disabled in the job: ['load']`. Tasks the bundle already disables land there too. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
 
 ## Run it
 
@@ -83,15 +83,16 @@ The copy allows one run at a time. `job.runs` holds every finished `JobRun`, and
 
 Do not use `run.result_state`, the parent run's state, as the verdict. A job with a probe that runs after a failed task ends `SUCCESS_WITH_FAILURES`.
 
-`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` or disabled with `disable` are in `run.skipped_tasks`, and the plugin's stubs and probes in `run.injected_tasks`.
+`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` are in `run.skipped_tasks`, tasks disabled in the job, in the bundle or with `disable`, are in `run.disabled_tasks`, and the plugin's stubs and probes are in `run.injected_tasks`. All of them end `DISABLED`; the run itself does not say why, so the plugin reads the copy's settings to tell them apart. `run.task(key)` says `Skipped by only: [...]` or `Disabled in the job: [...]` for such a task. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
 
 `run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out.
 
 Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`. `timed_out` is true when the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`.
-- `disabled`, true when the task was disabled, with `disable` or in the bundle. The run itself does not say, so the plugin reads it from the copy's settings. Tasks left out by `only` also end `DISABLED` but are not flagged.
 - `excluded`, true when the task ended `EXCLUDED` because its `run_if` or if/else condition was not met. Excluded tasks stay in `run.tasks` and do not fail the run.
+- `upstream_failed`, `disabled` and `cancelled`, true when the task ended exactly `UPSTREAM_FAILED`, `DISABLED` or `CANCELED`. `UPSTREAM_CANCELED` sets none of them; `ran` is false for all of these states.
+- `condition_outcome`, for an if/else condition task: `True` when the condition held, `False` when it did not, and `None` for any other task. See [Branches](#branches).
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
@@ -134,6 +135,22 @@ def test_failure_detail(lakeflow: Lakeflow) -> None:
             job.run().raise_for_failure()
         assert excinfo.value.run.task("transform").raised(PermissionError)
 ```
+
+### Branches
+
+An if/else condition task records its outcome, and the tasks on the branch that was not taken end `EXCLUDED`. `run.branch_taken(key)` returns the condition task's `condition_outcome` and raises `LakeflowError` when the task is not a condition task or has no outcome, so check its `result_state` then. Excluded tasks do not fail the run:
+
+```python
+def test_empty_extract_skips_the_load(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_branching_job", params={"source": "empty"}) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.branch_taken("has_rows") is False
+        assert run.task("load").excluded
+        assert run.executed_tasks == ["extract", "has_rows", "report_empty"]
+```
+
+The `==` and `!=` operators of a condition task compare their operands as strings, so a task value of `0` and a right operand of `0.0` are not equal. `<`, `>`, `<=` and `>=` compare them as numbers. To test the condition on its own, drive it with stub values in a [task test](task-tests.md#test-an-ifelse-condition).
 
 ### Errors from Spark
 

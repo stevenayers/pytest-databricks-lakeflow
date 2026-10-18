@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.errors import LakeflowRunFailed
+from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -201,12 +201,12 @@ class TaskRun:
             reported no resolved values.
         attempts: One `TaskRun` per attempt, in attempt order, each with empty `attempts`. The last equals this
             task apart from `attempts`.
-        disabled: Whether the task was disabled, with `disable=` on `Lakeflow.job()` or in the bundle, read from the
-            job's settings because the run does not say. Tasks left out by `only` are not flagged.
         timing: The queue, setup, execution and cleanup durations of the task run. Zero where the platform reported
             none.
         effective_performance_target: The serverless performance mode the task ran with, `STANDARD` or
             `PERFORMANCE_OPTIMIZED`, or `None` when the platform did not say.
+        condition_outcome: The outcome of an if/else condition task: `True` when the condition held, `False` when it
+            did not, `None` for any other task or when the platform reported no outcome.
     """
 
     task_key: str
@@ -226,9 +226,9 @@ class TaskRun:
     attempt: int = 0
     parameters: dict[str, str] | list[str] | None = None
     attempts: list[TaskRun] = field(default_factory=list)
-    disabled: bool = False
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
+    condition_outcome: bool | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -249,6 +249,24 @@ class TaskRun:
     def excluded(self) -> bool:
         """Whether the task ended `EXCLUDED` because its `run_if` or if/else condition was not met."""
         return self.result_state == "EXCLUDED"
+
+    @property
+    def upstream_failed(self) -> bool:
+        """Whether the task ended `UPSTREAM_FAILED` because a task it depends on failed."""
+        return self.result_state == "UPSTREAM_FAILED"
+
+    @property
+    def disabled(self) -> bool:
+        """Whether the task ended `DISABLED`, disabled in the job or left out by `only`.
+
+        `JobRun.disabled_tasks` and `JobRun.skipped_tasks` tell the two apart.
+        """
+        return self.result_state == "DISABLED"
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether the task ended `CANCELED`."""
+        return self.result_state == "CANCELED"
 
     @property
     def output_json(self) -> object:
@@ -308,7 +326,8 @@ class JobRun:
         duration: The time from start to end of the parent run.
         tasks: The user's tasks that were part of the run, by task key.
         injected_tasks: The stub and probe tasks added by the plugin, by task key.
-        skipped_tasks: Tasks left out by `only` or disabled, by task key. A disabled task has `disabled` set.
+        skipped_tasks: Tasks left out by `only`, by task key.
+        disabled_tasks: Tasks disabled in the job, in the bundle or with `disable=`, by task key.
         parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
             Parameters the plugin injects are left out.
         timing: The queue, setup, execution and cleanup durations of the parent run. Zero where the platform
@@ -331,6 +350,7 @@ class JobRun:
     parameters: dict[str, str] = field(default_factory=dict)
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
+    disabled_tasks: dict[str, TaskRun] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
@@ -351,6 +371,11 @@ class JobRun:
         """Whether the parent run ended `TIMEDOUT` or any task in `tasks` timed out."""
         return self.result_state == "TIMEDOUT" or any(t.timed_out for t in self.tasks.values())
 
+    @property
+    def executed_tasks(self) -> list[str]:
+        """The sorted keys of the tasks in `tasks` that ran: not excluded, upstream-failed or cancelled."""
+        return sorted(key for key, t in self.tasks.items() if t.ran)
+
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.
 
@@ -362,17 +387,37 @@ class JobRun:
 
         Raises:
             KeyError: If the task was not part of the run. The message lists the available keys and says whether
-                the task was disabled or skipped by `only`.
+                the task was disabled in the job or skipped by `only`.
         """
         if key not in self.tasks:
-            skipped = ""
-            if key in self.skipped_tasks:
-                if self.skipped_tasks[key].disabled:
-                    skipped = f" Task {key!r} was disabled (in the job or with disable=)."
-                else:
-                    skipped = f" Skipped by only: {sorted(k for k, t in self.skipped_tasks.items() if not t.disabled)}."
-            raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{skipped}")
+            why = ""
+            if key in self.disabled_tasks:
+                why = f" Disabled in the job: {sorted(self.disabled_tasks)}."
+            elif key in self.skipped_tasks:
+                why = f" Skipped by only: {sorted(self.skipped_tasks)}."
+            raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{why}")
         return self.tasks[key]
+
+    def branch_taken(self, key: str) -> bool:
+        """Get the outcome of an if/else condition task.
+
+        Args:
+            key: The condition task's key.
+
+        Returns:
+            The task's `condition_outcome`: `True` when the condition held, `False` when it did not.
+
+        Raises:
+            KeyError: If the task was not part of the run.
+            LakeflowError: If the task is not a condition task, or the platform reported no outcome for it.
+        """
+        outcome = self.task(key).condition_outcome
+        if outcome is None:
+            state = self.tasks[key].result_state
+            raise LakeflowError(
+                f"Task {key!r} is not a condition task or has no outcome; check its result_state ({state})"
+            )
+        return outcome
 
     def raise_for_failure(self) -> JobRun:
         """Raise if the run did not succeed.
@@ -445,10 +490,7 @@ def build_job_run(
     known = dict(outputs or {})
     known.update(fetch_outputs(ws, [task for task in ran if (task.run_id or 0) not in known]))
     attempts = {key: [_task_run(task, known.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()}
-    task_runs = {
-        key: replace(runs[-1], disabled=key in disabled and runs[-1].result_state == "DISABLED")
-        for key, runs in attempts.items()
-    }
+    task_runs = {key: runs[-1] for key, runs in attempts.items()}
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
     for target, keys in (capture_task_values or {}).items():
@@ -468,10 +510,11 @@ def build_job_run(
         duration=duration(run.start_time, run.end_time),
         tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
         injected_tasks=injected,
-        skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
+        skipped_tasks={key: t for key, t in user.items() if t.disabled and key not in disabled},
         parameters=_job_parameters(run.job_parameters),
         timing=Timing.from_run(run),
         effective_performance_target=_enum(run.effective_performance_target),
+        disabled_tasks={key: t for key, t in user.items() if t.disabled and key in disabled},
     )
 
 
@@ -545,7 +588,13 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         parameters=_parameters(task.resolved_values),
         timing=Timing.from_run(task),
         effective_performance_target=_enum(task.effective_performance_target),
+        condition_outcome=_condition_outcome(task.condition_task),
     )
+
+
+def _condition_outcome(condition: jobs.RunConditionTask | None) -> bool | None:
+    outcome = condition.outcome if condition else None
+    return {"true": True, "false": False}.get(outcome or "")
 
 
 def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[str] | None:

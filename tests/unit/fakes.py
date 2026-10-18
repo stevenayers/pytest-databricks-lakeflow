@@ -200,6 +200,7 @@ def make_run(
     result_state: str = "SUCCESS",
     code: str = "SUCCESS",
     attempts: Mapping[str, Sequence[str]] | None = None,
+    condition_outcomes: Mapping[str, str] | None = None,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -208,6 +209,8 @@ def make_run(
 
     `attempts` gives the state of every attempt of the tasks it names, in order, numbered from attempt 0. Task run
     ids are `run_id * 100` plus the position of the attempt among all task runs.
+
+    `condition_outcomes` makes the tasks it names condition tasks, with the given `outcome`, such as `"true"`.
     """
     by_key = {key: [state] for key, state in states.items()} | {key: list(s) for key, s in (attempts or {}).items()}
     numbered = itertools.count()
@@ -221,6 +224,7 @@ def make_run(
             run_page_url=f"{HOST}/jobs/runs/{task_run_id}",
             start_time=1_000,
             end_time=3_000,
+            condition_task=_condition(condition_outcomes, key),
         )
         for key, key_states in by_key.items()
         for attempt, state in enumerate(key_states)
@@ -265,6 +269,10 @@ def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:
         )
     status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
     return jobs.Run(run_id=run_id, status=status, tasks=tasks, run_page_url=f"{HOST}/jobs/runs/{run_id}")
+def _condition(outcomes: Mapping[str, str] | None, key: str) -> jobs.RunConditionTask | None:
+    if outcomes is None or key not in outcomes:
+        return None
+    return jobs.RunConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="", right="", outcome=outcomes[key])
 
 
 def _details(state: str) -> jobs.TerminationDetails:

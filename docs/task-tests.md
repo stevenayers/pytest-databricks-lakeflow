@@ -66,6 +66,20 @@ def test_stage_is_recorded_before_the_failure(lakeflow: Lakeflow) -> None:
         assert run.task("transform").task_values["stage"] == "validation"
 ```
 
+## Test an if/else condition
+
+A condition task that compares an upstream task value can be tested on its own, with the value set by a stub. Only the condition task runs in a task job, so the branches downstream of it are not part of the run; assert on its outcome instead:
+
+```python
+@pytest.mark.parametrize(("rows", "expected"), [(0, False), (5, True)])
+def test_has_rows_condition(lakeflow: Lakeflow, rows: int, expected: bool) -> None:
+    run = lakeflow.task("my_branching_job.has_rows", upstream_task_values={"extract": {"rows": rows}}).run()
+    assert run.task("has_rows").condition_outcome is expected
+    assert run.branch_taken("has_rows") is expected
+```
+
+`branch_taken` raises `LakeflowError` if the task is not a condition task. To check which downstream tasks ran or were `EXCLUDED`, use a [job test](job-tests.md#branches).
+
 ## Helper compute
 
 Stubs and probes are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`, and overwritten on each upload.
