@@ -14,6 +14,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `capture_task_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).
+- `disable` lists task keys to disable in the copy, see [below](#disable-a-task).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
@@ -36,6 +37,20 @@ lakeflow.job("my_example_job", run_as="someone@example.com")  # a user
 ```
 
 A string that contains `@` names a user and any other string names a service principal by its application id, not its display name. For anything else, such as a group, pass a `jobs.JobRunAs`. The Jobs API decides whether you may run as that principal: you need the Service Principal User role on a service principal, and a `PermissionDenied` from `jobs.create` fails the test unchanged. The principal also needs read access to the deployed notebooks and files under the target's `root_path`, or the run fails when its tasks start.
+
+### Disable a task
+
+A task that notifies people or refreshes a downstream system can be switched off in the copy without changing the bundle. `disable` sets `disabled` on those tasks, so every run of the copy skips them:
+
+```python
+def test_without_load(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", disable=["load"]) as job:
+        run = job.run()
+        assert run.succeeded
+        assert run.skipped_tasks["load"].disabled
+```
+
+A disabled task ends `DISABLED` and lands in `run.skipped_tasks` with `disabled` set, and `run.task("load")` raises a `KeyError` that says it was disabled, in the job or with `disable=`. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
 
 ## Run it
 
@@ -68,13 +83,15 @@ The copy allows one run at a time. `job.runs` holds every finished `JobRun`, and
 
 Do not use `run.result_state`, the parent run's state, as the verdict. A job with a probe that runs after a failed task ends `SUCCESS_WITH_FAILURES`.
 
-`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` are in `run.skipped_tasks`, and the plugin's stubs and probes in `run.injected_tasks`.
+`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` or disabled with `disable` are in `run.skipped_tasks`, and the plugin's stubs and probes in `run.injected_tasks`.
 
 `run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out.
 
 Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`. `timed_out` is true when the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`.
+- `disabled`, true when the task was disabled, for example with `disable`. Tasks left out by `only` also end `DISABLED` but are not flagged.
+- `excluded`, true when the task ended `EXCLUDED` because its `run_if` or if/else condition was not met. Excluded tasks stay in `run.tasks` and do not fail the run.
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).

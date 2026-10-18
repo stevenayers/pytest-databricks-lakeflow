@@ -8,7 +8,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from databricks.sdk.service import compute, jobs
 
@@ -34,6 +34,8 @@ TASK_STRIPPED = ("email_notifications", "webhook_notifications", "notification_s
 CREATE_PARAMETERS = frozenset(inspect.signature(jobs.JobsAPI.create).parameters) - {"self"}
 NAME_PREFIX = "[pytest] "
 RunAs = Literal["keep"] | str | jobs.JobRunAs | None
+SideEffects = Literal["neutralise", "keep"]
+SIDE_EFFECTS: tuple[str, ...] = get_args(SideEffects)
 MAX_NAME_BYTES = 4096
 MAX_TAG_BYTES = 256
 MAX_TAGS = 25
@@ -74,12 +76,13 @@ def sanitise(
     run_as: RunAs = None,
     description: str | None = None,
     timeout: timedelta | None = None,
+    side_effects: str = "neutralise",
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
     Removes what would make the copy run on its own, notify people, or count as bundle-managed, and removes
-    `run_as` unless `run_as` says otherwise. Names the job, adds `tags` to the template's tags and allows one run at
-    a time.
+    `run_as` unless `run_as` says otherwise. Pauses dashboard and SQL alert subscriptions unless `side_effects` is
+    `"keep"`. Names the job, adds `tags` to the template's tags and allows one run at a time.
 
     Args:
         settings: A copy of a template. It is changed in place.
@@ -95,6 +98,9 @@ def sanitise(
         timeout: The plugin's timeout for one run. The job's `timeout_seconds` becomes this plus
             `TIMEOUT_GRACE_SECONDS`, so the platform stops a run that the plugin can no longer cancel. A template
             with a smaller positive `timeout_seconds` keeps it.
+        side_effects: `"neutralise"` sets `dashboard_task.subscription.paused` on dashboard tasks with a
+            subscription and `sql_task.alert.pause_subscriptions` on SQL alert tasks. `"keep"` leaves them as the
+            template has them.
 
     Returns:
         `settings`.
@@ -111,6 +117,8 @@ def sanitise(
             setattr(task, attr, None)
         if disable_auto_optimization and _serverless(task):
             task.disable_auto_optimization = True
+        if side_effects == "neutralise":
+            _pause_subscriptions(task)
     if performance_optimized:
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
@@ -139,6 +147,35 @@ def sanitise(
             dropped.append(key)
     if dropped:
         log.debug("Left out the tags %s, because the job already has %d tags", dropped, MAX_TAGS)
+    return settings
+
+
+def _pause_subscriptions(task: jobs.Task) -> None:
+    if task.dashboard_task and task.dashboard_task.subscription:
+        task.dashboard_task.subscription.paused = True
+    if task.sql_task and task.sql_task.alert:
+        task.sql_task.alert.pause_subscriptions = True
+
+
+def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSettings:
+    """Set `disabled` on the named tasks, so the job skips them.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        keys: The task keys to disable.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not a task in the job.
+    """
+    tasks = {t.task_key: t for t in settings.tasks or []}
+    for key in keys:
+        if key not in tasks:
+            raise LakeflowError(f"Unknown task {key!r} in disable. Available: {sorted(tasks)}")
+    for key in keys:
+        tasks[key].disabled = True
     return settings
 
 

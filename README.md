@@ -100,7 +100,7 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 ## How it works
 
 1. The first test that needs a job runs `databricks bundle deploy` for the target once per session and reads each deployed job's settings through the Jobs API.
-2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed, tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`.
+2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed and dashboard and SQL alert subscriptions paused, tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`.
 3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values.
 4. Leaving the `with` block deletes the job unless the test failed. Session end cancels anything still running.
 5. `lakeflow.task()` does the same for one task, with the stub and probe tasks on serverless compute or a job cluster you name.

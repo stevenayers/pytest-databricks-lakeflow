@@ -20,6 +20,7 @@ All arguments are keyword-only.
 | `helpers_environment_version` | `"4"` | The serverless environment version for stub and probe tasks. |
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks so that a failure fails once and fast, instead of being retried by the platform. |
 | `performance_optimized` | `False` | Run every ephemeral job with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. |
+| `side_effects` | `"neutralise"` | `"neutralise"` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral job, so test runs do not email snapshots or notify subscribers. `"keep"` leaves them as the template has them. Any other value raises `ValueError`. |
 | `allow_undeclared_params` | `False` | Allow job parameters that the job does not declare. |
 | `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
 | `keep` | `False` | Keep every ephemeral job and temporary schema. |

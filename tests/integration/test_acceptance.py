@@ -84,6 +84,16 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
         assert sorted(run.skipped_tasks) == ["load", "my_wheel_task"]
 
 
+def test_disabled_task_does_not_run(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", disable=["load"]) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert "load" in run.skipped_tasks
+        assert run.skipped_tasks["load"].disabled
+        with pytest.raises(KeyError, match="disabled"):
+            run.task("load")
+
+
 def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job") as job:
         run = job.run(performance_target="PERFORMANCE_OPTIMIZED")

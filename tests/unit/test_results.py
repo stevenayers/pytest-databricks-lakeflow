@@ -168,6 +168,14 @@ Caused by: org.apache.spark.SparkException: Task failed while writing rows.
 """
 
 
+def test_excluded_property() -> None:
+    excluded = task("branch", "EXCLUDED")
+    assert excluded.excluded
+    assert not excluded.disabled
+    assert not task("other", "DISABLED").excluded
+    assert not task("load").excluded
+
+
 def test_root_cause_is_the_last_caused_by_line() -> None:
     error = TaskError(type="Py4JJavaError", message="An error occurred while calling o123.save.", trace=PY4J_TRACE)
     assert error.root_cause == "java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)"

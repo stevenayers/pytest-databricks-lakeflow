@@ -70,6 +70,7 @@ def test_defaults() -> None:
     assert not lakeflow.performance_optimized
     assert not lakeflow.allow_undeclared_params
     assert lakeflow.sweep_hours == 24
+    assert lakeflow.side_effects == "neutralise"
     assert (lakeflow.keep, lakeflow.keep_failed) == (False, True)
     assert (lakeflow.modify_settings, lakeflow.run_finished) == (None, None)
     assert lakeflow.permissions is None
@@ -93,6 +94,11 @@ def test_permissions_accept_sdk_objects() -> None:
 def test_arguments_are_keyword_only() -> None:
     with pytest.raises(TypeError):
         cast(Any, Lakeflow)("examples/bundle")
+
+
+def test_rejects_an_unknown_side_effects_mode() -> None:
+    with pytest.raises(ValueError, match="side_effects must be one of neutralise, keep, got 'other'"):
+        Lakeflow(side_effects=cast(Any, "other"))
 
 
 def test_rejects_an_unknown_sync_strategy() -> None:
