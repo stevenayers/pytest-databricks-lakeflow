@@ -23,6 +23,8 @@
 
 The deployed job keeps its schedule, notifications, `run_as` and bundle lock, and running it would mix test runs with real ones. Each test instead gets a copy with those removed, named and tagged after the test, so runs are isolated and attributable. Jobs are cheap to create and delete.
 
+The copy runs as you rather than as the deployed job's `run_as`. To exercise the permissions of that principal, opt in with `lakeflow.job(key, run_as="keep")`, see [Run as another identity](job-tests.md#run-as-another-identity).
+
 ### Why is my job parameter rejected?
 
 The Jobs API accepts undeclared parameters silently, so a typo would pass unnoticed. The plugin checks `params` against the job's declared `parameters` and raises `LakeflowError` for anything undeclared. Declare the parameter on the job, or pass `allow_undeclared_params=True`.

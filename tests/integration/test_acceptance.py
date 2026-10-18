@@ -8,9 +8,11 @@ Run them with:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
+from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
 
@@ -129,3 +131,23 @@ def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
         run = task.run()
         assert run.succeeded, run
         assert run.task("transform").task_values["source_path"] == source_path
+
+
+def test_permissions_are_applied(lakeflow: Lakeflow) -> None:
+    # The creator already owns the job, so grant to a group rather than to the current user.
+    shared = dataclasses.replace(lakeflow, permissions=[{"group_name": "users", "permission_level": "CAN_MANAGE_RUN"}])
+    with shared.job("my_example_job") as job:
+        assert job.job_id is not None
+        acl = shared.ws.jobs.get_permissions(str(job.job_id)).access_control_list or []
+        levels = [
+            permission.permission_level
+            for entry in acl
+            if entry.group_name == "users"
+            for permission in entry.all_permissions or []
+        ]
+        assert jobs.JobPermissionLevel.CAN_MANAGE_RUN in levels
+
+
+def test_run_as_keep_runs_the_example_job(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}, run_as="keep") as job:
+        assert job.run().succeeded

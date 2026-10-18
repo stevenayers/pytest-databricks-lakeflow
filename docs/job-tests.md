@@ -13,6 +13,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `params` are job parameters for every run of the copy. The job must declare them, because the Jobs API accepts undeclared parameters silently. Pass `allow_undeclared_params=True` to `Lakeflow` to allow them anyway. Names starting with `__pytest_` are reserved.
 - `capture_task_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
+- `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
@@ -23,6 +24,18 @@ def test_without_with(lakeflow: Lakeflow) -> None:
     run = lakeflow.job("my_example_job").run()
     assert run.succeeded
 ```
+
+### Run as another identity
+
+By default the copy has no `run_as`, so it runs as you, or as whoever runs the tests. That avoids needing rights on another identity, but it also means the permissions of the deployed job's `run_as` principal are never exercised. `run_as` takes three forms:
+
+```python
+lakeflow.job("my_example_job", run_as="keep")  # the template's run_as, as deployed
+lakeflow.job("my_example_job", run_as="0000-app-id")  # a service principal, by application id
+lakeflow.job("my_example_job", run_as="someone@example.com")  # a user
+```
+
+A string that contains `@` names a user and any other string names a service principal by its application id, not its display name. For anything else, such as a group, pass a `jobs.JobRunAs`. The Jobs API decides whether you may run as that principal: you need the Service Principal User role on a service principal, and a `PermissionDenied` from `jobs.create` fails the test unchanged. The principal also needs read access to the deployed notebooks and files under the target's `root_path`, or the run fails when its tasks start.
 
 ## Run it
 
