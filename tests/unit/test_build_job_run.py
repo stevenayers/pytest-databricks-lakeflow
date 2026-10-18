@@ -383,6 +383,17 @@ def test_timing_breakdown_from_a_recorded_run() -> None:
     )
 
 
+def test_timing_on_a_single_task_parent_run() -> None:
+    data = json.loads((DATA / "runs" / "cancelled.json").read_text())["run"]
+    assert data["setup_duration"] and data["execution_duration"]
+    run, _ = build("cancelled")
+    assert run.timing.setup == timedelta(milliseconds=data["setup_duration"])
+    assert run.timing.execution == timedelta(milliseconds=data["execution_duration"])
+    assert run.timing.cleanup == timedelta(milliseconds=data["cleanup_duration"])
+    assert run.timing.total == timedelta(milliseconds=data["setup_duration"] + data["execution_duration"])
+    assert run.effective_performance_target == data["effective_performance_target"]
+
+
 def test_timing_defaults_to_zero_without_fields() -> None:
     run = build_from(FakeWorkspaceClient(), make_run(1, {"t": "SUCCESS"}))
     zero = Timing(timedelta(0), timedelta(0), timedelta(0), timedelta(0))
