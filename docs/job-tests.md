@@ -67,7 +67,7 @@ Each `TaskRun` has:
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
-- `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. Job parameters win over task parameters with the same key, and this shows which value the task ended up with.
+- `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. The platform gives job parameters precedence over task parameters with the same key, so check the value here rather than assume which one the task received.
 - `duration`, `attempt` and `run_url`.
 
 A failure test reads like this:

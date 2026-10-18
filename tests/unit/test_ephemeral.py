@@ -47,7 +47,6 @@ def test_with_block_creates_runs_and_deletes(pytester: pytest.Pytester, fake_ws:
 def test_run_requests_resolved_values(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n').assert_outcomes(passed=1)
     assert fake_ws.jobs.get_run_calls
-    assert fake_ws.jobs.get_run_calls[0]["include_resolved_values"] is True
     assert all(call.get("include_resolved_values") is True for call in fake_ws.jobs.get_run_calls)
 
 
