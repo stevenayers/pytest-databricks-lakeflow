@@ -331,13 +331,13 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     if key.sync == "deploy":
         bundle.deploy(root, key.target, key.profile, variables)
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
-        check_host(key.target, bundle_summary.get("workspace", {}).get("host"), ws.config.host)
+        check_host(key.target, (bundle_summary.get("workspace") or {}).get("host"), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
     else:
         if key.sync == "sync":
             bundle.sync(root, key.target, key.profile, variables)
         config = bundle.validate(root, key.target, key.profile, variables)
-        check_host(key.target, config.get("workspace", {}).get("host"), ws.config.host)
+        check_host(key.target, (config.get("workspace") or {}).get("host"), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
@@ -349,7 +349,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
 def check_host(target: str, bundle_host: str | None, client_host: str | None) -> None:
     """Check that the CLI deploys the bundle target to the workspace that the client is for.
 
-    Hosts are compared without their scheme, path or case. A target without a host is not checked.
+    Hosts are compared without their scheme, path or case. A target or client without a host is not checked.
 
     Args:
         target: The bundle target.
@@ -359,7 +359,7 @@ def check_host(target: str, bundle_host: str | None, client_host: str | None) ->
     Raises:
         LakeflowError: If the hosts differ.
     """
-    if not bundle_host or _netloc(bundle_host) == _netloc(client_host or ""):
+    if not bundle_host or not client_host or _netloc(bundle_host) == _netloc(client_host):
         return
     raise LakeflowError(
         f"Bundle target {target!r} deploys to {bundle_host} but the workspace client is for {client_host}. "

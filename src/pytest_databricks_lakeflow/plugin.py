@@ -157,7 +157,7 @@ def pytest_testnodedown(node: Any, error: object) -> None:
     output = getattr(node, "workeroutput", {})
     state = node.config.stash[STATE]
     for root, target, profile, variables in output.get("lakeflow_deployed", []):
-        state.deployed.append((root, target, profile, tuple((name, value) for name, value in variables)))
+        state.deployed.append((root, target, profile, tuple(map(tuple, variables))))
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)

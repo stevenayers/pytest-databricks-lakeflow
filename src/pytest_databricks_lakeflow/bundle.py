@@ -143,7 +143,7 @@ def templates_from_validate(
     Returns:
         The templates by resource key, and an error for each job that cannot be used.
     """
-    artifact_path = config.get("workspace", {}).get("artifact_path", "")
+    artifact_path = (config.get("workspace") or {}).get("artifact_path", "")
     templates: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     for key, job in config.get("resources", {}).get("jobs", {}).items():

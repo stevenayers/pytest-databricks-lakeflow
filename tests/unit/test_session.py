@@ -289,6 +289,19 @@ def test_check_host_normalises(bundle_host: str | None) -> None:
     session.check_host("test", bundle_host, HOST)
 
 
+def test_check_host_skips_a_client_without_a_host() -> None:
+    session.check_host("test", "https://other.cloud.databricks.com", None)
+
+
+@pytest.mark.parametrize("sync", ["deploy", "none"])
+def test_setup_skips_the_host_check_for_a_null_workspace(
+    fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str
+) -> None:
+    fake_cli.summary = {**fake_cli.summary, "workspace": None}
+    fake_cli.validate = {**fake_cli.validate, "workspace": None}
+    session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
+
+
 def test_check_host_names_both_hosts_and_the_target() -> None:
     with pytest.raises(LakeflowError) as excinfo:
         session.check_host("ci", "https://adb-1.azuredatabricks.net", "https://adb-2.azuredatabricks.net")
