@@ -363,8 +363,10 @@ def build_job_run(
         The run's outcome.
     """
     by_key: dict[str, list[jobs.RunTask]] = {}
-    for task in sorted(run.tasks or [], key=lambda t: t.attempt_number or 0):
+    for task in run.tasks or []:
         by_key.setdefault(task.task_key or "", []).append(task)
+    for tasks in by_key.values():
+        tasks.sort(key=lambda t: t.attempt_number or 0)
     ran = [task for tasks in by_key.values() for task in tasks if _enum(_result_state(task)) != "DISABLED"]
     outputs = _outputs(ws, ran)
     attempts = {

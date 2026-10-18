@@ -328,3 +328,12 @@ def test_a_timed_out_task_times_out_the_run() -> None:
 def test_a_failed_run_did_not_time_out() -> None:
     run, _ = build("probe_failure", capture_task_values=CAPTURE)
     assert not run.timed_out
+
+
+def test_task_keys_keep_the_order_the_run_lists_them() -> None:
+    run = make_run(9, {"a": "SUCCESS"}, attempts={"b": ["FAILED", "SUCCESS"]})
+    a, b0, b1 = run.tasks or []
+    run.tasks = [b1, a, b0]
+    result = build_from(FakeWorkspaceClient(), run)
+    assert list(result.tasks) == ["b", "a"]
+    assert [t.attempt for t in result.task("b").attempts] == [0, 1]

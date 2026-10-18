@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -236,11 +237,18 @@ def test_timeout_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspace
     assert fake_ws.jobs.cancelled == [77]
 
 
-def test_run_timeout_longer_than_the_job_fails_clearly(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-    configure_lakeflow(pytester, "timeout=timedelta(minutes=1)")
+@pytest.mark.parametrize(
+    ("arguments", "job_timeout"),
+    [pytest.param(None, 1860, id="default"), pytest.param("timeout=timedelta(minutes=1)", 120, id="one-minute")],
+)
+def test_run_timeout_longer_than_the_job_fails_clearly(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str | None, job_timeout: int
+) -> None:
+    if arguments is not None:
+        configure_lakeflow(pytester, arguments)
     result = run_tests(
         pytester,
-        """
+        f"""
         from datetime import timedelta
 
         import pytest
@@ -252,12 +260,12 @@ def test_run_timeout_longer_than_the_job_fails_clearly(pytester: pytest.Pytester
                 with pytest.raises(LakeflowError, match=r"Lakeflow\\(timeout") as e:
                     job.run(timeout=timedelta(hours=1))
             assert "1:00:00" in str(e.value)
-            assert "0:02:00" in str(e.value)
+            assert "{timedelta(seconds=job_timeout)}" in str(e.value)
         """,
     )
     result.assert_outcomes(passed=1)
     assert fake_ws.jobs.run_now_calls == []
-    assert fake_ws.jobs.created[0]["timeout_seconds"] == 120
+    assert fake_ws.jobs.created[0]["timeout_seconds"] == job_timeout
 
 
 def test_run_timeout_within_the_job_timeout_runs(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
