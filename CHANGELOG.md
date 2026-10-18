@@ -3,6 +3,13 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.2.1](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.2.0...v0.2.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* release automatically after the release PR merge ([#4](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/4)) ([0d2357f](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/0d2357fafb13ffa48f355d05dff571fcf584c8a4))
+
 ## [0.2.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.1.0...v0.2.0) (2026-10-18)
 
 
