@@ -196,8 +196,7 @@ class Lakeflow:
             run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
                 the template's. A string with `@` names a user, any other string names a service principal by its
                 application id, and a `jobs.JobRunAs` is used as given.
-            disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.skipped_tasks`
-                with `disabled` set.
+            disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
