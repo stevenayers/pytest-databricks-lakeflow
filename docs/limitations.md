@@ -7,7 +7,8 @@
 - **SQL query rows are not fetched.** `TaskRun.sql_output` is what `runs/get-output` returns: the warehouse, the SQL and an `output_link`, but no rows. Query a table the job wrote instead.
 - **Alert tasks succeed whether or not the alert triggered.** Databricks marks an alert task succeeded when the alert was evaluated, so `succeeded` says nothing about the alert. Assert on `TaskRun.alert_state`. `TaskRun.alert_output` needs a databricks-sdk release that knows the alert task; with an older one it is `None` and `alert_state` reads only legacy SQL alert tasks.
 - **Task values need probes.** Task values are not available through the Jobs API, so they are read by probe tasks. Each probe costs 7 to 30 seconds of serverless compute, even when its task did not run.
-- **Job code must read catalog and schema from job parameters.** Bundle variables are fixed at deploy time, and the plugin deploys once per session.
+- **Job code must read catalog and schema from job parameters.** Bundle variables are fixed at deploy time, and the plugin deploys each target once per session for each set of `variables`.
+- **Different setups of one target can collide under xdist.** `Lakeflow` instances for the same target that differ in `variables`, `sync` or `helpers_path` are set up separately, so two xdist workers can deploy that target at the same time and one of them can fail on the CLI's deployment lock. Give each set of variables its own target.
 - **Single-task jobs keep only the target task.** On a shared job cluster a task can import libraries that other tasks declared, and on its own it loses them. Declare every library on the task that needs it.
 - **Serverless auto-retry is off by default** in ephemeral jobs, for notebook, Python script, Python wheel and JAR tasks, so a test sees one attempt. Pass `disable_auto_optimization=False` to keep the platform's behaviour. When a task is retried, `TaskRun` describes the last attempt and its `attempts` holds every attempt.
 - **The Databricks CLI is required.** Deploying is only possible through the CLI, so the plugin shells out to it. There is no pure-SDK mode.
@@ -43,6 +44,10 @@ Ephemeral jobs are tagged `pytest` and `pytest_run_id`, and, when they can be fo
 ### What does the plugin leave in my workspace?
 
 The deployed test target, the two helper notebooks under `helpers_path`, and any jobs kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
+
+### Why does setup fail with "Bundle target 'test' deploys to ... but the workspace client is for ..."?
+
+The CLI and the SDK resolved different workspaces. The CLI takes the host from the target's `workspace.host` in `databricks.yml`, while the plugin's `WorkspaceClient` takes it from `profile` or the `DATABRICKS_*` variables. Without this check, every `jobs.get` would look in the wrong workspace and the jobs would be reported as stale. Make the two agree: pass `profile=` to `Lakeflow` for a profile whose host is the target's, set `DATABRICKS_HOST` and `DATABRICKS_CONFIG_PROFILE` to match the target, or run pytest through the CLI with `databricks bundle run -t test -- uv run pytest`, which gives it the target's credentials. A target without `workspace.host` is not checked.
 
 ### Why did the CLI fail with `exit status 45` under xdist?
 

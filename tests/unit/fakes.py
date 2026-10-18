@@ -34,6 +34,7 @@ class FakeJobs:
         self.get_run_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.list_calls = 0
+        self.gets: list[int] = []
         self._ids = itertools.count(1000)
 
     def start_ids_at(self, first: int) -> None:
@@ -46,6 +47,7 @@ class FakeJobs:
         return job_id
 
     def get(self, job_id: int) -> jobs.Job:
+        self.gets.append(job_id)
         if job_id not in self.settings:
             raise NotFound(f"Job {job_id} does not exist.")
         return jobs.Job(job_id=job_id, settings=self.settings[job_id])
