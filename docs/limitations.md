@@ -17,7 +17,7 @@
 - **One run at a time per ephemeral job.** Each copy is created with `max_concurrent_runs: 1`. Parallelism comes from separate tests, each with its own job.
 - **`sync` and `none` strategies read `bundle validate` output**, which leaves library paths local and `${resources...}` references unresolved. Jobs affected by that are refused, with an error that says to use `deploy`.
 - **Standard (shared) access mode** classic clusters were not tested. There, task values set from wheel or script tasks may be silently lost.
-- **Run Job tasks run the deployed child job.** The copy keeps `run_job_task.job_id` as deployed, so a test of a parent job starts a real run of the child, with the child's `run_as` and notifications, which is not cancelled or deleted with the ephemeral job. `lakeflow.job()` and `lakeflow.task()` warn about each such task that is not disabled; `children="refuse"` raises `LakeflowError` instead, before anything is created. `TaskRun.child_run_id` gives the id of the child's run. Copying or stubbing the child is not supported yet.
+- **Run Job tasks run the deployed child job.** The copy keeps `run_job_task.job_id` as deployed, so a test of a parent job starts a real run of the child, with the child's `run_as` and notifications, which is not cancelled or deleted with the ephemeral job. `lakeflow.job()` and `lakeflow.task()` warn about each such task that is not disabled and not inside a disabled loop; `children="refuse"` raises `LakeflowError` instead, before anything is created. `TaskRun.child_run_id` gives the id of the child's run. Copying or stubbing the child is not supported yet.
 - **Names starting with `__pytest_`** are reserved for the plugin's tasks, environments, widgets and parameters.
 
 ## FAQ

@@ -1102,6 +1102,18 @@ def test_run_job_task_warns_and_still_creates_the_job(pytester: pytest.Pytester,
     assert len(fake_ws.jobs.created) == 1
 
 
+def test_run_job_task_in_disabled_loop_does_not_warn(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, parent: int
+) -> None:
+    settings = fake_ws.jobs.settings[parent]
+    nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
+    loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1]", task=nested))
+    settings.tasks = [*(settings.tasks or []), loop]
+    call = 'lakeflow.job("parent", disable=["trigger_child", "loop"], children="refuse")'
+    source = f"def test_job(lakeflow):\n    {call}\n"
+    run_tests(pytester, source).assert_outcomes(passed=1)
+
+
 def test_run_job_task_warns_once_per_run_job_task(
     pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, parent: int
 ) -> None:
@@ -1160,7 +1172,7 @@ def test_task_without_run_job_task_does_not_warn(pytester: pytest.Pytester) -> N
 def test_task_of_a_run_job_task_warns(pytester: pytest.Pytester) -> None:
     result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.task("parent.trigger_child")\n')
     result.assert_outcomes(passed=1, warnings=1)
-    result.stdout.fnmatch_lines([CHILD_WARNING])
+    result.stdout.fnmatch_lines([CHILD_WARNING.replace("Lakeflow.job()", "Lakeflow.task()")])
 
 
 def test_job_without_run_job_tasks_does_not_warn(pytester: pytest.Pytester) -> None:

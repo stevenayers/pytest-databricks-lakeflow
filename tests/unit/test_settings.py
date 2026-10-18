@@ -605,6 +605,15 @@ def test_run_job_tasks_includes_tasks_nested_in_for_each() -> None:
     assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
 
 
+def test_run_job_tasks_skips_disabled_tasks_and_tasks_in_disabled_loops() -> None:
+    settings = parent_settings()
+    nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
+    loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1, 2]", task=nested))
+    settings.tasks = [*(settings.tasks or []), loop]
+    assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
+    assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+
+
 def test_sanitise_keeps_run_job_tasks_as_deployed() -> None:
     expected = task(parent_settings(), "trigger_child").run_job_task
     assert task(sanitised(parent_settings()), "trigger_child").run_job_task == expected

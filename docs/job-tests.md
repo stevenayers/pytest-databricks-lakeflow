@@ -315,9 +315,9 @@ Every kept job and schema is listed in a `lakeflow` block at the end of the run,
 
 ## Jobs that run other jobs
 
-The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled, naming the task, the job and the child's job id. The job is still created.
+The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled and not inside a disabled `for_each_task` loop, naming the task, the job and the child's job id. The job is still created.
 
-Pass `children="refuse"` to raise `LakeflowError` instead, before anything is created, or disable the task to leave the child alone:
+Pass `children="refuse"` to raise `LakeflowError` instead, before anything is created, or disable the task (or the loop that holds it) to leave the child alone:
 
 ```python
 import pytest

@@ -231,8 +231,9 @@ class Lakeflow:
                 application id, and a `jobs.JobRunAs` is used as given.
             disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
             children: What to do about Run Job tasks, which the copy keeps as deployed, so they run the deployed
-                child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled.
-                `"refuse"` raises `LakeflowError` instead, before anything is created.
+                child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
+                inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
+                created.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -241,7 +242,7 @@ class Lakeflow:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
                 the job, a parameter name is reserved, or `children` is `"refuse"` and the copy has a Run Job task
-                that is not disabled.
+                that is not disabled nor inside a disabled `for_each_task`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -250,7 +251,7 @@ class Lakeflow:
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as, children)
+        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as, children, "job")
 
     def task(
         self,
@@ -295,7 +296,7 @@ class Lakeflow:
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         capture = {task_key: list(capture_task_values)} if capture_task_values else {}
-        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as, children)
+        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as, children, "task")
 
     @contextmanager
     def schema(self, catalog: str | None = None) -> Generator[str, None, None]:
@@ -370,6 +371,7 @@ class Lakeflow:
         name: str | None,
         run_as: RunAs,
         children: Children,
+        method: str,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -378,12 +380,10 @@ class Lakeflow:
                 stacklevel=3,
             )
         for task in run_job_tasks(settings):
-            if task.disabled:
-                continue
             message = _child_message(key, task)
             if children == "refuse":
                 raise LakeflowError(message)
-            warnings.warn(f'{message} Pass children="refuse" to Lakeflow.job() to fail instead.', stacklevel=3)
+            warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
         attribution = dict(session.current().attribution)
         if "pytest_user" not in attribution and (user := self._state().get("user")):
             attribution["pytest_user"] = user
