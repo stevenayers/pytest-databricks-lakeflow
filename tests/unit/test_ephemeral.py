@@ -158,6 +158,25 @@ def test_plain_call_keeps_failed_test(pytester: pytest.Pytester, fake_ws: FakeWo
     assert fake_ws.jobs.deleted == []
 
 
+def test_disable_marks_tasks_on_the_copy(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    source = 'def test_job(lakeflow):\n    with lakeflow.job("my_job", disable=["load"]):\n        pass\n'
+    run_tests(pytester, source).assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert {t.task_key: t.disabled for t in created["tasks"]} == {
+        "extract": None,
+        "transform": None,
+        "load": True,
+        "classic": None,
+    }
+
+
+def test_disable_rejects_unknown_tasks(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job", disable=["nope"]).run()\n')
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*Unknown task 'nope' in disable. Available: ['classic', 'extract', 'load', *"])
+    assert fake_ws.jobs.created == []
+
+
 def test_unused_job_is_never_created(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job")\n')
     result.assert_outcomes(passed=1)

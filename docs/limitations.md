@@ -22,7 +22,7 @@
 
 ### Why do my tests never run the deployed job?
 
-The deployed job keeps its schedule, notifications, `run_as` and bundle lock, and running it would mix test runs with real ones. Each test instead gets a copy with those removed, named and tagged after the test, so runs are isolated and attributable. Jobs are cheap to create and delete.
+The deployed job keeps its schedule, notifications, `run_as` and bundle lock, and running it would mix test runs with real ones. Each test instead gets a copy with those removed and its dashboard and SQL alert subscriptions paused, named and tagged after the test, so runs are isolated and attributable and do not email subscribers. Jobs are cheap to create and delete.
 
 The copy runs as you rather than as the deployed job's `run_as`. To exercise the permissions of that principal, opt in with `lakeflow.job(key, run_as="keep")`, see [Run as another identity](job-tests.md#run-as-another-identity).
 
