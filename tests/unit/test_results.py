@@ -261,6 +261,18 @@ def test_root_cause_of_an_implicit_chain() -> None:
     assert error.root_cause == "KeyError: 'k'"
 
 
+def test_root_cause_of_a_chain_with_crlf_line_endings() -> None:
+    trace = IMPLICIT_CHAIN_TRACE.replace("\n", "\r\n")
+    error = TaskError(type="ValueError", message="outer", trace=trace)
+    assert error.root_cause == "KeyError: 'k'"
+
+
+def test_root_cause_of_an_innermost_exception_with_an_empty_message() -> None:
+    trace = IMPLICIT_CHAIN_TRACE.replace("KeyError: 'k'", "KeyError: ")
+    error = TaskError(type="ValueError", message="outer", trace=trace)
+    assert error.root_cause == "KeyError"
+
+
 def test_root_cause_prefers_caused_by_inside_the_innermost_segment() -> None:
     trace = (
         f"{PY4J_TRACE}\nThe above exception was the direct cause of the following exception:\n\n"

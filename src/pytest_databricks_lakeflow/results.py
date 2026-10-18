@@ -31,7 +31,7 @@ JAVA_FRAME = re.compile(r"^\s+at \S")
 CAUSED_BY = re.compile(r"^\s*Caused by:\s?(?P<cause>.*)$")
 CHAIN_MARKERS = re.compile(
     r"^(?:The above exception was the direct cause of the following exception:"
-    r"|During handling of the above exception, another exception occurred:)[ \t]*$",
+    r"|During handling of the above exception, another exception occurred:)[ \t\r]*$",
     re.MULTILINE,
 )
 ERROR_CLASS = re.compile(r"^\[([A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*)\]")
@@ -110,7 +110,8 @@ class TaskError:
             for line in reversed(lines):
                 match = EXC_LINE.match(line)
                 if match and match["msg"] is not None:
-                    return f"{match['name']}: {match['msg'].strip()}"
+                    msg = match["msg"].strip()
+                    return f"{match['name']}: {msg}" if msg else match["name"]
         return None
 
     @property
