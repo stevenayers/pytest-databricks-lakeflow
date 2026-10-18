@@ -10,7 +10,7 @@ from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
 from .conftest import GITHUB, FakeCli, configure_lakeflow, make_repository, set_ci
-from .fakes import HOST, FakeWorkspaceClient, make_run
+from .fakes import HOST, FakeWorkspaceClient, make_run, running_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -864,3 +864,130 @@ def drop_environment(settings, item):
     result.assert_outcomes(failed=1)
     result.stdout.fnmatch_lines(["*LakeflowError*['load']*environment_key*"])
     assert fake_ws.jobs.created == []
+
+
+def queue_transform_failure(ws: FakeWorkspaceClient) -> None:
+    """Queue a run whose extract goes PENDING then SUCCESS and whose transform goes PENDING, RUNNING, then FAILED."""
+    final = make_run(
+        77,
+        {"extract": "SUCCESS", "transform": "FAILED", "__pytest_probe__transform": "SUCCESS"},
+        "FAILED",
+        "RUN_EXECUTION_ERROR",
+    )
+    polls = [
+        running_run(77, {"extract": "PENDING", "transform": "PENDING"}),
+        running_run(77, {"extract": "SUCCESS", "transform": "RUNNING"}),
+        final,
+    ]
+    ws.jobs.queue_polls(polls, {7701: jobs.RunOutput(error="ValueError: no rows\nmore detail")})
+
+
+PROGRESS_LINES = [
+    "extract: PENDING",
+    "transform: PENDING",
+    "extract: PENDING -> SUCCESS in 0:00:02",
+    "transform: PENDING -> RUNNING",
+    "transform: RUNNING -> FAILED in 0:00:02 ValueError: no rows",
+    "__pytest_probe__transform: SUCCESS in 0:00:02",
+]
+
+
+def test_progress_is_logged_per_task_transition(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    queue_transform_failure(fake_ws)
+    source = 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n'
+    result = run_tests(pytester, source, "--log-cli-level=INFO")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines([f"*INFO*pytest_databricks_lakeflow*{line}" for line in PROGRESS_LINES])
+    for line in PROGRESS_LINES:
+        assert sum(out.endswith(f" {line}") for out in result.stdout.lines) == 1, line
+    assert sorted(fake_ws.jobs.output_calls) == [7700, 7701, 7702]
+
+
+def test_task_terminated_at_the_first_poll_logs_one_line(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
+    fake_ws.jobs.queue_polls([make_run(77, {"extract": "SUCCESS"})])
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n', "--log-cli-level=INFO")
+    result.assert_outcomes(passed=1)
+    progress = [line for line in result.stdout.lines if " extract: " in line]
+    assert len(progress) == 1
+    assert progress[0].endswith(" extract: SUCCESS in 0:00:02")
+    assert fake_ws.jobs.output_calls == [7700]
+
+
+def test_progress_lines_in_report_section(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    queue_transform_failure(fake_ws)
+    source = 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n    assert False\n'
+    result = run_tests(pytester, source)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*- lakeflow -*",
+            f"lakeflow_job_url: {HOST}/jobs/1001",
+            f"lakeflow_run_url: {HOST}/jobs/runs/77",
+            "lakeflow_failing: transform: ValueError: no rows",
+            *PROGRESS_LINES,
+        ]
+    )
+
+
+def test_timeout_keeps_progress_in_the_report(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue_polls(
+        [running_run(77, {"extract": "SUCCESS", "transform": "RUNNING"}), make_run(77, {"extract": "SUCCESS"})]
+    )
+    source = """
+        from datetime import timedelta
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run(timeout=timedelta(0))
+    """
+    result = run_tests(pytester, source)
+    result.assert_outcomes(failed=1)
+    assert fake_ws.jobs.cancelled == [77]
+    result.stdout.fnmatch_lines(
+        [
+            "*LakeflowTimeout: Run 77 of 'my_job' did not finish within 0:00:00*",
+            "*- lakeflow -*",
+            f"lakeflow_run_url: {HOST}/jobs/runs/77",
+            "extract: SUCCESS in 0:00:02",
+            "transform: RUNNING",
+        ]
+    )
+    assert fake_ws.jobs.output_calls == [7700]
+
+
+def test_progress_falls_back_to_the_legacy_state(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    legacy = jobs.RunState(life_cycle_state=jobs.RunLifeCycleState.RUNNING)
+    tasks = [jobs.RunTask(task_key="extract", run_id=7700, state=legacy), jobs.RunTask(task_key="bare")]
+    running = jobs.Run(run_id=77, state=jobs.RunState(life_cycle_state=jobs.RunLifeCycleState.RUNNING), tasks=tasks)
+    fake_ws.jobs.queue_polls([running, make_run(77, {"extract": "SUCCESS"})])
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n', "--log-cli-level=INFO")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*INFO* extract: RUNNING", "*INFO* extract: RUNNING -> SUCCESS in 0:00:02"])
+    assert not [line for line in result.stdout.lines if " bare: " in line]
+    assert fake_ws.jobs.output_calls == [7700]
+
+
+def test_progress_lines_shown_for_passing_tests_with_ra(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
+    queue_transform_failure(fake_ws)
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n', "-rA")
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(["*PASSES*", "*- lakeflow -*", f"lakeflow_job_url: {HOST}/jobs/1001", *PROGRESS_LINES])
+
+
+def test_late_result_state_does_not_log_a_second_line(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    details = jobs.TerminationDetails(code=jobs.TerminationCodeCode.RUN_EXECUTION_ERROR)
+    status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.TERMINATED, termination_details=details)
+    task = jobs.RunTask(task_key="transform", run_id=7700, status=status, start_time=1_000, end_time=3_000)
+    running = jobs.Run(run_id=77, status=jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING), tasks=[task])
+    fake_ws.jobs.queue_polls([running, make_run(77, {"transform": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR")])
+    source = 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n'
+    result = run_tests(pytester, source, "--log-cli-level=INFO")
+    result.assert_outcomes(passed=1)
+    progress = [line for line in result.stdout.lines if " transform: " in line and "INFO" in line]
+    assert len(progress) == 1
+    assert progress[0].endswith(" transform: RUN_EXECUTION_ERROR in 0:00:02")
+    assert fake_ws.jobs.output_calls == [7700]

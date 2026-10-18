@@ -68,6 +68,11 @@ class FakeJobs:
         self.queued.append([running] * polls + [run])
         self.outputs.update(outputs or {})
 
+    def queue_polls(self, polls: Sequence[jobs.Run], outputs: Mapping[int, jobs.RunOutput] | None = None) -> None:
+        """Make the next `run_now` report `polls` in order, one per call to `get_run`, then keep reporting the last."""
+        self.queued.append(list(polls))
+        self.outputs.update(outputs or {})
+
     def run_now(
         self,
         job_id: int,
@@ -229,6 +234,37 @@ def make_run(
         start_time=1_000,
         end_time=6_000,
     )
+
+
+def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:
+    """Build a run that has not terminated, with one task run per key of `states`.
+
+    A value that is a V2 lifecycle state, such as `PENDING` or `RUNNING`, gives a task run still in that state. Any
+    other value is a result state, such as `SUCCESS`, of a task run that has terminated. Task run ids are numbered as
+    in `make_run`, so outputs keyed by them also match the terminated run.
+    """
+    lifecycle = {state.value for state in jobs.RunLifecycleStateV2State} - {TERMINATED.value}
+    tasks = []
+    for position, (key, state) in enumerate(states.items()):
+        task_run_id = run_id * 100 + position
+        url = f"{HOST}/jobs/runs/{task_run_id}"
+        if state in lifecycle:
+            status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State(state))
+            tasks.append(jobs.RunTask(task_key=key, run_id=task_run_id, status=status, run_page_url=url))
+            continue
+        tasks.append(
+            jobs.RunTask(
+                task_key=key,
+                run_id=task_run_id,
+                state=jobs.RunState(result_state=jobs.RunResultState(state)),
+                status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
+                run_page_url=url,
+                start_time=1_000,
+                end_time=3_000,
+            )
+        )
+    status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
+    return jobs.Run(run_id=run_id, status=status, tasks=tasks, run_page_url=f"{HOST}/jobs/runs/{run_id}")
 
 
 def _details(state: str) -> jobs.TerminationDetails:

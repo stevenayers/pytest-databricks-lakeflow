@@ -419,3 +419,15 @@ def test_timing_leaves_duration_and_repr_alone() -> None:
     assert "timing" not in repr(run)
     assert "timing" not in repr(run.task("transform"))
     assert "performance" not in repr(run) + repr(run.task("transform"))
+
+
+def test_build_job_run_reuses_given_outputs() -> None:
+    ws = FakeWorkspaceClient()
+    run, outputs = recorded("probe_success")
+    ws.jobs.outputs.update(outputs)
+    extract = next(t for t in run.tasks or [] if t.task_key == "extract")
+    given = jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="fetched while polling"))
+    result = build_from(ws, run, outputs={extract.run_id or 0: given}, capture_task_values=CAPTURE)
+    assert result.task("extract").output == "fetched while polling"
+    assert result.task("transform").task_values == {"stage": "done", "rows_written": 7}
+    assert sorted(ws.jobs.output_calls) == sorted(set(outputs) - {extract.run_id})
