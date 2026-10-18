@@ -71,7 +71,7 @@ def lakeflow() -> Lakeflow:
     return Lakeflow(target="test", catalog="dev_sandbox", timeout=timedelta(minutes=20))
 ```
 
-To skip cluster start-up, pass `existing_cluster_id="<cluster id>"` to `Lakeflow`: tasks that the bundle puts on job clusters then run on that running cluster instead.
+To skip cluster start-up, pass `existing_cluster_id="<cluster id>"` to `Lakeflow`: tasks that the bundle puts on job clusters then run on that running cluster instead. To keep job clusters but run each on one node, pass `single_node=True`; single node compute needs dedicated access mode.
 
 ## Testing one task
 

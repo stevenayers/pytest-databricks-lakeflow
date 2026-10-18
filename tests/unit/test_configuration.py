@@ -68,6 +68,7 @@ def test_defaults() -> None:
     assert (lakeflow.helpers_path, lakeflow.helpers_compute, lakeflow.helpers_environment_version) == (None, None, "4")
     assert lakeflow.disable_auto_optimization
     assert not lakeflow.performance_optimized
+    assert not lakeflow.single_node
     assert (lakeflow.environment_version, lakeflow.budget_policy_id, lakeflow.existing_cluster_id) == (None, None, None)
     assert not lakeflow.allow_undeclared_params
     assert lakeflow.sweep_hours == 24

@@ -886,6 +886,29 @@ def test_compute_knobs_reach_jobs_create(pytester: pytest.Pytester, fake_ws: Fak
     assert tasks["load"].existing_cluster_id is None
 
 
+def test_single_node_reaches_jobs_create(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, "single_node=True")
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    cluster = created["job_clusters"][0].new_cluster
+    assert (cluster.num_workers, cluster.autoscale) == (0, None)
+    assert cluster.spark_conf["spark.databricks.cluster.profile"] == "singleNode"
+    assert cluster.custom_tags == {"ResourceClass": "SingleNode"}
+
+
+def test_single_node_with_existing_cluster_id_reaches_jobs_create(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
+    configure_lakeflow(pytester, 'single_node=True, existing_cluster_id="c-1"')
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert "job_clusters" not in created
+    tasks = {t.task_key: t for t in created["tasks"]}
+    assert (tasks["classic"].existing_cluster_id, tasks["classic"].new_cluster) == ("c-1", None)
+
+
 def test_check_compute_runs_after_modify_settings(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     callback = """
 
