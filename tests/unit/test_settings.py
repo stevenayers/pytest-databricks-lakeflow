@@ -478,6 +478,21 @@ def test_sanitise_leaves_dashboards_without_a_subscription_alone() -> None:
     )
 
 
+@pytest.mark.skipif(
+    "filters" not in jobs.DashboardTask.__dataclass_fields__,
+    reason="this databricks-sdk has no DashboardTask.filters",
+)
+def test_sanitise_keeps_dashboard_filters() -> None:
+    settings = reporting_settings()
+    template = task(settings, "dashboard").dashboard_task
+    assert template is not None
+    template.filters = {"region": "emea"}
+    dashboard = task(sanitised(settings), "dashboard").dashboard_task
+    assert dashboard is not None and dashboard.subscription is not None
+    assert dashboard.subscription.paused is True
+    assert dashboard.filters == {"region": "emea"}
+
+
 def test_disable_tasks() -> None:
     settings = disable_tasks(example_settings(), ["load"])
     assert {t.task_key: t.disabled for t in settings.tasks or []} == {

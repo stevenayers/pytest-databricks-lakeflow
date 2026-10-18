@@ -557,6 +557,8 @@ def test_xdist_workers_share_attribution(
 ) -> None:
     pytest.importorskip("xdist")
     set_ci(monkeypatch, {})
+    # Under an outer `-n`, the in-process controller inherits the outer worker's id and would log its own git calls.
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     sha = make_repository(pytester.path)
     calls = pytester.path / "git.log"
     make_xdist_conftest(pytester, GIT_LOGGING.format(calls=str(calls)))
