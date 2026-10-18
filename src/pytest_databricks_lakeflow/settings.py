@@ -48,6 +48,7 @@ MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
 TIMEOUT_GRACE_SECONDS = 60
+PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,44 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
     for key in keys:
         tasks[key].disabled = True
     return settings
+
+
+def pipeline_params(
+    settings: jobs.JobSettings,
+    *,
+    full_refresh: bool | None,
+    full_refresh_selection: Sequence[str] | None,
+    refresh_selection: Sequence[str] | None,
+) -> jobs.PipelineParams | None:
+    """Build the pipeline refresh options of one run.
+
+    Args:
+        settings: The job's settings.
+        full_refresh: Whether pipeline tasks run a full refresh.
+        full_refresh_selection: The tables that pipeline tasks fully refresh.
+        refresh_selection: The tables that pipeline tasks refresh.
+
+    Returns:
+        The options for `run_now`, or `None` when every argument is `None`.
+
+    Raises:
+        LakeflowError: If an argument is set and no task, nested `for_each_task` tasks included, is a pipeline task,
+            or a selection is set and the installed databricks-sdk cannot send it.
+    """
+    selections = {"full_refresh_selection": full_refresh_selection, "refresh_selection": refresh_selection}
+    if full_refresh is None and all(value is None for value in selections.values()):
+        return None
+    unsupported = sorted(k for k, v in selections.items() if v is not None and k not in PIPELINE_PARAMS_FIELDS)
+    if unsupported:
+        raise LakeflowError(f"{unsupported} need databricks-sdk 0.110.0 or later. Upgrade databricks-sdk to pass them.")
+    if not any(task.pipeline_task for task in _with_nested(settings.tasks)):
+        keys = sorted(task.task_key for task in settings.tasks or [] if task.task_key)
+        raise LakeflowError(
+            f"full_refresh, full_refresh_selection and refresh_selection apply to pipeline tasks, but the job has "
+            f"no pipeline task. Tasks: {keys}"
+        )
+    chosen = {key: list(value) for key, value in selections.items() if value is not None}
+    return jobs.PipelineParams(full_refresh=full_refresh, **chosen)
 
 
 def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:

@@ -23,7 +23,7 @@ from pytest_databricks_lakeflow.results import (
     fetch_outputs,
     has_output,
 )
-from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, select
+from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, pipeline_params, select
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -128,6 +128,9 @@ class EphemeralJob:
         *,
         performance_target: jobs.PerformanceTarget | str | None = None,
         queue: bool | None = None,
+        full_refresh: bool | None = None,
+        full_refresh_selection: Sequence[str] | None = None,
+        refresh_selection: Sequence[str] | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
 
@@ -142,13 +145,20 @@ class EphemeralJob:
             performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
             queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
+            full_refresh: Whether the job's pipeline tasks run a full refresh in this run. Defaults to what each
+                `pipeline_task` sets. The pipeline is the deployed one, not a copy.
+            full_refresh_selection: Tables that the job's pipeline tasks fully refresh in this run. Needs
+                databricks-sdk 0.110.0 or later.
+            refresh_selection: Tables that the job's pipeline tasks refresh in this run. It applies to every
+                pipeline task in the run. Needs databricks-sdk 0.110.0 or later.
 
         Returns:
             The run's outcome.
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, or `timeout` is longer than the job's `timeout_seconds`.
+                task, `timeout` is longer than the job's `timeout_seconds`, a pipeline refresh option is set and
+                the job has no pipeline task, or a selection is set and the installed databricks-sdk cannot send it.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -158,6 +168,12 @@ class EphemeralJob:
         assert self.job_id is not None
         item = session.current_item()
         check_params(self.job_key, self.settings, params or {}, self.lakeflow.allow_undeclared_params)
+        refresh = pipeline_params(
+            self.settings,
+            full_refresh=full_refresh,
+            full_refresh_selection=full_refresh_selection,
+            refresh_selection=refresh_selection,
+        )
         if timeout is not None:
             self._check_timeout(timeout)
         merged = {**self.params, **(params or {})}
@@ -171,6 +187,7 @@ class EphemeralJob:
             only=selected,
             performance_target=target,
             queue=queue_settings,
+            pipeline_params=refresh,
         )
         run_id = cast(jobs.RunNowResponse, waiter.response).run_id
         assert run_id is not None

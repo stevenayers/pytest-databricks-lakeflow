@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 from databricks.sdk.service import compute, jobs
 
+from pytest_databricks_lakeflow import settings as settings_module
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
@@ -13,12 +14,13 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     create_kwargs,
     disable_tasks,
+    pipeline_params,
     sanitise,
     select,
     tag_value,
 )
 
-from .fakes import example_settings, reporting_settings
+from .fakes import example_settings, pipeline_settings, reporting_settings
 
 CLUSTER = "0123-456789-abcdef"
 TAGS = {"pytest": "", "pytest_run_id": "r1", "pytest_nodeid": "tests/test_x.py::test_y"}
@@ -503,3 +505,77 @@ def test_disable_tasks() -> None:
     }
     with pytest.raises(LakeflowError, match=r"Unknown task 'nope' in disable. Available: \['classic', 'extract'"):
         disable_tasks(example_settings(), ["nope"])
+
+
+def refresh(settings: jobs.JobSettings, **kwargs: Any) -> jobs.PipelineParams | None:
+    return pipeline_params(
+        settings,
+        full_refresh=kwargs.get("full_refresh"),
+        full_refresh_selection=kwargs.get("full_refresh_selection"),
+        refresh_selection=kwargs.get("refresh_selection"),
+    )
+
+
+def test_pipeline_params_full_refresh() -> None:
+    assert refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
+
+
+SELECTIONS = pytest.mark.skipif(
+    "refresh_selection" not in jobs.PipelineParams.__dataclass_fields__,
+    reason="this databricks-sdk has no PipelineParams.refresh_selection",
+)
+
+
+@SELECTIONS
+def test_pipeline_params_selections() -> None:
+    assert refresh(pipeline_settings(), refresh_selection=["bronze_orders"]) == jobs.PipelineParams(
+        refresh_selection=["bronze_orders"]
+    )
+    assert refresh(pipeline_settings(), full_refresh_selection=("silver",)) == jobs.PipelineParams(
+        full_refresh_selection=["silver"]
+    )
+
+
+def test_pipeline_params_none_without_arguments() -> None:
+    assert refresh(pipeline_settings()) is None
+    assert refresh(example_settings()) is None
+
+
+def test_pipeline_params_selections_need_a_recent_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings_module, "PIPELINE_PARAMS_FIELDS", frozenset({"full_refresh"}))
+    assert refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
+    with pytest.raises(LakeflowError, match=r"\['refresh_selection'\] need databricks-sdk 0.110.0 or later"):
+        refresh(pipeline_settings(), refresh_selection=["bronze"])
+
+
+def test_pipeline_params_need_a_pipeline_task() -> None:
+    with pytest.raises(LakeflowError, match=r"has no pipeline task.*\['classic', 'extract', 'load', 'transform'\]"):
+        refresh(example_settings(), full_refresh=True)
+
+
+def test_pipeline_params_count_a_for_each_inner_pipeline_task() -> None:
+    settings = jobs.JobSettings.from_dict(
+        {
+            "tasks": [
+                {
+                    "task_key": "each",
+                    "for_each_task": {
+                        "inputs": "[1, 2]",
+                        "task": {"task_key": "each_inner", "pipeline_task": {"pipeline_id": "abc"}},
+                    },
+                }
+            ]
+        }
+    )
+    assert refresh(settings, full_refresh=False) == jobs.PipelineParams(full_refresh=False)
+
+
+def test_sanitise_leaves_pipeline_tasks_alone() -> None:
+    settings = pipeline_settings()
+    deployed = task(settings, "refresh").pipeline_task
+    assert deployed is not None
+    deployed.full_refresh = True
+    expected = deployed.as_dict()
+    copied = task(sanitised(settings), "refresh").pipeline_task
+    assert copied is not None
+    assert copied.as_dict() == expected == {"pipeline_id": "abc", "full_refresh": True}

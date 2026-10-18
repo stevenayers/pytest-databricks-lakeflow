@@ -54,13 +54,14 @@ A disabled task ends `DISABLED` and lands in `run.disabled_tasks`, and `run.task
 
 ## Run it
 
-`job.run(params=None, only=None, timeout=None, performance_target=None, queue=None)` starts a run, waits for it to finish, and returns a `JobRun`.
+`job.run(params=None, only=None, timeout=None, *, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run, waits for it to finish, and returns a `JobRun`.
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
 - `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. A `timeout` longer than that raises `LakeflowError` before the run starts; pass a longer `Lakeflow(timeout=...)` instead.
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
+- `full_refresh`, `full_refresh_selection` and `refresh_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
 
 Each call to `run()` sends a fresh idempotency token with the run request, so a request that the SDK retries cannot start a second run.
 
@@ -204,6 +205,21 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
 ```
 
 Asking for a skipped task raises a `KeyError` that says it was skipped by `only`. When the job has probes or stubs, `only` is extended with the ones the selected tasks need.
+
+## Pipeline tasks
+
+A pipeline task runs the pipeline that the bundle deployed, with the refresh mode its `pipeline_task` sets. To choose the refresh for one run, pass `full_refresh`, `full_refresh_selection` or `refresh_selection`:
+
+```python
+def test_full_refresh(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_pipeline_job") as job:
+        assert job.run(full_refresh=True).succeeded
+        assert job.run(refresh_selection=["bronze_orders"]).succeeded
+```
+
+They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, and need databricks-sdk 0.110.0 or later. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
+
+The pipeline is the deployed one, not a copy: every test that runs it updates the same pipeline and its tables, and the options apply to every pipeline task in the run.
 
 ## Capture task values
 
