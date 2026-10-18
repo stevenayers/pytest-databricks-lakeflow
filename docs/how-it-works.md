@@ -39,7 +39,7 @@ targets:
 
 `~` is the home folder of the identity that deploys, so a developer and a CI service principal never share a deployment. `${var.lakeflow_suffix}` separates branches. `experimental.skip_artifact_cleanup` stops a deploy from deleting the wheels that the previous deploy of the same root uploaded, so a redeploy from the same branch does not break jobs that are still running.
 
-Set the variable in the root `conftest.py`, at import time. The CLI reads `BUNDLE_VAR_<name>` environment variables, and the plugin's CLI calls inherit the environment of the pytest process. Setting it at import time, rather than in the fixture, means the xdist controller sees it too, so `--lakeflow-destroy` destroys the same deployment. Branch names can contain `/`, so replace anything outside letters, digits, `_` and `-`:
+Pass the variable from the `lakeflow` fixture in the root `conftest.py`. `Lakeflow`'s `variables` go to every `bundle` command as `--var name=value`, `bundle destroy` included, and are part of the setup key. Under pytest-xdist each worker hands the root, target, profile and variables it deployed to the controller, so `--lakeflow-destroy` destroys the same deployment. Branch names can contain `/`, so replace anything outside letters, digits, `_` and `-`:
 
 ```python
 import os
@@ -49,13 +49,13 @@ import pytest
 
 from pytest_databricks_lakeflow import Lakeflow
 
-branch = os.environ.get("GITHUB_HEAD_REF") or "local"
-os.environ.setdefault("BUNDLE_VAR_lakeflow_suffix", re.sub(r"[^A-Za-z0-9_-]", "-", branch))
-
 
 @pytest.fixture(scope="session")
 def lakeflow() -> Lakeflow:
-    return Lakeflow(deploy_flags=["--fail-on-active-runs"])
+    return Lakeflow(
+        variables={"lakeflow_suffix": re.sub(r"[^A-Za-z0-9_-]", "-", os.environ.get("GITHUB_HEAD_REF") or "local")},
+        deploy_flags=["--fail-on-active-runs"],
+    )
 ```
 
 Each branch then leaves its own deployment behind, so end the pipeline with `pytest --lakeflow-destroy`, which runs `databricks bundle destroy` for the targets the session deployed.
