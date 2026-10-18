@@ -269,6 +269,8 @@ def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:
         )
     status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
     return jobs.Run(run_id=run_id, status=status, tasks=tasks, run_page_url=f"{HOST}/jobs/runs/{run_id}")
+
+
 def _condition(outcomes: Mapping[str, str] | None, key: str) -> jobs.RunConditionTask | None:
     if outcomes is None or key not in outcomes:
         return None
