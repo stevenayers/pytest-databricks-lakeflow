@@ -29,6 +29,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     disable_tasks,
     inject_probes,
+    run_job_tasks,
     sanitise,
     wrap_task,
 )
@@ -37,6 +38,8 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 
 Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
+Children = Literal["warn", "refuse"]
+CHILDREN: tuple[str, ...] = get_args(Children)
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
@@ -213,6 +216,8 @@ class Lakeflow:
         name: str | None = None,
         run_as: RunAs = None,
         disable: Sequence[str] | None = None,
+        *,
+        children: Children = "warn",
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -225,6 +230,10 @@ class Lakeflow:
                 the template's. A string with `@` names a user, any other string names a service principal by its
                 application id, and a `jobs.JobRunAs` is used as given.
             disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
+            children: What to do about Run Job tasks, which the copy keeps as deployed, so they run the deployed
+                child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
+                inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
+                created.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -232,14 +241,17 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
-                the job, or a parameter name is reserved.
+                the job, a parameter name is reserved, or `children` is `"refuse"` and the copy has a Run Job task
+                that is not disabled nor inside a disabled `for_each_task`.
+            ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
+        _check_children(children)
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as)
+        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as, children, "job")
 
     def task(
         self,
@@ -248,6 +260,8 @@ class Lakeflow:
         upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
         capture_task_values: Sequence[str] | None = None,
         run_as: RunAs = None,
+        *,
+        children: Children = "warn",
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -260,6 +274,7 @@ class Lakeflow:
             upstream_task_values: The task values each stub sets, by upstream task key.
             capture_task_values: The task value keys to capture from the task.
             run_as: Who the job runs as, as for `job()`.
+            children: What to do when the task is a Run Job task, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -267,8 +282,11 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed, or a value is too large or not JSON-serialisable.
+                task that is not stubbed, a value is too large or not JSON-serialisable, or `children` is `"refuse"`
+                and the task is a Run Job task.
+            ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
+        _check_children(children)
         item = session.current_item()
         job_key, _, task_key = ref.partition(".")
         if not job_key or not task_key:
@@ -278,7 +296,7 @@ class Lakeflow:
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         capture = {task_key: list(capture_task_values)} if capture_task_values else {}
-        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as)
+        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as, children, "task")
 
     @contextmanager
     def schema(self, catalog: str | None = None) -> Generator[str, None, None]:
@@ -352,6 +370,8 @@ class Lakeflow:
         stubs: Collection[str],
         name: str | None,
         run_as: RunAs,
+        children: Children,
+        method: str,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -359,6 +379,11 @@ class Lakeflow:
                 "Pass performance_optimized=True to Lakeflow to run tests with PERFORMANCE_OPTIMIZED.",
                 stacklevel=3,
             )
+        for task in run_job_tasks(settings):
+            message = _child_message(key, task)
+            if children == "refuse":
+                raise LakeflowError(message)
+            warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
         attribution = dict(session.current().attribution)
         if "pytest_user" not in attribution and (user := self._state().get("user")):
             attribution["pytest_user"] = user
@@ -379,3 +404,16 @@ class Lakeflow:
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
         return job
+
+
+def _check_children(children: str) -> None:
+    if children not in CHILDREN:
+        raise ValueError(f"children must be one of {', '.join(CHILDREN)}, got {children!r}")
+
+
+def _child_message(job_key: str, task: jobs.Task) -> str:
+    child = task.run_job_task.job_id if task.run_job_task else None
+    return (
+        f"Task {task.task_key!r} of job {job_key!r} runs the deployed job {child}, not a copy. Its run keeps that "
+        "job's run_as and notifications and is not cancelled or deleted with the ephemeral job."
+    )
