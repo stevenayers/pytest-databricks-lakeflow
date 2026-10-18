@@ -72,13 +72,15 @@ Stubs and probes are notebook tasks. The two helper notebooks are uploaded once 
 
 By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its environment version. The default version is `"4"`.
 
+A job holds at most 10 environments. When the template already has 10 and none of them is `__pytest_serverless`, the plugin raises `LakeflowError` before creating the job, listing the template's environment keys: one must go from the bundle job to make room for the helper environment, or pass `helpers_compute` to run the helper tasks on a job cluster.
+
 Without serverless jobs, name a job cluster from the job's `job_clusters`:
 
 ```python
 Lakeflow(helpers_compute="main_cluster")
 ```
 
-The helper tasks then run on that cluster, and the plugin raises `LakeflowError` if the job has no cluster with that key. The task under test keeps its own compute either way.
+The helper tasks then run on that cluster, and the plugin raises `LakeflowError` if the job has no cluster with that key. The task under test keeps its own compute either way. With `existing_cluster_id` as well, the helper tasks move to that running cluster along with every other task that was on a job cluster.
 
 Each helper task costs 7 to 30 seconds of serverless compute, so a task test typically takes a minute end to end.
 

@@ -176,3 +176,19 @@ def test_permissions_are_applied(lakeflow: Lakeflow) -> None:
 def test_run_as_keep_runs_the_example_job(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}, run_as="keep") as job:
         assert job.run().succeeded
+
+
+@pytest.fixture(scope="module")
+def lakeflow_on_version_4(lakeflow: Lakeflow) -> Lakeflow:
+    return dataclasses.replace(lakeflow, environment_version="4")
+
+
+def test_environment_version_override(lakeflow_on_version_4: Lakeflow) -> None:
+    with lakeflow_on_version_4.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
+        assert job.run().succeeded
+        assert job.job_id is not None
+        settings = lakeflow_on_version_4.ws.jobs.get(job.job_id).settings
+        environments = (settings.environments if settings else None) or []
+        spec = environments[0].spec
+        assert spec is not None
+        assert spec.environment_version == "4"

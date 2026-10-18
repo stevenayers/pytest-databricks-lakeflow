@@ -71,6 +71,8 @@ def lakeflow() -> Lakeflow:
     return Lakeflow(target="test", catalog="dev_sandbox", timeout=timedelta(minutes=20))
 ```
 
+To skip cluster start-up, pass `existing_cluster_id="<cluster id>"` to `Lakeflow`: tasks that the bundle puts on job clusters then run on that running cluster instead.
+
 ## Testing one task
 
 `lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_task_values` is replaced by a stub task that sets those task values, and `capture_task_values` adds a probe task that reports the values the task set, even when it failed.

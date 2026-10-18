@@ -73,6 +73,13 @@ class Lakeflow:
         performance_optimized: Run every ephemeral job as `PERFORMANCE_OPTIMIZED`, whatever the template says.
         side_effects: `neutralise` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral
             job, so runs do not email snapshots or notify subscribers. `keep` leaves them as the template has them.
+        environment_version: The serverless environment version of every environment copied from the template,
+            except those whose spec sets `base_environment`. The helper environment keeps
+            `helpers_environment_version`.
+        budget_policy_id: The budget policy of every ephemeral job.
+        existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
+            cluster, stub and probe tasks and tasks nested in a `for_each_task` included, so that tests skip
+            cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their compute.
         allow_undeclared_params: Allow parameters that the job does not declare.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
@@ -100,6 +107,9 @@ class Lakeflow:
     disable_auto_optimization: bool = True
     performance_optimized: bool = False
     side_effects: SideEffects = "neutralise"
+    environment_version: str | None = None
+    budget_policy_id: str | None = None
+    existing_cluster_id: str | None = None
     allow_undeclared_params: bool = False
     sweep_hours: float = 24
     keep: bool = False
@@ -333,6 +343,9 @@ class Lakeflow:
             run_as=run_as,
             timeout=self.timeout,
             side_effects=self.side_effects,
+            environment_version=self.environment_version,
+            budget_policy_id=self.budget_policy_id,
+            existing_cluster_id=self.existing_cluster_id,
         )
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
