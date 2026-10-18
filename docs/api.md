@@ -49,3 +49,5 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 ::: pytest_databricks_lakeflow.LakeflowBundleError
 
 ::: pytest_databricks_lakeflow.LakeflowTimeout
+
+::: pytest_databricks_lakeflow.LakeflowRunFailed

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
 from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues
 
 from .fakes import DATA
@@ -128,3 +129,103 @@ def test_did_not_run_states() -> None:
     assert task("a", "FAILED").ran
     assert not task("a", "UPSTREAM_FAILED").ran
     assert not task("a", "DISABLED").ran
+
+
+PY4J_TRACE = """Py4JJavaError: An error occurred while calling o123.save.
+: org.apache.spark.SparkException: Job aborted.
+\tat org.apache.spark.sql.execution.datasources.FileFormatWriter$.write(FileFormatWriter.scala:251)
+Caused by: org.apache.spark.SparkException: Task failed while writing rows.
+\tat org.apache.spark.sql.execution.datasources.FileFormatWriter$.executeTask(FileFormatWriter.scala:310)
+\t... 12 more
+  Caused by: java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)
+\tat java.io.FileInputStream.open0(Native Method)
+"""
+
+
+def test_root_cause_is_the_last_caused_by_line() -> None:
+    error = TaskError(type="Py4JJavaError", message="An error occurred while calling o123.save.", trace=PY4J_TRACE)
+    assert error.root_cause == "java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)"
+
+
+@pytest.mark.parametrize("sample", SAMPLES, ids=[s["name"] for s in SAMPLES])
+def test_root_cause_is_none_without_caused_by(sample: dict[str, Any]) -> None:
+    error = TaskError.from_output(sample["error"], sample["error_trace"])
+    assert error is not None
+    assert error.root_cause is None
+
+
+@pytest.mark.parametrize(
+    ("message", "trace", "code"),
+    [
+        ("[TABLE_OR_VIEW_NOT_FOUND] The table x cannot be found. SQLSTATE: 42P01", "", "TABLE_OR_VIEW_NOT_FOUND"),
+        ("[DELTA_INVALID_FORMAT.X] Incompatible format detected.", "", "DELTA_INVALID_FORMAT.X"),
+        (
+            "An error occurred while calling o1.sql.",
+            "Caused by: [UNRESOLVED_COLUMN.WITH_SUGGESTION] A column cannot be resolved.",
+            "UNRESOLVED_COLUMN.WITH_SUGGESTION",
+        ),
+        ("The table x cannot be found.", "", None),
+    ],
+    ids=["message", "sub_class", "root_cause", "none"],
+)
+def test_code_reads_the_spark_error_class(message: str, trace: str, code: str | None) -> None:
+    assert TaskError(type="AnalysisException", message=message, trace=trace).code == code
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [s for s in SAMPLES if s["name"].split(".")[0] in {"script_permission", "whl_custom", "whl_permission"}],
+    ids=lambda s: s["name"],
+)
+def test_code_ignores_lowercase_tags(sample: dict[str, Any]) -> None:
+    error = TaskError.from_output(sample["error"], sample["error_trace"])
+    assert error is not None
+    assert error.message.startswith("[")
+    assert error.code is None
+
+
+def test_raise_for_failure_returns_the_run_when_it_succeeded() -> None:
+    run = job_run([task("a"), task("b")])
+    assert run.raise_for_failure() is run
+
+
+def test_raise_for_failure_raises_with_every_failing_task() -> None:
+    error = TaskError(type="Py4JJavaError", message="An error occurred while calling o123.save.", trace=PY4J_TRACE)
+    run = job_run([task("a"), task("b", "FAILED", error=error), task("c", "UPSTREAM_FAILED")])
+    with pytest.raises(LakeflowRunFailed) as excinfo:
+        run.raise_for_failure()
+    assert isinstance(excinfo.value, LakeflowError)
+    assert excinfo.value.run is run
+    message = str(excinfo.value)
+    assert message.startswith(repr(run))
+    detail = message.removeprefix(repr(run))
+    assert detail.count("\nb: ") == 1
+    assert detail.count("\nc: ") == 1
+    assert "\na: " not in detail
+    assert f"b: {error}" in detail
+    assert "root cause: java.io.FileNotFoundException: /mnt/data/part-0001" in detail
+    assert "https://example.com/b" in detail
+    assert "c: UPSTREAM_FAILED" in detail
+    assert "https://example.com/c" in detail
+
+
+def test_output_json_parses_exit_value() -> None:
+    assert task("t", output='{"rows": 7, "ok": true}').output_json == {"rows": 7, "ok": True}
+
+
+def test_output_json_without_exit_call() -> None:
+    with pytest.raises(ValueError, match=r"Task 't' has no output: dbutils\.notebook\.exit\(\) was not called"):
+        _ = task("t").output_json
+
+
+def test_output_json_when_not_json() -> None:
+    with pytest.raises(ValueError, match="Output of task 't' is not JSON: 'not json'"):
+        _ = task("t", output="not json").output_json
+    with pytest.raises(ValueError, match="Output of task 't' is not JSON") as excinfo:
+        _ = task("t", output="x" * 1000).output_json
+    assert "x" * 201 not in str(excinfo.value)
+
+
+def test_output_json_when_truncated() -> None:
+    with pytest.raises(ValueError, match="Output of task 't' was cut at 5 MB"):
+        _ = task("t", output='{"a": 1}', output_truncated=True).output_json

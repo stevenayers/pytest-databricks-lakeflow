@@ -352,8 +352,26 @@ def test_package_exports() -> None:
     import pytest_databricks_lakeflow
 
     assert Path(pytest_databricks_lakeflow.__file__).name == "__init__.py"
-    for name in ("Lakeflow", "EphemeralJob", "JobRun", "TaskRun", "TaskError", "LakeflowTimeout"):
+    for name in ("Lakeflow", "EphemeralJob", "JobRun", "TaskRun", "TaskError", "LakeflowTimeout", "LakeflowRunFailed"):
         assert hasattr(pytest_databricks_lakeflow, name)
+        assert name in pytest_databricks_lakeflow.__all__
+    assert issubclass(pytest_databricks_lakeflow.LakeflowRunFailed, pytest_databricks_lakeflow.LakeflowError)
+
+
+def test_raise_for_failure_fails_the_test_with_the_run_detail(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
+    fake_ws.jobs.queue(make_run(77, {"extract": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR"))
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run().raise_for_failure()
+        """,
+    )
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*LakeflowRunFailed: JobRun('my_job', FAILED*", "*extract: FAILED*/jobs/runs/7700*"])
 
 
 def test_skip_or_xfail_inside_with_deletes_the_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:

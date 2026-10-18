@@ -95,7 +95,7 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         assert run.task("transform").output == "hello world"
 ```
 
-`"my_example_job"` is the bundle resource key, the same name that `databricks bundle run` takes. `assert run.succeeded, run` puts the `JobRun` repr in the failure message, which names the failing tasks with their errors and links to the run.
+`"my_example_job"` is the bundle resource key, the same name that `databricks bundle run` takes. `assert run.succeeded, run` puts the `JobRun` repr in the failure message, which names the failing tasks with their errors and links to the run. `run.raise_for_failure()` is the alternative: it returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with the same repr plus one line per failing task, so `run = job.run().raise_for_failure()` also works.
 
 ## Run it
 

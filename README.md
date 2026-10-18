@@ -43,7 +43,7 @@ from pytest_databricks_lakeflow import Lakeflow
 def test_job_succeeds(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
         run = job.run()
-        assert run.succeeded
+        run.raise_for_failure()
         assert run.task("transform").output == "hello world"
         assert "Success! hello" in run.task("my_wheel_task").logs
 ```
@@ -53,6 +53,8 @@ Run `pytest`. The first test deploys the bundle's `test` target once, then every
 ```text
 AssertionError: JobRun('my_example_job', FAILED, https://<workspace>/#job/123/run/456, failing=['transform: PermissionError: forbidden may not read /Volumes/example/raw/landing'])
 ```
+
+`run.raise_for_failure()` does the same in one call. It returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with that repr followed by one line per failing task: its full error, the `Caused by:` root cause when the trace has one, and the task's run URL.
 
 To change the target, set a catalog for temporary schemas or lengthen the timeout, override the `lakeflow` fixture in `conftest.py`:
 

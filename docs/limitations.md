@@ -2,7 +2,7 @@
 
 ## Limitations
 
-- **Logs.** `TaskRun.logs` is only filled for Python script, wheel and JAR tasks, and holds only the last 5 MB. Notebook tasks have no logs; use `output` instead. Notebook output keeps only the first 5 MB. Databricks documents that on serverless compute the logs of one task can include output from other tasks in the same run. In our tests each task's logs held only its own output, but this is not guaranteed.
+- **Logs.** `TaskRun.logs` is only filled for Python script, wheel and JAR tasks, and holds only the last 5 MB. Notebook tasks have no logs; use `output` instead. Notebook output keeps only the first 5 MB. A truncated output or log raises a `UserWarning` naming the task, and `output_json` refuses truncated output with a `ValueError`. Databricks documents that on serverless compute the logs of one task can include output from other tasks in the same run. In our tests each task's logs held only its own output, but this is not guaranteed.
 - **Task values need probes.** Task values are not available through the Jobs API, so they are read by probe tasks. Each probe costs 7 to 30 seconds of serverless compute, even when its task did not run.
 - **Job code must read catalog and schema from job parameters.** Bundle variables are fixed at deploy time, and the plugin deploys once per session.
 - **Single-task jobs keep only the target task.** On a shared job cluster a task can import libraries that other tasks declared, and on its own it loses them. Declare every library on the task that needs it.

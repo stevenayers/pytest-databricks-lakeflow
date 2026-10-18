@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -12,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
+
+from pytest_databricks_lakeflow.errors import LakeflowRunFailed
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -25,6 +28,8 @@ NOT_RUN = frozenset({"UPSTREAM_FAILED", "UPSTREAM_CANCELED", "DISABLED", "EXCLUD
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 EXC_LINE = re.compile(r"^(?P<name>[A-Za-z_]\w*(?:\.(?:<locals>|[A-Za-z_]\w*))*)(?:: ?(?P<msg>.*))?$")
 JAVA_FRAME = re.compile(r"^\s+at \S")
+CAUSED_BY = re.compile(r"^\s*Caused by:\s?(?P<cause>.*)$")
+ERROR_CLASS = re.compile(r"^\[([A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*)\]")
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -78,6 +83,27 @@ class TaskError:
             if match and match["msg"] is not None:
                 return cls(type=match["name"], message=match["msg"].strip(), trace=tr)
         return cls(type=None, message=err or tr.strip(), trace=tr)
+
+    @property
+    def root_cause(self) -> str | None:
+        """The text after the last `Caused by:` line of `trace`, or `None` when the trace has no such line."""
+        for line in reversed(self.trace.splitlines()):
+            match = CAUSED_BY.match(line)
+            if match:
+                return match["cause"].strip()
+        return None
+
+    @property
+    def code(self) -> str | None:
+        """The bracketed error class, such as `TABLE_OR_VIEW_NOT_FOUND`, at the start of `message` or `root_cause`.
+
+        `None` when neither starts with one. Lowercase tags such as `[my_tag]` are not error classes.
+        """
+        for text in (self.message, self.root_cause):
+            match = ERROR_CLASS.match(text or "")
+            if match:
+                return match[1]
+        return None
 
     def __str__(self) -> str:
         return f"{self.type}: {self.message}" if self.type else self.message
@@ -152,6 +178,24 @@ class TaskRun:
     def ran(self) -> bool:
         """Whether the task ran. False if it was skipped, excluded, disabled or cancelled."""
         return self.result_state not in NOT_RUN
+
+    @property
+    def output_json(self) -> object:
+        """`output` parsed as JSON.
+
+        Raises:
+            ValueError: If the notebook did not call `dbutils.notebook.exit()`, if `output` was cut at 5 MB, or if
+                `output` is not JSON. The message names the task.
+        """
+        name = self.task_key
+        if self.output is None:
+            raise ValueError(f"Task {name!r} has no output: dbutils.notebook.exit() was not called")
+        if self.output_truncated:
+            raise ValueError(f"Output of task {name!r} was cut at 5 MB, so it cannot be parsed as JSON")
+        try:
+            return json.loads(self.output)
+        except ValueError as e:
+            raise ValueError(f"Output of task {name!r} is not JSON: {self.output[:200]!r}") from e
 
     @property
     def log_lines(self) -> list[str]:
@@ -238,6 +282,24 @@ class JobRun:
             raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{skipped}")
         return self.tasks[key]
 
+    def raise_for_failure(self) -> JobRun:
+        """Raise if the run did not succeed.
+
+        Returns:
+            The run itself, so `run = job.run().raise_for_failure()` works.
+
+        Raises:
+            LakeflowRunFailed: If `succeeded` is false. The message is `repr(run)` followed by one line per failing
+                task with its error, the error's root cause when there is one, and the task's run page.
+        """
+        if self.succeeded:
+            return self
+        lines = [repr(self)]
+        for t in self._failing():
+            cause = f" (root cause: {t.error.root_cause})" if t.error and t.error.root_cause else ""
+            lines.append(f"{t.task_key}: {t.error if t.error else t.result_state}{cause} {t.run_url}")
+        raise LakeflowRunFailed("\n".join(lines), self)
+
     def _failing(self) -> list[TaskRun]:
         return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
 
@@ -317,8 +379,15 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
     state = _enum(_result_state(task))
     details = task.status.termination_details if task.status else None
     notebook = out.notebook_output
+    key = task.task_key or ""
+    truncated = [
+        what for what, cut in (("output", notebook and notebook.truncated), ("logs", out.logs_truncated)) if cut
+    ]
+    if truncated:
+        verb = "were" if len(truncated) > 1 else "was"
+        warnings.warn(f"The {' and '.join(truncated)} of task {key!r} {verb} cut at the 5 MB limit", stacklevel=2)
     return TaskRun(
-        task_key=task.task_key or "",
+        task_key=key,
         run_id=task.run_id or 0,
         result_state=state,
         termination_code=_enum(details.code if details else None),

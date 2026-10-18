@@ -16,7 +16,7 @@ The plugin deploys a bundle target once per session, then gives each test a thro
 
 ## The API, and nothing else
 
-Import from `pytest_databricks_lakeflow`: `Lakeflow`, `EphemeralJob`, `JobRun`, `TaskRun`, `TaskValues`, `TaskError`, `LakeflowError`, `LakeflowBundleError`, `LakeflowTimeout`.
+Import from `pytest_databricks_lakeflow`: `Lakeflow`, `EphemeralJob`, `JobRun`, `TaskRun`, `TaskValues`, `TaskError`, `LakeflowError`, `LakeflowBundleError`, `LakeflowTimeout`, `LakeflowRunFailed`.
 
 - `lakeflow` fixture (session scope) returns a `Lakeflow`. Override it to configure; all `Lakeflow` arguments are keyword-only: `bundle_root`, `target`, `profile`, `workspace_client`, `sync`, `timeout`, `catalog`, `helpers_path`, `helpers_compute`, `helpers_environment_version`, `disable_auto_optimization`, `performance_optimized`, `allow_undeclared_params`, `sweep_hours`, `keep`, `keep_failed`, `modify_settings`, `run_finished`.
 - `lakeflow.job(key, params=None, capture_task_values=None, name=None) -> EphemeralJob`. `capture_task_values` is `{task_key: [value_key, ...]}`.
@@ -24,8 +24,8 @@ Import from `pytest_databricks_lakeflow`: `Lakeflow`, `EphemeralJob`, `JobRun`, 
 - `lakeflow.schema(catalog=None)`: context manager yielding a temporary `catalog.schema` name. Needs `catalog`.
 - `lakeflow.ws`: the `WorkspaceClient`. `lakeflow.template(key)`: a fresh `JobSettings` copy.
 - `EphemeralJob.run(params=None, only=None, timeout=None) -> JobRun`. `only` takes task keys with `+key`, `key+`, `+key+`. Also `job_id`, `url`, `runs`.
-- `JobRun`: `succeeded`, `failed`, `tasks`, `task(key)`, `skipped_tasks`, `injected_tasks`, `result_state`, `termination_code`, `termination_message`, `duration`, `run_id`, `run_url`.
-- `TaskRun`: `succeeded`, `ran`, `result_state`, `termination_code`, `termination_message`, `output`, `output_truncated`, `logs`, `log_lines`, `logs_truncated`, `error` (`type`, `message`, `trace`), `raised(ExcType)`, `task_values`, `missing_task_values`, `duration`, `attempt`, `run_url`.
+- `JobRun`: `succeeded`, `failed`, `raise_for_failure()` (returns the run, or raises `LakeflowRunFailed` whose `run` is the run), `tasks`, `task(key)`, `skipped_tasks`, `injected_tasks`, `result_state`, `termination_code`, `termination_message`, `duration`, `run_id`, `run_url`.
+- `TaskRun`: `succeeded`, `ran`, `result_state`, `termination_code`, `termination_message`, `output`, `output_json`, `output_truncated`, `logs`, `log_lines`, `logs_truncated`, `error` (`type`, `message`, `trace`, `root_cause`, `code`), `raised(ExcType)`, `task_values`, `missing_task_values`, `duration`, `attempt`, `run_url`.
 - Flags: `--lakeflow-keep`, `--lakeflow-keep-failed`, `--no-lakeflow-keep-failed`, `--lakeflow-sweep`, `--lakeflow-destroy`. There are no ini options and no other fixtures.
 
 Do not invent arguments, fixtures, markers or flags beyond these. Check the signature in the API reference when unsure.
@@ -41,7 +41,7 @@ from pytest_databricks_lakeflow import Lakeflow
 def test_job_succeeds(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
         run = job.run()
-        assert run.succeeded, run
+        assert run.succeeded, run  # or: run.raise_for_failure()
         assert run.task("transform").output == "hello world"
 ```
 
@@ -84,7 +84,7 @@ Use `@pytest.mark.parametrize` for input variations and `job.run(only=["+task"])
 
 ## Rules
 
-- Assert with plain `assert`. Put the run in the message: `assert run.succeeded, run`.
+- Assert with plain `assert`. Put the run in the message: `assert run.succeeded, run`, or call `run.raise_for_failure()`.
 - Use `run.succeeded`, never `run.result_state`, as the verdict.
 - Pass only parameters the job declares, or the plugin raises `LakeflowError`. Names starting with `__pytest_` are reserved.
 - `logs` exist only for Python script, wheel and JAR tasks. Notebook tasks have `output` instead.
