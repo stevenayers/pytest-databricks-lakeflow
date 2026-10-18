@@ -6,9 +6,10 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
+from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
-from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues
+from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues, Timing
 
 from .fakes import DATA
 
@@ -281,3 +282,17 @@ def test_timed_out_task() -> None:
 
 def test_attempts_default_to_empty() -> None:
     assert task("a").attempts == []
+
+
+def test_timing_total() -> None:
+    timing = Timing(timedelta(seconds=1), timedelta(seconds=2), timedelta(seconds=3), timedelta(seconds=4))
+    assert timing.total == timedelta(seconds=10)
+
+
+def test_timing_from_a_task_converts_milliseconds() -> None:
+    task = jobs.RunTask(
+        task_key="t", queue_duration=500, setup_duration=1_000, execution_duration=2_500, cleanup_duration=None
+    )
+    timing = Timing.from_run(task)
+    assert timing == Timing(timedelta(milliseconds=500), timedelta(seconds=1), timedelta(seconds=2.5), timedelta(0))
+    assert timing.total == timedelta(seconds=4)
