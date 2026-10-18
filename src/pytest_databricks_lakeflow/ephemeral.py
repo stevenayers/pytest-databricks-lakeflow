@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -20,7 +21,9 @@ from pytest_databricks_lakeflow.results import (
     describe_failing,
     duration,
     error_line,
+    failing_parameters,
     fetch_outputs,
+    format_parameters,
     has_output,
 )
 from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, pipeline_params, select
@@ -217,6 +220,11 @@ class EphemeralJob:
         )
         if result.failed:
             item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
+            if run_params := format_parameters(result.parameters):
+                item.user_properties.append(("lakeflow_params", run_params))
+            if task_params := failing_parameters(result):
+                shown = {key: json.loads(text) for key, text in task_params.items()}
+                item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)

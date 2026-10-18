@@ -43,6 +43,20 @@ def _first_line(text: str, limit: int = 200) -> str:
     return line if len(line) <= limit else f"{line[: limit - 3]}..."
 
 
+def format_parameters(parameters: Mapping[str, str] | Sequence[str] | None) -> str:
+    """Format resolved parameters as one line of JSON with sorted keys, or `""` when there are none.
+
+    Each value is cut to its first line of at most 200 characters. Keys the plugin injects are left out.
+    """
+    if isinstance(parameters, Mapping):
+        shown: dict[str, str] | list[str] = {
+            key: _first_line(str(value)) for key, value in parameters.items() if not key.startswith(PREFIX)
+        }
+    else:
+        shown = [_first_line(str(value)) for value in parameters or []]
+    return json.dumps(shown, sort_keys=True) if shown else ""
+
+
 @dataclass(frozen=True)
 class TaskError:
     """An error reported by a task run.
@@ -482,29 +496,44 @@ class JobRun:
             The run itself, so `run = job.run().raise_for_failure()` works.
 
         Raises:
-            LakeflowRunFailed: If `succeeded` is false. The message is `repr(run)` followed by one line per failing
-                task with its error, the error's root cause when there is one, and the task's run page.
+            LakeflowRunFailed: If `succeeded` is false. The message is `repr(run)`, with the run's job parameters
+                on a `params:` line of their own when it has any, followed by one line per failing task with its
+                error, the error's root cause when there is one, and the task's run page. A failing task whose
+                resolved parameters are known gets an indented `params:` line after its own.
         """
         if self.succeeded:
             return self
-        lines = [repr(self)]
+        params = format_parameters(self.parameters)
+        lines = [self._repr(params=False), f"params: {params}"] if params else [repr(self)]
+        task_params = failing_parameters(self)
         for t in self._failing():
             cause = f" (root cause: {t.error.root_cause})" if t.error and t.error.root_cause else ""
             lines.append(f"{t.task_key}: {t.error if t.error else t.result_state}{cause} {t.run_url}")
+            if t.task_key in task_params:
+                lines.append(f"  params: {task_params[t.task_key]}")
         raise LakeflowRunFailed("\n".join(lines), self)
 
     def _failing(self) -> list[TaskRun]:
         return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
 
     def __repr__(self) -> str:
+        return self._repr(params=True)
+
+    def _repr(self, *, params: bool) -> str:
         failing = describe_failing(self)
-        params = f"params={self.parameters!r}, " if failing and self.parameters else ""
-        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, {params}failing={failing})"
+        shown = f"params={self.parameters!r}, " if params and failing and self.parameters else ""
+        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, {shown}failing={failing})"
 
 
 def describe_failing(run: JobRun) -> list[str]:
     """Describe each failing task of `run` as `key: error`, with the error's first line or the result state."""
     return [f"{t.task_key}: {_first_line(str(t.error)) if t.error else t.result_state}" for t in run._failing()]
+
+
+def failing_parameters(run: JobRun) -> dict[str, str]:
+    """Format the resolved parameters of each failing task of `run` that has any, by task key."""
+    formatted = {t.task_key: format_parameters(t.parameters) for t in run._failing()}
+    return {key: text for key, text in formatted.items() if text}
 
 
 def build_job_run(
