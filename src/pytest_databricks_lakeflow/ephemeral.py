@@ -223,8 +223,8 @@ class EphemeralJob:
             if run_params := format_parameters(result.parameters):
                 item.user_properties.append(("lakeflow_params", run_params))
             if task_params := failing_parameters(result):
-                joined = ", ".join(f"{json.dumps(key)}: {text}" for key, text in sorted(task_params.items()))
-                item.user_properties.append(("lakeflow_task_params", f"{{{joined}}}"))
+                shown = {key: json.loads(text) for key, text in task_params.items()}
+                item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)

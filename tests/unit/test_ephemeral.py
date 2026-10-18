@@ -451,7 +451,8 @@ def test_failed_run_reports_parameters(pytester: pytest.Pytester, fake_ws: FakeW
     )
     xml = (pytester.path / "report.xml").read_text()
     assert '<property name="lakeflow_params" value="{&quot;param1&quot;: &quot;hi&quot;}"' in xml
-    assert '<property name="lakeflow_task_params"' in xml
+    expected = "{&quot;extract&quot;: {&quot;limit&quot;: &quot;10&quot;, &quot;param1&quot;: &quot;hi&quot;}}"
+    assert f'<property name="lakeflow_task_params" value="{expected}"' in xml
 
 
 def test_successful_run_reports_no_parameters(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
