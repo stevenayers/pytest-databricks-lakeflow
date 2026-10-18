@@ -256,6 +256,20 @@ def _with_nested(tasks: Sequence[jobs.Task] | None) -> list[jobs.Task]:
     return [*tasks, *(t.for_each_task.task for t in tasks if t.for_each_task and t.for_each_task.task)]
 
 
+def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
+    """Get the tasks that run another job, tasks nested in a `for_each_task` included.
+
+    `sanitise` keeps their `run_job_task` as deployed, so they trigger the deployed job, not a copy.
+
+    Args:
+        settings: The job's settings.
+
+    Returns:
+        Every task with a `run_job_task`, in the order of `settings.tasks`, nested tasks last.
+    """
+    return [task for task in _with_nested(settings.tasks) if task.run_job_task]
+
+
 def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
     for task in _with_nested(settings.tasks):
         if task.job_cluster_key or task.new_cluster:

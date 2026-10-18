@@ -13,7 +13,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
-from .fakes import HOST, FakeWorkspaceClient, make_run, pipeline_settings, running_run
+from .fakes import HOST, FakeWorkspaceClient, make_run, parent_settings, pipeline_settings, running_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -1078,3 +1078,105 @@ def test_pipeline_refresh_options_need_a_pipeline_task(pytester: pytest.Pytester
     )
     result.assert_outcomes(passed=1)
     assert fake_ws.jobs.run_now_calls == []
+
+
+@pytest.fixture
+def parent(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli) -> int:
+    fake_cli.deployed["parent"] = job_id = fake_ws.jobs.add(parent_settings())
+    return job_id
+
+
+CHILD_WARNING = (
+    "*Task 'trigger_child' of job 'parent' runs the deployed job 123, not a copy. Its run keeps that job's run_as "
+    'and notifications and is not cancelled or deleted with the ephemeral job. Pass children="refuse" to '
+    "Lakeflow.job() to fail instead.*"
+)
+
+
+@pytest.mark.usefixtures("parent")
+def test_run_job_task_warns_and_still_creates_the_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    source = 'def test_job(lakeflow):\n    with lakeflow.job("parent") as job:\n        job.run()\n'
+    result = run_tests(pytester, source)
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines([CHILD_WARNING])
+    assert len(fake_ws.jobs.created) == 1
+
+
+def test_run_job_task_warns_once_per_run_job_task(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, parent: int
+) -> None:
+    settings = fake_ws.jobs.settings[parent]
+    nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
+    loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1]", task=nested))
+    settings.tasks = [*(settings.tasks or []), loop]
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("parent")\n')
+    result.assert_outcomes(passed=1, warnings=2)
+    result.stdout.fnmatch_lines(["*Task 'each_child' of job 'parent' runs the deployed job 456, not a copy*"])
+
+
+@pytest.mark.usefixtures("parent")
+def test_disabled_run_job_task_does_not_warn(pytester: pytest.Pytester) -> None:
+    source = 'def test_job(lakeflow):\n    lakeflow.job("parent", disable=["trigger_child"])\n'
+    run_tests(pytester, source).assert_outcomes(passed=1)
+
+
+@pytest.mark.usefixtures("parent")
+@pytest.mark.parametrize(
+    "call", ['lakeflow.job("parent", children="refuse")', 'lakeflow.task("parent.trigger_child", children="refuse")']
+)
+def test_children_refuse_raises_before_creating(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str
+) -> None:
+    source = f"""
+        import pytest
+        from pytest_databricks_lakeflow import LakeflowError
+
+        def test_job(lakeflow):
+            with pytest.raises(LakeflowError) as e:
+                {call}
+            assert "Task 'trigger_child' of job 'parent' runs the deployed job 123, not a copy" in str(e.value)
+            assert "not cancelled or deleted with the ephemeral job" in str(e.value)
+    """
+    run_tests(pytester, source).assert_outcomes(passed=1)
+    assert fake_ws.jobs.created == []
+
+
+@pytest.mark.usefixtures("parent")
+def test_children_refuse_fails_the_test(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    source = 'def test_job(lakeflow):\n    with lakeflow.job("parent", children="refuse") as job:\n        job.run()\n'
+    result = run_tests(pytester, source)
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*LakeflowError: Task 'trigger_child' of job 'parent' runs the deployed job 123*"])
+    assert fake_ws.jobs.created == []
+
+
+@pytest.mark.usefixtures("parent")
+def test_task_without_run_job_task_does_not_warn(pytester: pytest.Pytester) -> None:
+    source = 'def test_job(lakeflow):\n    lakeflow.task("parent.prepare", children="refuse")\n'
+    run_tests(pytester, source).assert_outcomes(passed=1)
+
+
+@pytest.mark.usefixtures("parent")
+def test_task_of_a_run_job_task_warns(pytester: pytest.Pytester) -> None:
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.task("parent.trigger_child")\n')
+    result.assert_outcomes(passed=1, warnings=1)
+    result.stdout.fnmatch_lines([CHILD_WARNING])
+
+
+def test_job_without_run_job_tasks_does_not_warn(pytester: pytest.Pytester) -> None:
+    source = 'def test_job(lakeflow):\n    with lakeflow.job("my_job") as job:\n        job.run()\n'
+    result = run_tests(pytester, source)
+    result.assert_outcomes(passed=1)
+    assert "warnings" not in result.parseoutcomes()
+
+
+@pytest.mark.parametrize("children", ["copy", "nope"])
+def test_children_rejects_unknown_values(pytester: pytest.Pytester, children: str) -> None:
+    source = f"""
+        import pytest
+
+        def test_job(lakeflow):
+            with pytest.raises(ValueError, match="children must be one of warn, refuse, got '{children}'"):
+                lakeflow.job("my_job", children="{children}")
+    """
+    run_tests(pytester, source).assert_outcomes(passed=1)
