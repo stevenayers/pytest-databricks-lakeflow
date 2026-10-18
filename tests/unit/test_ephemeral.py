@@ -170,6 +170,21 @@ def test_disable_marks_tasks_on_the_copy(pytester: pytest.Pytester, fake_ws: Fak
     }
 
 
+def test_disabled_tasks_come_from_the_copy_not_the_run(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS", "load": "DISABLED", "transform": "DISABLED"}))
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            run = lakeflow.job("my_job", disable=["load"]).run()
+            assert run.skipped_tasks["load"].disabled is True
+            assert run.skipped_tasks["transform"].disabled is False
+            assert run.task("extract").disabled is False
+        """,
+    )
+    result.assert_outcomes(passed=1)
+
+
 def test_disable_rejects_unknown_tasks(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job", disable=["nope"]).run()\n')
     result.assert_outcomes(failed=1)

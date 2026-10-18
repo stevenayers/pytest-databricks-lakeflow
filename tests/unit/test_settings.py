@@ -453,7 +453,7 @@ def test_sanitise_pauses_dashboard_and_alert_subscriptions() -> None:
     assert alert.alert.pause_subscriptions is True
     template = task(before, "dashboard").dashboard_task
     assert template is not None and template.subscription is not None
-    assert (dashboard.dashboard_id, dashboard.warehouse_id, dashboard.filters) == ("d1", "w1", {"region": "emea"})
+    assert (dashboard.dashboard_id, dashboard.warehouse_id) == ("d1", "w1")
     assert dashboard.subscription.subscribers == template.subscription.subscribers
     assert alert.alert.subscriptions == [jobs.SqlTaskSubscription(user_name="someone@example.com")]
     assert task(after, "notify").notebook_task == task(before, "notify").notebook_task
@@ -474,8 +474,23 @@ def test_sanitise_leaves_dashboards_without_a_subscription_alone() -> None:
     assert dashboard is not None
     dashboard.subscription = None
     assert task(sanitised(settings), "dashboard").dashboard_task == jobs.DashboardTask(
-        dashboard_id="d1", warehouse_id="w1", filters={"region": "emea"}
+        dashboard_id="d1", warehouse_id="w1"
     )
+
+
+@pytest.mark.skipif(
+    "filters" not in jobs.DashboardTask.__dataclass_fields__,
+    reason="this databricks-sdk has no DashboardTask.filters",
+)
+def test_sanitise_keeps_dashboard_filters() -> None:
+    settings = reporting_settings()
+    template = task(settings, "dashboard").dashboard_task
+    assert template is not None
+    template.filters = {"region": "emea"}
+    dashboard = task(sanitised(settings), "dashboard").dashboard_task
+    assert dashboard is not None and dashboard.subscription is not None
+    assert dashboard.subscription.paused is True
+    assert dashboard.filters == {"region": "emea"}
 
 
 def test_disable_tasks() -> None:
