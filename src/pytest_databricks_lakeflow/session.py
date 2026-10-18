@@ -48,10 +48,11 @@ class BundleKey:
     profile: str | None
     sync: str
     helpers_path: str | None
+    variables: tuple[tuple[str, str], ...] = ()
 
     def file_name(self) -> str:
         """Name the file in which xdist workers share this target's setup."""
-        fields = [str(self.root), self.target, self.profile, self.sync, self.helpers_path]
+        fields = [str(self.root), self.target, self.profile, self.sync, self.helpers_path, self.variables]
         return f"lakeflow_{hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:16]}.json"
 
 
@@ -72,7 +73,7 @@ class SessionState:
         item: The test that is running, or `None` between tests.
         setups: The outcome of setting up each bundle target: its state, or the error it failed with.
         lakeflows: Every `Lakeflow` used in this session.
-        deployed: The root, target and profile of each bundle target that this session deployed.
+        deployed: The root, target, profile and variables of each bundle target that this session deployed.
         swept: Whether this process has swept leftover jobs.
         kept_jobs: The URL of each ephemeral job that was kept, for the terminal summary.
         kept_schemas: The full name of each temporary schema that was kept.
@@ -91,7 +92,7 @@ class SessionState:
     item: pytest.Item | None = None
     setups: dict[BundleKey, dict[str, Any] | Exception] = field(default_factory=dict)
     lakeflows: list[Lakeflow] = field(default_factory=list)
-    deployed: list[tuple[str, str, str | None]] = field(default_factory=list)
+    deployed: list[tuple[str, str, str | None, tuple[tuple[str, str], ...]]] = field(default_factory=list)
     swept: bool = False
     kept_jobs: list[str] = field(default_factory=list)
     kept_schemas: list[str] = field(default_factory=list)
@@ -146,7 +147,7 @@ class SessionState:
                 raise
             self.setups[key] = produced_state
             if key.sync == "deploy":
-                self.deployed.append((str(key.root), key.target, key.profile))
+                self.deployed.append((str(key.root), key.target, key.profile, key.variables))
             if produced and self.sweep and not self.swept:
                 self.swept = True
                 sweep(ws, self.run_id, sweep_hours, user=produced_state.get("user"))
@@ -322,22 +323,52 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
 
     Raises:
         LakeflowBundleError: If a CLI command fails.
+        LakeflowError: If the bundle target deploys to a different workspace from the one the client is for.
     """
     root = key.root
+    variables = dict(key.variables)
     bundle.check_cli_version(root)
     if key.sync == "deploy":
-        bundle.deploy(root, key.target, key.profile)
-        templates, errors = templates_from_summary(ws, bundle.summary(root, key.target, key.profile))
+        bundle.deploy(root, key.target, key.profile, variables)
+        bundle_summary = bundle.summary(root, key.target, key.profile, variables)
+        check_host(key.target, bundle_summary.get("workspace", {}).get("host"), ws.config.host)
+        templates, errors = templates_from_summary(ws, bundle_summary)
     else:
         if key.sync == "sync":
-            bundle.sync(root, key.target, key.profile)
-        config = bundle.validate(root, key.target, key.profile)
+            bundle.sync(root, key.target, key.profile, variables)
+        config = bundle.validate(root, key.target, key.profile, variables)
+        check_host(key.target, config.get("workspace", {}).get("host"), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
     state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder), "user": user}
     log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
     return state
+
+
+def check_host(target: str, bundle_host: str | None, client_host: str | None) -> None:
+    """Check that the CLI deploys the bundle target to the workspace that the client is for.
+
+    Hosts are compared without their scheme, path or case. A target without a host is not checked.
+
+    Args:
+        target: The bundle target.
+        bundle_host: The target's `workspace.host`, as the CLI resolved it.
+        client_host: The workspace client's host.
+
+    Raises:
+        LakeflowError: If the hosts differ.
+    """
+    if not bundle_host or _netloc(bundle_host) == _netloc(client_host or ""):
+        return
+    raise LakeflowError(
+        f"Bundle target {target!r} deploys to {bundle_host} but the workspace client is for {client_host}. "
+        "Pass profile= to Lakeflow, or set DATABRICKS_HOST and DATABRICKS_CONFIG_PROFILE to match the target."
+    )
+
+
+def _netloc(host: str) -> str:
+    return urllib.parse.urlparse(host if "://" in host else f"https://{host}").netloc.lower()
 
 
 def templates_from_summary(

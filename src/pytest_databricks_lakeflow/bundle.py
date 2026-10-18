@@ -62,31 +62,39 @@ def check_cli_version(root: Path) -> None:
         raise LakeflowBundleError(f"pytest-databricks-lakeflow needs Databricks CLI v{minimum} or later: {out.strip()}")
 
 
-def deploy(root: Path, target: str, profile: str | None) -> None:
+def deploy(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
     log.info("Deploying bundle %s to target %s", root, target)
-    run_cli(["bundle", "deploy", "-t", target, "--auto-approve"], root, profile)
+    run_cli(["bundle", "deploy", "-t", target, "--auto-approve", *_var_args(variables)], root, profile)
 
 
-def sync(root: Path, target: str, profile: str | None) -> None:
+def sync(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
     log.info("Syncing bundle %s to target %s", root, target)
-    run_cli(["bundle", "sync", "-t", target], root, profile)
+    run_cli(["bundle", "sync", "-t", target, *_var_args(variables)], root, profile)
 
 
-def validate(root: Path, target: str, profile: str | None) -> dict[str, Any]:
-    return _json_command("validate", root, target, profile)
+def validate(
+    root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    return _json_command("validate", root, target, profile, variables)
 
 
-def summary(root: Path, target: str, profile: str | None) -> dict[str, Any]:
-    return _json_command("summary", root, target, profile)
+def summary(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> dict[str, Any]:
+    return _json_command("summary", root, target, profile, variables)
 
 
-def destroy(root: Path, target: str, profile: str | None) -> None:
+def destroy(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
     log.info("Destroying bundle %s target %s", root, target)
-    run_cli(["bundle", "destroy", "-t", target, "--auto-approve"], root, profile)
+    run_cli(["bundle", "destroy", "-t", target, "--auto-approve", *_var_args(variables)], root, profile)
 
 
-def _json_command(command: str, root: Path, target: str, profile: str | None) -> dict[str, Any]:
-    out = run_cli(["bundle", command, "-t", target, "-o", "json"], root, profile)
+def _var_args(variables: Mapping[str, str] | None) -> list[str]:
+    return [arg for name, value in sorted((variables or {}).items()) for arg in ("--var", f"{name}={value}")]
+
+
+def _json_command(
+    command: str, root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    out = run_cli(["bundle", command, "-t", target, "-o", "json", *_var_args(variables)], root, profile)
     try:
         data = json.loads(out)
     except json.JSONDecodeError as e:

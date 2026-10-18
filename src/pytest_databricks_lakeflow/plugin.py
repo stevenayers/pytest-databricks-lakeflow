@@ -140,9 +140,9 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
         return
     if not state.destroy:
         return
-    for root, target, profile in dict.fromkeys(state.deployed):
+    for root, target, profile, variables in dict.fromkeys(state.deployed):
         try:
-            bundle.destroy(Path(root), target, profile)
+            bundle.destroy(Path(root), target, profile, dict(variables))
         except LakeflowBundleError as e:
             reporter = config.pluginmanager.get_plugin("terminalreporter")
             if reporter is not None:
@@ -156,7 +156,8 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
 def pytest_testnodedown(node: Any, error: object) -> None:
     output = getattr(node, "workeroutput", {})
     state = node.config.stash[STATE]
-    state.deployed.extend(tuple(entry) for entry in output.get("lakeflow_deployed", []))
+    for root, target, profile, variables in output.get("lakeflow_deployed", []):
+        state.deployed.append((root, target, profile, tuple((name, value) for name, value in variables)))
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)

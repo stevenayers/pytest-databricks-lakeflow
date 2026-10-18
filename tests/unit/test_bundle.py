@@ -96,6 +96,22 @@ def test_wrappers_build_commands(runner: FakeRunner, tmp_path: Path) -> None:
         ["bundle", "destroy", "-t", "test", "--auto-approve"],
     ]
     assert runner.calls[0][2] == "p"
+    runner.calls.clear()
+    runner.outputs = ["{}", "{}"]
+    variables = {"b": "2", "a": "1"}
+    bundle.validate(tmp_path, "test", None, variables)
+    bundle.summary(tmp_path, "test", None, variables)
+    bundle.deploy(tmp_path, "test", None, variables)
+    bundle.sync(tmp_path, "test", None, variables)
+    bundle.destroy(tmp_path, "test", None, variables)
+    as_vars = ["--var", "a=1", "--var", "b=2"]
+    assert [call[0] for call in runner.calls] == [
+        ["bundle", "validate", "-t", "test", "-o", "json", *as_vars],
+        ["bundle", "summary", "-t", "test", "-o", "json", *as_vars],
+        ["bundle", "deploy", "-t", "test", "--auto-approve", *as_vars],
+        ["bundle", "sync", "-t", "test", *as_vars],
+        ["bundle", "destroy", "-t", "test", "--auto-approve", *as_vars],
+    ]
 
 
 def test_wrappers_reject_non_json(runner: FakeRunner, tmp_path: Path) -> None:
