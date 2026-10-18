@@ -24,6 +24,7 @@ class FakeJobs:
         self.deleted: list[int] = []
         self.cancelled: list[int] = []
         self.run_now_calls: list[dict[str, Any]] = []
+        self.tokens: dict[str, int] = {}
         self.listed: list[jobs.BaseJob] = []
         self.queued: list[list[jobs.Run]] = []
         self.polls: dict[int, list[jobs.Run]] = {}
@@ -65,13 +66,33 @@ class FakeJobs:
         self.outputs.update(outputs or {})
 
     def run_now(
-        self, job_id: int, *, job_parameters: dict[str, str] | None = None, only: Sequence[str] | None = None
+        self,
+        job_id: int,
+        *,
+        idempotency_token: str | None = None,
+        job_parameters: dict[str, str] | None = None,
+        only: Sequence[str] | None = None,
+        performance_target: jobs.PerformanceTarget | None = None,
+        queue: jobs.QueueSettings | None = None,
     ) -> SimpleNamespace:
-        self.run_now_calls.append({"job_id": job_id, "job_parameters": job_parameters, "only": only})
+        self.run_now_calls.append(
+            {
+                "job_id": job_id,
+                "idempotency_token": idempotency_token,
+                "job_parameters": job_parameters,
+                "only": only,
+                "performance_target": performance_target,
+                "queue": queue,
+            }
+        )
+        if idempotency_token is not None and idempotency_token in self.tokens:
+            return SimpleNamespace(response=jobs.RunNowResponse(run_id=self.tokens[idempotency_token]))
         polls = self.queued.pop(0) if self.queued else [make_run(next(self._ids), {"task": "SUCCESS"})]
         run_id = polls[-1].run_id
         assert run_id is not None
         self.polls[run_id] = polls
+        if idempotency_token is not None:
+            self.tokens[idempotency_token] = run_id
         return SimpleNamespace(response=jobs.RunNowResponse(run_id=run_id))
 
     def get_run(self, run_id: int) -> jobs.Run:

@@ -369,6 +369,105 @@ def test_performance_optimized(pytester: pytest.Pytester, fake_ws: FakeWorkspace
     assert not any(task.disable_auto_optimization for task in created["tasks"])
 
 
+def test_run_sends_a_fresh_idempotency_token(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run()
+                job.run()
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    tokens = [call["idempotency_token"] for call in fake_ws.jobs.run_now_calls]
+    assert len(tokens) == 2
+    assert all(tokens)
+    assert tokens[0] != tokens[1]
+    assert all(len(token) <= 64 for token in tokens)
+
+
+def test_token_changes_after_a_timeout(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+    result = run_tests(
+        pytester,
+        """
+        from datetime import timedelta
+
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowTimeout
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowTimeout):
+                    job.run(timeout=timedelta(0))
+                assert job.run().run_id != 77
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    first, second = (call["idempotency_token"] for call in fake_ws.jobs.run_now_calls)
+    assert first != second
+
+
+def test_run_forwards_performance_target_and_queue(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run(performance_target="PERFORMANCE_OPTIMIZED", queue=False)
+                assert job.settings.performance_target is None
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    [call] = fake_ws.jobs.run_now_calls
+    assert call["performance_target"] == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+    assert call["queue"] == jobs.QueueSettings(enabled=False)
+    assert "performance_target" not in fake_ws.jobs.created[0]
+
+
+def test_run_accepts_the_enum_and_queue_true(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        from databricks.sdk.service import jobs
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.run(performance_target=jobs.PerformanceTarget.STANDARD, queue=True)
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    [call] = fake_ws.jobs.run_now_calls
+    assert call["performance_target"] == jobs.PerformanceTarget.STANDARD
+    assert call["queue"] == jobs.QueueSettings(enabled=True)
+
+
+def test_run_without_options_forwards_none(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+    result.assert_outcomes(passed=1)
+    [call] = fake_ws.jobs.run_now_calls
+    assert call["performance_target"] is None
+    assert call["queue"] is None
+
+
+def test_run_rejects_an_unknown_performance_target(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(ValueError, match="bogus"):
+                    job.run(performance_target="bogus")
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.run_now_calls == []
+
+
 def test_module_fixture_shares_one_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     result = run_tests(
         pytester,

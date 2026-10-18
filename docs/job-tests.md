@@ -26,11 +26,15 @@ def test_without_with(lakeflow: Lakeflow) -> None:
 
 ## Run it
 
-`job.run(params=None, only=None, timeout=None)` starts a run, waits for it to finish, and returns a `JobRun`.
+`job.run(params=None, only=None, timeout=None, performance_target=None, queue=None)` starts a run, waits for it to finish, and returns a `JobRun`.
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
 - `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised.
+- `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
+- `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
+
+Each call to `run()` sends a fresh idempotency token with the run request, so a request that the SDK retries cannot start a second run.
 
 Running is explicit so that a test can run a job more than once, for example to compare a full load with an incremental one:
 
