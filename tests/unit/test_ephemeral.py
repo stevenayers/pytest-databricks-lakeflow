@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -225,6 +226,51 @@ def test_report_section_and_junit_properties(pytester: pytest.Pytester) -> None:
     xml = (pytester.path / "report.xml").read_text()
     assert f'<property name="lakeflow_job_url" value="{HOST}/jobs/1001"' in xml
     assert '<property name="lakeflow_run_url"' in xml
+    assert '<property name="lakeflow_job_id" value="1001"' in xml
+    assert re.search(r'<property name="lakeflow_run_id" value="\d+"', xml)
+    assert '<property name="lakeflow_result_state" value="SUCCESS"' in xml
+    assert re.search(r'<property name="lakeflow_duration" value="\d+\.\d{3}"', xml)
+    assert "lakeflow_failing" not in xml
+
+
+def test_failing_run_adds_a_failing_property(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    error = jobs.RunOutput(error="ValueError: no rows\nmore detail")
+    fake_ws.jobs.queue(make_run(77, {"extract": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR"), {7700: error})
+    result = run_tests(
+        pytester,
+        """
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                assert job.run().failed
+        """,
+        "--junitxml=report.xml",
+    )
+    result.assert_outcomes(passed=1)
+    xml = (pytester.path / "report.xml").read_text()
+    assert '<property name="lakeflow_run_id" value="77"' in xml
+    assert '<property name="lakeflow_result_state" value="FAILED"' in xml
+    assert '<property name="lakeflow_duration" value="5.000"' in xml
+    assert '<property name="lakeflow_failing" value="extract: ValueError: no rows"' in xml
+
+
+def test_section_is_attached_to_setup_failures(pytester: pytest.Pytester) -> None:
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        @pytest.fixture(scope="module")
+        def job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                raise RuntimeError("setup broke")
+                yield job
+
+        def test_job(job):
+            pass
+        """,
+    )
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*ERROR at setup*", "*- lakeflow -*", f"lakeflow_job_url: {HOST}/jobs/1001"])
 
 
 def test_callbacks(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:

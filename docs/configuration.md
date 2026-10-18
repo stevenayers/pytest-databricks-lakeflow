@@ -81,4 +81,33 @@ With `sync` and `none`, a job that still contains `${...}` references after `val
 
 The plugin logs to the `pytest_databricks_lakeflow` logger: INFO when it deploys, creates a job, starts and finishes a run, and deletes a job or drops a schema; WARNING when it keeps something or a cleanup call fails. Show the INFO lines with `pytest --log-cli-level=INFO`.
 
-Each test's job URL and run URLs are appended to `item.user_properties` as `lakeflow_job_url` and `lakeflow_run_url`, so they appear in JUnit XML, and in a `lakeflow` section of the report for the `call` phase.
+Each test's job and run coordinates are appended to `item.user_properties`, so they appear as JUnit XML properties:
+
+| Property | Added | Value |
+| --- | --- | --- |
+| `lakeflow_job_url` | when the job is created | the job's page in the workspace |
+| `lakeflow_job_id` | when the job is created | the job's id |
+| `lakeflow_run_url` | when a run starts | the run's page in the workspace |
+| `lakeflow_run_id` | when a run finishes | the run's id |
+| `lakeflow_result_state` | when a run finishes | the run's result state, such as `SUCCESS` or `FAILED` |
+| `lakeflow_duration` | when a run finishes | the run's duration in seconds, with three decimals |
+| `lakeflow_failing` | when a run fails | each failing task as `key: error`, with the error's first line, joined by `; ` |
+
+A job that runs more than once adds a set of run properties for each run. `lakeflow_failing` is added whenever the run failed, also when the test expects the failure.
+
+The same lines are attached as a `lakeflow` section to the setup, call and teardown reports of the test, so a job created in a fixture whose setup fails still shows its URL in the error. A test that fails in both call and teardown shows the section twice.
+
+At the end of the session, a `lakeflow` block in the terminal summary lists every kept job with its URL, every kept schema, and the number of runs cancelled at session end, followed by a reminder of `--lakeflow-sweep` when jobs were kept:
+
+```text
+=================================== lakeflow ===================================
+lakeflow: 2 jobs kept
+  https://adb-123.azuredatabricks.net/jobs/1001
+  https://adb-123.azuredatabricks.net/jobs/1002
+lakeflow: 1 schema kept
+  dev_sandbox.pytest_ab12cd34_9f0e1d2c
+lakeflow: 1 run cancelled at session end
+hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours
+```
+
+It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing and cancelled nothing prints no block.

@@ -232,6 +232,7 @@ class Lakeflow:
         finally:
             if state.keeps(self.keep, keep_failed=False, failed=False):
                 log.warning("Keeping schema %s", full_name)
+                state.kept_schemas.append(full_name)
             else:
                 self.ws.schemas.delete(full_name, force=True)
                 log.info("Dropped schema %s", full_name)

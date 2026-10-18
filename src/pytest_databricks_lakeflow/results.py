@@ -304,8 +304,12 @@ class JobRun:
         return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
 
     def __repr__(self) -> str:
-        failing = [f"{t.task_key}: {_first_line(str(t.error)) if t.error else t.result_state}" for t in self._failing()]
-        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, failing={failing})"
+        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, failing={describe_failing(self)})"
+
+
+def describe_failing(run: JobRun) -> list[str]:
+    """Describe each failing task of `run` as `key: error`, with the error's first line or the result state."""
+    return [f"{t.task_key}: {_first_line(str(t.error)) if t.error else t.result_state}" for t in run._failing()]
 
 
 def build_job_run(

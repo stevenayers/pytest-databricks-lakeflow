@@ -13,7 +13,7 @@ from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
-from pytest_databricks_lakeflow.results import JobRun, build_job_run
+from pytest_databricks_lakeflow.results import JobRun, build_job_run, describe_failing
 from pytest_databricks_lakeflow.settings import check_params, create_kwargs, select
 
 if TYPE_CHECKING:
@@ -101,6 +101,7 @@ class EphemeralJob:
         self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings)).job_id
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
+        item.user_properties.append(("lakeflow_job_id", self.job_id))
 
     def run(
         self,
@@ -147,6 +148,15 @@ class EphemeralJob:
             capture_task_values=self.capture_task_values,
         )
         self.runs.append(result)
+        item.user_properties.extend(
+            [
+                ("lakeflow_run_id", result.run_id),
+                ("lakeflow_result_state", result.result_state),
+                ("lakeflow_duration", f"{result.duration.total_seconds():.3f}"),
+            ]
+        )
+        if result.failed:
+            item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)
@@ -183,8 +193,10 @@ class EphemeralJob:
             self._cancel(run_id)
         if self.job_id is None:
             return
-        if session.current().keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
+        state = session.current()
+        if state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
             log.warning("Keeping job %s from %s: %s", self.job_id, self.job_key, self.url)
+            state.kept_jobs.append(str(self.url))
             for url in self._run_urls.values():
                 log.warning("Kept run: %s", url)
             return

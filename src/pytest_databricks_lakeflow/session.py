@@ -64,6 +64,9 @@ class SessionState:
         lakeflows: Every `Lakeflow` used in this session.
         deployed: The root, target and profile of each bundle target that this session deployed.
         swept: Whether this process has swept leftover jobs.
+        kept_jobs: The URL of each ephemeral job that was kept, for the terminal summary.
+        kept_schemas: The full name of each temporary schema that was kept.
+        cancelled_runs: The number of runs cancelled at session end.
         worker_dir: On the xdist controller, the directory that it shares with the workers.
     """
 
@@ -79,6 +82,9 @@ class SessionState:
     lakeflows: list[Lakeflow] = field(default_factory=list)
     deployed: list[tuple[str, str, str | None]] = field(default_factory=list)
     swept: bool = False
+    kept_jobs: list[str] = field(default_factory=list)
+    kept_schemas: list[str] = field(default_factory=list)
+    cancelled_runs: int = 0
     worker_dir: Path | None = None
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
