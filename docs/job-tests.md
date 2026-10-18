@@ -367,7 +367,7 @@ def test_parent_triggers_child(lakeflow: Lakeflow) -> None:
     assert run.task("prepare").child_run is None
 ```
 
-The plugin reads the child run with `get_run` once the parent run has finished. `child_run.job_id` is the deployed child job's id, and `child_run.job_key` is that job's bundle resource key when the bundle deployed it, otherwise the job id as a string; with `sync="sync"` or `sync="none"` the plugin knows no job ids, so the key is always the id. `child_run.succeeded` follows the same rules as the parent's, and a child with its own Run Job tasks has nested `child_run`s. `child_run` is `None` for any other task, for a Run Job task that did not run, and when the child run cannot be read, which logs a warning.
+The plugin reads the child run with `get_run` once the parent run has finished. `child_run.job_id` is the deployed child job's id, and `child_run.job_key` is that job's bundle resource key when the bundle deployed it, otherwise the job id as a string; with `sync="sync"` or `sync="none"` the plugin knows no job ids, so the key is always the id. `child_run.succeeded` follows the same rules as the parent's, and a child with its own Run Job tasks has nested `child_run`s. `only` never applies to a child run, so a task disabled in the child job is in `child_run.disabled_tasks`, not `skipped_tasks`. When a Run Job task was retried, each of its `attempts` carries the child run that attempt triggered, and `child_run` is the last one's. `child_run` is `None` for any other task, for a Run Job task that did not run, and when the child run cannot be read, which logs a warning.
 
 ## Change the settings before the job is created
 

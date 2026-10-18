@@ -256,8 +256,9 @@ class TaskRun:
         child_run: The run that a run-job task triggered, as a `JobRun` with the child's own tasks, read with
             `get_run` once the parent run finished. Its `job_key` is the child job's bundle resource key, or its job
             id as a string when the job is not in the bundle. A child with its own run-job tasks has nested
-            `child_run`s. `None` for any other task, when the task did not run, when the platform reported no run id,
-            or when the child run could not be read, which logs a warning.
+            `child_run`s, and a task disabled in the child job is in its `disabled_tasks`. Each of `attempts` carries
+            the child run that attempt triggered. `None` for any other task, when the task did not run, when the
+            platform reported no run id, or when the child run could not be read, which logs a warning.
         dashboard_output: The output of a dashboard task, with its `page_snapshots`, or `None`.
         clean_rooms_notebook_output: The output of a clean room notebook task, with `notebook_output` and
             `clean_room_job_run_state`, or `None`.
@@ -583,8 +584,11 @@ def build_job_run(
     ran = [task for tasks in by_key.values() for task in tasks if has_output(task)]
     known = dict(outputs or {})
     known.update(fetch_outputs(ws, [task for task in ran if (task.run_id or 0) not in known]))
-    attempts = {key: [_task_run(task, known.get(task.run_id or 0)) for task in tasks] for key, tasks in by_key.items()}
-    task_runs = {key: _with_child_run(ws, runs[-1], job_keys or {}) for key, runs in attempts.items()}
+    attempts = {
+        key: [_with_child_run(ws, _task_run(task, known.get(task.run_id or 0)), job_keys or {}) for task in tasks]
+        for key, tasks in by_key.items()
+    }
+    task_runs = {key: runs[-1] for key, runs in attempts.items()}
     injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
     user = {key: t for key, t in task_runs.items() if key not in injected}
     for target, keys in (capture_task_values or {}).items():
@@ -622,7 +626,10 @@ def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, s
         return task
     job_id = child.job_id or 0
     key = job_keys.get(job_id) or str(job_id)
-    return replace(task, child_run=build_job_run(ws, child, job_key=key, job_id=job_id, job_keys=job_keys))
+    # `only` never applies to a child run, so every task of it that ended DISABLED is disabled in the child job.
+    disabled = {t.task_key for t in child.tasks or [] if t.task_key}
+    child_run = build_job_run(ws, child, job_key=key, job_id=job_id, disabled=disabled, job_keys=job_keys)
+    return replace(task, child_run=child_run)
 
 
 def _with_attempts(last: TaskRun, attempts: list[TaskRun]) -> TaskRun:

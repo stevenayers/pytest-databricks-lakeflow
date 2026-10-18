@@ -134,8 +134,8 @@ class SessionState:
             sweep_hours: The age after which leftover jobs are swept.
 
         Returns:
-            The target's state: its job templates, the errors of jobs that cannot be used, the helper paths, and the
-                workspace user.
+            The target's state: its job templates, the errors of jobs that cannot be used, the job ids by bundle key,
+                the helper paths, and the workspace user.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.

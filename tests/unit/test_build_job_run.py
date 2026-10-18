@@ -687,3 +687,31 @@ def test_attempts_of_a_run_job_task_end_with_the_child_run() -> None:
     task = build_from(ws, run).task("trigger_child")
     assert task.child_run is not None
     assert task.attempts[-1].child_run == task.child_run
+
+
+def test_child_run_puts_disabled_child_tasks_in_disabled_tasks() -> None:
+    ws, run = _with_child(states={"load": "SUCCESS", "backfill": "DISABLED"})
+    child = build_from(ws, run).task("trigger_child").child_run
+    assert child is not None
+    assert sorted(child.disabled_tasks) == ["backfill"]
+    assert child.skipped_tasks == {}
+    with pytest.raises(KeyError, match="Disabled in the job"):
+        child.task("backfill")
+
+
+def test_every_attempt_of_a_run_job_task_has_its_child_run() -> None:
+    ws = FakeWorkspaceClient()
+    ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
+    ws.jobs.outputs[101] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=778))
+    for child_id, state in ((777, "FAILED"), (778, "SUCCESS")):
+        child = make_run(child_id, {"load": state})
+        child.job_id = 123
+        ws.jobs.add_run(child)
+    run = make_run(1, {}, attempts={"trigger_child": ["FAILED", "SUCCESS"]})
+    task = build_from(ws, run).task("trigger_child")
+    first, last = task.attempts
+    assert first.child_run is not None
+    assert (first.child_run.run_id, first.child_run.failed) == (777, True)
+    assert last.child_run is not None
+    assert last.child_run.run_id == 778
+    assert task.child_run == last.child_run
