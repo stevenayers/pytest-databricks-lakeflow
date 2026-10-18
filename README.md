@@ -54,7 +54,7 @@ Run `pytest`. The first test deploys the bundle's `test` target once, then every
 AssertionError: JobRun('my_example_job', FAILED, https://<workspace>/#job/123/run/456, params={'param1': 'forbidden', 'param2': 'world', 'mode': 'full', 'schema': ''}, failing=['transform: PermissionError: forbidden may not read /Volumes/example/raw/landing'])
 ```
 
-`run.raise_for_failure()` does the same in one call. It returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with that repr followed by one line per failing task: its full error, the `Caused by:` root cause when the trace has one, and the task's run URL.
+`run.raise_for_failure()` does the same in one call. It returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with that repr followed by one line per failing task: its full error, its root cause (the last `Caused by:` line, or the first exception of a Python chain) when the trace has one, and the task's run URL.
 
 To change the target, set a catalog for temporary schemas or lengthen the timeout, override the `lakeflow` fixture in `conftest.py`:
 

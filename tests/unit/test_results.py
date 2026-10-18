@@ -218,11 +218,82 @@ def test_root_cause_is_the_last_caused_by_line() -> None:
     assert error.root_cause == "java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)"
 
 
-@pytest.mark.parametrize("sample", SAMPLES, ids=[s["name"] for s in SAMPLES])
+UNLINKED = [s for s in SAMPLES if not s["name"].endswith("_linked")]
+LINKED = [s for s in SAMPLES if s["name"].endswith("_linked")]
+
+
+@pytest.mark.parametrize("sample", UNLINKED, ids=[s["name"] for s in UNLINKED])
 def test_root_cause_is_none_without_caused_by(sample: dict[str, Any]) -> None:
     error = TaskError.from_output(sample["error"], sample["error_trace"])
     assert error is not None
     assert error.root_cause is None
+
+
+@pytest.mark.parametrize("sample", LINKED, ids=[s["name"] for s in LINKED])
+def test_root_cause_of_a_chained_python_exception(sample: dict[str, Any]) -> None:
+    error = TaskError.from_output(sample["error"], sample["error_trace"])
+    assert error is not None
+    assert (error.type, error.message) == ("RuntimeError", "wrapped outer")
+    assert error.root_cause == "ZeroDivisionError: division by zero"
+
+
+IMPLICIT_CHAIN_TRACE = """KeyError                                  Traceback (most recent call last)
+File <command-1>, line 3
+      2 try:
+----> 3     {}["k"]
+      4 except KeyError:
+
+KeyError: 'k'
+
+During handling of the above exception, another exception occurred:
+
+ValueError                                Traceback (most recent call last)
+File <command-1>, line 5
+      4 except KeyError:
+----> 5     raise ValueError("outer")
+
+ValueError: outer
+"""
+
+
+def test_root_cause_of_an_implicit_chain() -> None:
+    error = TaskError(type="ValueError", message="outer", trace=IMPLICIT_CHAIN_TRACE)
+    assert error.root_cause == "KeyError: 'k'"
+
+
+def test_root_cause_of_a_chain_with_crlf_line_endings() -> None:
+    trace = IMPLICIT_CHAIN_TRACE.replace("\n", "\r\n")
+    error = TaskError(type="ValueError", message="outer", trace=trace)
+    assert error.root_cause == "KeyError: 'k'"
+
+
+def test_root_cause_of_an_innermost_exception_with_an_empty_message() -> None:
+    trace = IMPLICIT_CHAIN_TRACE.replace("KeyError: 'k'", "KeyError: ")
+    error = TaskError(type="ValueError", message="outer", trace=trace)
+    assert error.root_cause == "KeyError"
+
+
+def test_root_cause_prefers_caused_by_inside_the_innermost_segment() -> None:
+    trace = (
+        f"{PY4J_TRACE}\nThe above exception was the direct cause of the following exception:\n\n"
+        "RuntimeError                              Traceback (most recent call last)\n"
+        "Caused by: java.lang.IllegalStateException: not the root\n"
+        "RuntimeError: save failed\n"
+    )
+    error = TaskError(type="RuntimeError", message="save failed", trace=trace)
+    assert error.root_cause == "java.io.FileNotFoundException: /mnt/data/part-0001 (No such file or directory)"
+
+
+def test_root_cause_is_none_for_an_empty_trace() -> None:
+    assert TaskError(type="RuntimeError", message="boom", trace="").root_cause is None
+
+
+def test_raise_for_failure_prints_the_chained_root_cause() -> None:
+    sample = LINKED[0]
+    error = TaskError.from_output(sample["error"], sample["error_trace"])
+    run = job_run([task("transform", "FAILED", error=error)])
+    with pytest.raises(LakeflowRunFailed, match=r"root cause: ZeroDivisionError: division by zero"):
+        run.raise_for_failure()
 
 
 @pytest.mark.parametrize(
