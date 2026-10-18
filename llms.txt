@@ -8,11 +8,7 @@ Install with `uv add --dev pytest-databricks-lakeflow` or `pip install pytest-da
 
 - [Home](https://stevenayers.github.io/pytest-databricks-lakeflow/): the README, with the pitch, a job test and a task test
 - [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, the bundle test target, configuring the fixture, the first test, CI
-<<<<<<< HEAD
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): lakeflow.job(), run(), JobRun and TaskRun, resolved parameters, raise_for_failure(), output_json, only, capture_task_values, temporary schemas, shared runs, keep rules, callbacks
-=======
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): lakeflow.job(), run(), JobRun and TaskRun, raise_for_failure(), output_json, only, capture_task_values, run_as, temporary schemas, shared runs, keep rules, callbacks
->>>>>>> 3487169 (feat: set permissions on ephemeral jobs and allow run_as to be kept or named)
+- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): lakeflow.job(), run(), JobRun and TaskRun, resolved parameters, raise_for_failure(), output_json, only, capture_task_values, run_as, temporary schemas, shared runs, keep rules, callbacks
 - [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): lakeflow.task(), stubs and probes, value rules, helper compute
 - [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every Lakeflow argument, permissions on ephemeral jobs, command-line flag, environment variable and sync strategy
 - [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): session setup, the per-job lifecycle, teardown, xdist, what stays in the workspace, timing
