@@ -110,8 +110,8 @@ def sanitise(
             environment and those whose spec sets `base_environment`.
         budget_policy_id: The budget policy of the job.
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
-            cluster, helper tasks included. The job clusters are removed. Serverless and warehouse tasks are left
-            alone.
+            cluster, helper tasks and tasks nested in a `for_each_task` included. The job clusters are removed.
+            Serverless and warehouse tasks are left alone.
 
     Returns:
         `settings`.
@@ -203,8 +203,13 @@ def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
         env.spec.environment_version = version
 
 
+def _with_nested(tasks: Sequence[jobs.Task] | None) -> list[jobs.Task]:
+    tasks = list(tasks or [])
+    return [*tasks, *(t.for_each_task.task for t in tasks if t.for_each_task and t.for_each_task.task)]
+
+
 def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
-    for task in settings.tasks or []:
+    for task in _with_nested(settings.tasks):
         if task.job_cluster_key or task.new_cluster:
             task.existing_cluster_id = cluster_id
             task.job_cluster_key = None
@@ -266,11 +271,12 @@ def check_compute(settings: jobs.JobSettings) -> None:
         settings: The job's settings.
 
     Raises:
-        LakeflowError: If a Python script, Python wheel, JAR or dbt task has no cluster and no `environment_key`.
+        LakeflowError: If a Python script, Python wheel, JAR or dbt task, nested `for_each_task` tasks included, has no
+            cluster and no `environment_key`.
     """
     missing = [
         task.task_key
-        for task in settings.tasks or []
+        for task in _with_nested(settings.tasks)
         if (task.spark_python_task or task.python_wheel_task or task.spark_jar_task or task.dbt_task)
         and not (task.job_cluster_key or task.new_cluster or task.existing_cluster_id or task.environment_key)
     ]

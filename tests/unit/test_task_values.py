@@ -199,7 +199,7 @@ def test_helpers_refuse_an_eleventh_environment() -> None:
 
 
 def test_wrap_task_refuses_an_eleventh_environment() -> None:
-    with pytest.raises(LakeflowError, match="10"):
+    with pytest.raises(LakeflowError, match=r"10 environments.*'default', 'env1'.*'env9'.*make room"):
         wrap_task(with_environment_count(10), "transform", UPSTREAM, [], HELPERS)
     settings = wrap_task(with_environment_count(9), "transform", UPSTREAM, [], HELPERS)
     assert (settings.environments or [])[-1].environment_key == ENV_KEY

@@ -155,6 +155,19 @@ def test_existing_cluster_id_moves_job_cluster_tasks() -> None:
         assert task(after, key) == task(before, key)
 
 
+def test_existing_cluster_id_moves_for_each_inner_tasks() -> None:
+    settings = example_settings()
+    inner = {"task_key": "inner", "job_cluster_key": "classic", "notebook_task": {"notebook_path": "/x"}}
+    loop = {"task_key": "loop", "for_each_task": {"inputs": "[1, 2]", "task": inner}}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(loop)]
+    after = sanitised(settings, existing_cluster_id=CLUSTER)
+    assert after.job_clusters is None
+    for_each = task(after, "loop").for_each_task
+    assert for_each is not None and for_each.task is not None
+    moved = for_each.task
+    assert (moved.existing_cluster_id, moved.job_cluster_key, moved.new_cluster) == (CLUSTER, None, None)
+
+
 def test_sanitise_without_compute_knobs_changes_nothing() -> None:
     plain = sanitised()
     assert sanitised(environment_version=None, budget_policy_id=None, existing_cluster_id=None) == plain
@@ -176,6 +189,15 @@ def test_check_compute_names_tasks_without_environment(code: dict[str, Any]) -> 
     settings = example_settings()
     settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict({"task_key": "bare", **code})]
     with pytest.raises(LakeflowError, match=r"\['bare'\].*environment_key"):
+        check_compute(settings)
+
+
+def test_check_compute_names_for_each_inner_tasks_without_environment() -> None:
+    settings = example_settings()
+    inner = {"task_key": "inner", "python_wheel_task": {"package_name": "pkg", "entry_point": "main"}}
+    loop = {"task_key": "loop", "for_each_task": {"inputs": "[1, 2]", "task": inner}}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(loop)]
+    with pytest.raises(LakeflowError, match=r"\['inner'\].*environment_key"):
         check_compute(settings)
 
 
