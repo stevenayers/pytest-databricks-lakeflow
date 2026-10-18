@@ -29,6 +29,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     disable_tasks,
     inject_probes,
+    inject_test_marker,
     run_job_tasks,
     sanitise,
     wrap_task,
@@ -105,6 +106,9 @@ class Lakeflow:
             standard access mode, because single node compute needs dedicated access mode. Serverless tasks and
             `existing_cluster_id` are left alone.
         allow_undeclared_params: Allow parameters that the job does not declare.
+        test_marker: Declare a `__pytest_test_id` job parameter on every ephemeral job, with the test node id as its
+            default, so job code can tell that it runs under test. The node id is used even when `name` replaces it
+            in the job name. Tests cannot pass the parameter themselves.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
@@ -138,6 +142,7 @@ class Lakeflow:
     existing_cluster_id: str | None = None
     single_node: bool = False
     allow_undeclared_params: bool = False
+    test_marker: bool = False
     sweep_hours: float = 24
     keep: bool = False
     keep_failed: bool = True
@@ -408,6 +413,8 @@ class Lakeflow:
             existing_cluster_id=self.existing_cluster_id,
             single_node=self.single_node,
         )
+        if self.test_marker:
+            inject_test_marker(settings, item.nodeid)
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
         return job

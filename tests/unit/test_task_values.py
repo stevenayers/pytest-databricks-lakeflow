@@ -166,6 +166,27 @@ def test_job_capture_task_values_end_to_end(pytester: pytest.Pytester, fake_ws: 
     assert [t.task_key for t in created["tasks"]][-1] == "__pytest_probe__transform"
 
 
+def test_test_marker_on_a_task_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    pytester.makepyfile(
+        """
+        def test_job(lakeflow):
+            upstream = {"extract": {"row_count": 42}}
+            with lakeflow.task("my_job.transform", upstream_task_values=upstream, capture_task_values=["stage"]):
+                pass
+        """
+    )
+    pytester.runpytest().assert_outcomes(passed=1)
+    configure_lakeflow(pytester, "test_marker=True")
+    pytester.runpytest().assert_outcomes(passed=1)
+    plain, marked = fake_ws.jobs.created
+    assert marked["parameters"] == [
+        *plain["parameters"],
+        jobs.JobParameterDefinition(name="__pytest_test_id", default="test_test_marker_on_a_task_job.py::test_job"),
+    ]
+    assert marked["tasks"] == plain["tasks"]
+    assert [t.task_key for t in marked["tasks"]] == ["extract", "transform", "__pytest_probe__transform"]
+
+
 def test_helper_settings_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     configure_lakeflow(pytester, 'helpers_path="/Shared/helpers", helpers_compute="classic"')
     pytester.makepyfile(

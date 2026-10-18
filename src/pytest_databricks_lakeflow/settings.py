@@ -43,6 +43,8 @@ MAX_DESCRIPTION_BYTES = 27700
 ATTRIBUTION_TAGS = ("pytest_ci_url", "pytest_user", "pytest_git_sha", "pytest_git_branch")
 NEWLINES = re.compile(r"[\r\n]+")
 ENV_KEY = f"{PREFIX}serverless"
+TEST_ID_PARAMETER = f"{PREFIX}test_id"
+MAX_PARAMETER_DEFAULT_BYTES = 4096
 MAX_ENVIRONMENTS = 10
 MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
@@ -178,6 +180,25 @@ def sanitise(
             dropped.append(key)
     if dropped:
         log.debug("Left out the tags %s, because the job already has %d tags", dropped, MAX_TAGS)
+    return settings
+
+
+def inject_test_marker(settings: jobs.JobSettings, nodeid: str) -> jobs.JobSettings:
+    """Declare the `__pytest_test_id` job parameter with the test's node id as its default.
+
+    The default is the value of every run, so job code can read it to tell that it runs under test. A definition of
+    the same name in the template is replaced.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        nodeid: The node id of the test, trimmed to 4096 UTF-8 bytes.
+
+    Returns:
+        `settings`.
+    """
+    kept = [p for p in settings.parameters or [] if p.name != TEST_ID_PARAMETER]
+    marker = jobs.JobParameterDefinition(name=TEST_ID_PARAMETER, default=_trim(nodeid, MAX_PARAMETER_DEFAULT_BYTES))
+    settings.parameters = [*kept, marker]
     return settings
 
 

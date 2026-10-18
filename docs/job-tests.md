@@ -11,6 +11,18 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 
 - `key` is the bundle resource key of the job.
 - `params` are job parameters for every run of the copy. The job must declare them, because the Jobs API accepts undeclared parameters silently. Pass `allow_undeclared_params=True` to `Lakeflow` to allow them anyway. Names starting with `__pytest_` are reserved.
+
+    With `test_marker=True` on `Lakeflow`, every copy declares a `__pytest_test_id` job parameter whose default is the test node id, so job code can tell it is under test and skip or redirect side effects. It carries the node id like the `pytest_nodeid` tag, but job code can read it, and tests cannot pass it themselves:
+
+    ```python
+    # in a notebook of the job under test
+    try:
+        test_id = dbutils.widgets.get("__pytest_test_id")
+    except Exception:
+        test_id = None  # not under test
+    ```
+
+    Other task types can use the dynamic value reference `{{job.parameters.__pytest_test_id}}`.
 - `capture_task_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).

@@ -14,6 +14,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     create_kwargs,
     disable_tasks,
+    inject_test_marker,
     pipeline_params,
     run_job_tasks,
     sanitise,
@@ -242,6 +243,45 @@ def test_long_node_ids_fit_names_and_tags() -> None:
     value = settings.tags["pytest_nodeid"]
     assert len(value.encode()) <= 256
     assert value.startswith("tests/test_päth.py::test_rows[xxx")
+
+
+def test_inject_test_marker_declares_the_parameter() -> None:
+    settings = inject_test_marker(example_settings(), "tests/test_x.py::test_y")
+    assert settings.parameters == [
+        jobs.JobParameterDefinition(name="param1", default="hello"),
+        jobs.JobParameterDefinition(name="schema", default=""),
+        jobs.JobParameterDefinition(name="__pytest_test_id", default="tests/test_x.py::test_y"),
+    ]
+
+
+def test_inject_test_marker_replaces_a_template_definition() -> None:
+    settings = example_settings()
+    settings.parameters = [
+        jobs.JobParameterDefinition(name="__pytest_test_id", default="stale"),
+        *(settings.parameters or []),
+    ]
+    inject_test_marker(settings, "tests/test_x.py::test_y")
+    assert [(p.name, p.default) for p in settings.parameters or []] == [
+        ("param1", "hello"),
+        ("schema", ""),
+        ("__pytest_test_id", "tests/test_x.py::test_y"),
+    ]
+
+
+def test_inject_test_marker_on_a_job_without_parameters() -> None:
+    settings = example_settings()
+    settings.parameters = None
+    inject_test_marker(settings, "t.py::t")
+    assert settings.parameters == [jobs.JobParameterDefinition(name="__pytest_test_id", default="t.py::t")]
+
+
+def test_inject_test_marker_trims_a_long_node_id() -> None:
+    nodeid = "tests/test_päth.py::test_rows[" + "中" * 5000 + "]"
+    [*_, marker] = inject_test_marker(example_settings(), nodeid).parameters or []
+    assert marker.default is not None
+    assert len(marker.default.encode()) <= 4096
+    assert nodeid.startswith(marker.default)
+    assert marker.default.startswith("tests/test_päth.py::test_rows[中")
 
 
 def test_tag_value() -> None:

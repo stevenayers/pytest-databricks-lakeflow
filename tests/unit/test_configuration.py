@@ -71,6 +71,7 @@ def test_defaults() -> None:
     assert not lakeflow.single_node
     assert (lakeflow.environment_version, lakeflow.budget_policy_id, lakeflow.existing_cluster_id) == (None, None, None)
     assert not lakeflow.allow_undeclared_params
+    assert not lakeflow.test_marker
     assert lakeflow.sweep_hours == 24
     assert lakeflow.side_effects == "neutralise"
     assert (lakeflow.keep, lakeflow.keep_failed) == (False, True)
