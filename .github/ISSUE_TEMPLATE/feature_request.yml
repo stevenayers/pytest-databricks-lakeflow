@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest something the plugin should do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The test you want to write, or the workflow that is awkward today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What the API or behaviour would look like. A sketch of the test code helps.
+      render: python
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you tried, including `modify_settings` or the SDK directly.

@@ -5,52 +5,72 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   lint:
-    name: Lint and type check
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - run: uv run ruff check
       - run: uv run ruff format --check
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
       - run: uv run ty check
 
   test:
-    name: Unit tests (Python ${{ matrix.python }}, ${{ matrix.resolution }} dependencies)
+    name: Unit tests (Python ${{ matrix.python }}, ${{ matrix.resolution }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+        resolution: [highest]
         include:
-          # The oldest supported versions: Python 3.11, pytest 8, databricks-sdk 0.54, filelock 3.0.
+          # The oldest supported versions: Python 3.11, pytest 8, databricks-sdk 0.54, filelock 3.
           - python: "3.11"
             resolution: lowest-direct
-          - python: "3.11"
-            resolution: highest
-          - python: "3.14"
-            resolution: highest
     env:
       # Applies to the sync that every `uv run` does, so the lowest versions are not upgraded again.
       UV_RESOLUTION: ${{ matrix.resolution }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
@@ -59,15 +79,64 @@ jobs:
       - run: uv run python -c "import databricks.sdk.version as v, pytest; print('sdk', v.__version__, 'pytest', pytest.__version__)"
       - run: uv run pytest -m "not lakeflow"
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Codecov accepts the OIDC token instead of a stored upload token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      # `coverage run` starts before pytest imports the plugin, which `pytest --cov` would miss.
+      - run: uv run coverage run -m pytest -m "not lakeflow"
+      - run: uv run coverage xml
+      - run: uv run coverage report
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: coverage.xml
+          # Fork pull requests get no OIDC token, so a failed upload must not fail the build.
+          fail_ci_if_error: false
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - run: uv export --all-groups --all-extras --no-emit-project --format requirements.txt -o requirements.txt
+      - run: uv run --only-group audit pip-audit --disable-pip --require-hashes --strict -r requirements.txt
+
   # Runs the acceptance tests against examples/bundle in a real workspace. It needs the repository variables
-  # DATABRICKS_HOST and LAKEFLOW_CATALOG and the secrets DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET for a
-  # service principal, and is skipped until DATABRICKS_HOST is set.
+  # DATABRICKS_HOST and LAKEFLOW_CATALOG and, in the `integration` environment, the secrets DATABRICKS_CLIENT_ID and
+  # DATABRICKS_CLIENT_SECRET for a service principal. It is skipped until DATABRICKS_HOST is set.
   integration:
     name: Integration tests
-    needs: [lint, test]
+    needs: [lint, typecheck, test]
     if: github.event_name != 'pull_request' && vars.DATABRICKS_HOST != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+    # The service principal's secrets live in this environment, not at repository level.
+    environment: integration
     # One deployment of examples/bundle at a time: runs share the service principal's bundle root_path.
     concurrency:
       group: integration
@@ -79,17 +148,19 @@ jobs:
       LAKEFLOW_CATALOG: ${{ vars.LAKEFLOW_CATALOG }}
       LAKEFLOW_INTEGRATION: "1"
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: pyproject.toml
-      - uses: databricks/setup-cli@v1.7.0
+      - uses: databricks/setup-cli@2bf4520fd10723ed5a22eca62a8c8a63714a7ba9 # v1.21.0
       # tests/integration/conftest.py reads LAKEFLOW_CATALOG.
       - run: uv run pytest tests/integration -n 4 -rA --lakeflow-sweep --junitxml=integration.xml
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: integration-results
           path: integration.xml

@@ -9,3 +9,6 @@ __pycache__/
 .ruff_cache/
 dist/
 .databricks/
+site/
+coverage.xml
+.coverage

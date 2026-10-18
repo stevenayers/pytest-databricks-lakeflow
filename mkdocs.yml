@@ -1,0 +1,59 @@
+site_name: pytest-databricks-lakeflow
+site_description: Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest.
+site_url: https://stevenayers.github.io/pytest-databricks-lakeflow/
+repo_url: https://github.com/stevenayers/pytest-databricks-lakeflow
+repo_name: stevenayers/pytest-databricks-lakeflow
+edit_uri: edit/main/docs/
+copyright: Apache-2.0
+
+# Maintainer notes and stray files that live in docs/ but are not part of the site.
+exclude_docs: |
+  SPEC.md
+  notes.md
+  *.log
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Writing job tests: job-tests.md
+  - Writing task tests: task-tests.md
+  - Configuration: configuration.md
+  - How it works: how-it-works.md
+  - Limitations and FAQ: limitations.md
+  - API reference: api.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_root_full_path: false
+            separate_signature: true
+            show_signature_annotations: true
+            members_order: source
+            merge_init_into_class: true
+            filters: ["!^_"]
