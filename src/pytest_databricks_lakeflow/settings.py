@@ -28,6 +28,7 @@ STRIPPED = (
 TASK_STRIPPED = ("email_notifications", "webhook_notifications", "notification_settings")
 CREATE_PARAMETERS = frozenset(inspect.signature(jobs.JobsAPI.create).parameters) - {"self"}
 NAME_PREFIX = "[pytest] "
+RunAs = Literal["keep"] | str | jobs.JobRunAs | None
 MAX_NAME_BYTES = 4096
 MAX_TAG_BYTES = 256
 MAX_TAGS = 25
@@ -62,7 +63,7 @@ def sanitise(
     *,
     disable_auto_optimization: bool,
     performance_optimized: bool,
-    run_as: Literal["keep"] | str | jobs.JobRunAs | None = None,
+    run_as: RunAs = None,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 

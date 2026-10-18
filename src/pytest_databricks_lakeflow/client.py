@@ -21,7 +21,7 @@ from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.results import JobRun
-from pytest_databricks_lakeflow.settings import Helpers, check_params, inject_probes, sanitise, wrap_task
+from pytest_databricks_lakeflow.settings import Helpers, RunAs, check_params, inject_probes, sanitise, wrap_task
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -157,7 +157,7 @@ class Lakeflow:
         params: Mapping[str, str] | None = None,
         capture_task_values: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
-        run_as: Literal["keep"] | str | jobs.JobRunAs | None = None,
+        run_as: RunAs = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -190,7 +190,7 @@ class Lakeflow:
         params: Mapping[str, str] | None = None,
         upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
         capture_task_values: Sequence[str] | None = None,
-        run_as: Literal["keep"] | str | jobs.JobRunAs | None = None,
+        run_as: RunAs = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -292,7 +292,7 @@ class Lakeflow:
         capture_task_values: Mapping[str, Sequence[str]] | None,
         stubs: Collection[str],
         name: str | None,
-        run_as: Literal["keep"] | str | jobs.JobRunAs | None,
+        run_as: RunAs,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
