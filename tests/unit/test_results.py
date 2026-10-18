@@ -27,7 +27,7 @@ def task(key: str, state: str | None = "SUCCESS", **kwargs: Any) -> TaskRun:
     )
 
 
-def job_run(tasks: list[TaskRun], skipped: list[TaskRun] | None = None) -> JobRun:
+def job_run(tasks: list[TaskRun], skipped: list[TaskRun] | None = None, **kwargs: Any) -> JobRun:
     return JobRun(
         job_key="my_job",
         job_id=1,
@@ -40,6 +40,7 @@ def job_run(tasks: list[TaskRun], skipped: list[TaskRun] | None = None) -> JobRu
         tasks={t.task_key: t for t in tasks},
         injected_tasks={},
         skipped_tasks={t.task_key: t for t in skipped or []},
+        **kwargs,
     )
 
 
@@ -122,6 +123,30 @@ def test_reprs_are_short_and_name_failures() -> None:
     failing = "failing=['b: PermissionError: denied', 'c: UPSTREAM_FAILED']"
     assert repr(run) == f"JobRun('my_job', SUCCESS, https://example.com/run, {failing})"
     assert repr(run.task("b")) == "TaskRun('b', FAILED, error='PermissionError: denied', https://example.com/b)"
+
+
+def test_failed_reprs_show_parameters() -> None:
+    error = TaskError(type="ValueError", message="bad date", trace="")
+    failed = task("b", "FAILED", error=error, parameters={"date": "2026-10-01"})
+    run = job_run([task("a"), failed], parameters={"date": "2026-10-01"})
+    assert repr(run) == (
+        "JobRun('my_job', SUCCESS, https://example.com/run, params={'date': '2026-10-01'}, "
+        "failing=['b: ValueError: bad date'])"
+    )
+    assert repr(failed) == (
+        "TaskRun('b', FAILED, error='ValueError: bad date', params={'date': '2026-10-01'}, https://example.com/b)"
+    )
+    jar = task("c", "FAILED", error=error, parameters=["--date", "2026-10-01"])
+    assert "params=['--date', '2026-10-01']" in repr(jar)
+
+
+def test_successful_reprs_hide_parameters() -> None:
+    ok = task("a", parameters={"date": "2026-10-01"})
+    run = job_run([ok], parameters={"date": "2026-10-01"})
+    assert repr(run) == "JobRun('my_job', SUCCESS, https://example.com/run, failing=[])"
+    assert repr(ok) == "TaskRun('a', SUCCESS, https://example.com/a)"
+    assert "params" not in repr(task("b", "UPSTREAM_FAILED", parameters={"date": "x"}))
+    assert "params" not in repr(job_run([task("c", "FAILED", error=TaskError(None, "boom", ""))]))
 
 
 def test_did_not_run_states() -> None:

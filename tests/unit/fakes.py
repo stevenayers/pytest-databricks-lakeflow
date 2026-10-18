@@ -30,6 +30,7 @@ class FakeJobs:
         self.polls: dict[int, list[jobs.Run]] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
         self.output_calls: list[int] = []
+        self.get_run_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.list_calls = 0
         self._ids = itertools.count(1000)
@@ -95,7 +96,8 @@ class FakeJobs:
             self.tokens[idempotency_token] = run_id
         return SimpleNamespace(response=jobs.RunNowResponse(run_id=run_id))
 
-    def get_run(self, run_id: int) -> jobs.Run:
+    def get_run(self, run_id: int, **kwargs: Any) -> jobs.Run:
+        self.get_run_calls.append({"run_id": run_id, **kwargs})
         polls = self.polls[run_id]
         return polls.pop(0) if len(polls) > 1 else polls[0]
 
