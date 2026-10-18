@@ -94,7 +94,9 @@ Each `TaskRun` has:
 - `upstream_failed`, `disabled` and `cancelled`, true when the task ended exactly `UPSTREAM_FAILED`, `DISABLED` or `CANCELED`. `UPSTREAM_CANCELED` sets none of them; `ran` is false for all of these states.
 - `condition_outcome`, for an if/else condition task: `True` when the condition held, `False` when it did not, and `None` for any other task. See [Branches](#branches).
 - `termination_code` and `termination_message`, from the task's termination details.
-- `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON.
+- `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
+- The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
+- `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
@@ -102,6 +104,20 @@ Each `TaskRun` has:
 - `duration`, `attempt` and `run_url`.
 - `timing`, a `Timing` with the `queue`, `setup`, `execution` and `cleanup` durations the platform reported and their `total`, and `effective_performance_target`, `STANDARD` or `PERFORMANCE_OPTIMIZED`. `JobRun` has both as well; a run with several tasks reports zero durations on the parent run, so read them on the tasks. A duration the platform did not report is zero, and a performance target it did not report is `None`.
 - `attempts`, one `TaskRun` per attempt in attempt order, when the platform retried the task. The task itself describes the last attempt, and `attempts[-1]` equals it apart from `attempts`. Each element has its own `run_id`, `error` and `output`, and an empty `attempts`.
+
+A test of a job with a SQL query, an alert and a run-job task reads like this:
+
+```python
+def test_alert_triggers_and_child_job_runs(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_reporting_job") as job:
+        run = job.run().raise_for_failure()
+        query = run.task("daily_query").sql_output
+        assert query is not None and query.query_output is not None
+        assert query.query_output.warehouse_id == "abc123"
+        assert run.task("check").alert_state == "TRIGGERED"
+        child = run.task("trigger").run_job_output
+        assert child is not None and child.run_id is not None
+```
 
 `run.timed_out` is true when the parent run ended `TIMEDOUT` or any task in `run.tasks` timed out. Such a run has failed, and `repr(run)` lists a timed-out task without an error as `load: TIMEDOUT`.
 
