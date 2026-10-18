@@ -53,7 +53,7 @@ def test_run_as_string_picks_user_or_service_principal(value: str, expected: job
 
 
 def test_run_as_object_is_used_as_is() -> None:
-    run_as = jobs.JobRunAs(group_name="g")
+    run_as = jobs.JobRunAs(service_principal_name="1111-object-id")
     assert sanitised(run_as=run_as).run_as is run_as
 
 

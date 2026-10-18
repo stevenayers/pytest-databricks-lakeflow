@@ -670,7 +670,7 @@ def test_run_as_keep_on_job_and_task(pytester: pytest.Pytester, fake_ws: FakeWor
             ).create()
             lakeflow.job("my_job", run_as="0000-app-id").create()
             lakeflow.job("my_job", run_as="me@example.com").create()
-            lakeflow.job("my_job", run_as=jobs.JobRunAs(group_name="g")).create()
+            lakeflow.job("my_job", run_as=jobs.JobRunAs(service_principal_name="1111-object-id")).create()
         """,
     )
     result.assert_outcomes(passed=1)
@@ -680,7 +680,7 @@ def test_run_as_keep_on_job_and_task(pytester: pytest.Pytester, fake_ws: FakeWor
         template,
         jobs.JobRunAs(service_principal_name="0000-app-id"),
         jobs.JobRunAs(user_name="me@example.com"),
-        jobs.JobRunAs(group_name="g"),
+        jobs.JobRunAs(service_principal_name="1111-object-id"),
     ]
 
 
