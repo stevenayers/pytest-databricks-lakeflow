@@ -7,10 +7,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import bundle, ephemeral, session
 
 from .fakes import FakeWorkspaceClient, example_settings
+
+NEEDS_REFRESH_SELECTION = pytest.mark.skipif(
+    "refresh_selection" not in jobs.PipelineParams.__dataclass_fields__,
+    reason="this databricks-sdk has no PipelineParams.refresh_selection",
+)
 
 LAKEFLOW_CONFTEST = """
 from datetime import timedelta
