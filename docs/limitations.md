@@ -19,7 +19,7 @@
 - **`single_node` needs dedicated access mode.** Single node compute does not support standard access mode, so `Lakeflow(single_node=True)` raises `LakeflowError` naming the first job cluster or task cluster whose `data_security_mode` is `USER_ISOLATION` or `DATA_SECURITY_MODE_STANDARD`. It sets the explicit single node fields, not `kind` and `is_single_node`, and was not run against a workspace with classic compute.
 - **Standard (shared) access mode** classic clusters were not tested. There, task values set from wheel or script tasks may be silently lost.
 - **Run Job tasks run the deployed child job.** The copy keeps `run_job_task.job_id` as deployed, so a test of a parent job starts a real run of the child, with the child's `run_as` and notifications, which is not cancelled or deleted with the ephemeral job. `lakeflow.job()` and `lakeflow.task()` warn about each such task that is not disabled and not inside a disabled loop; `children="refuse"` raises `LakeflowError` instead, before anything is created. `TaskRun.child_run_id` gives the id of the child's run. Copying or stubbing the child is not supported yet.
-- **Names starting with `__pytest_`** are reserved for the plugin's tasks, environments, widgets and parameters.
+- **Names starting with `__pytest_`** are reserved for the plugin's tasks, environments, widgets and parameters, such as the `__pytest_test_id` job parameter that `test_marker=True` declares. Tests cannot pass them as `params`.
 
 ## FAQ
 

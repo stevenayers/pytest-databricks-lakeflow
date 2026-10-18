@@ -185,6 +185,20 @@ def test_permissions_are_applied(lakeflow: Lakeflow) -> None:
         assert jobs.JobPermissionLevel.CAN_MANAGE_RUN in levels
 
 
+def test_test_marker_is_accepted_by_the_api(lakeflow: Lakeflow, request: pytest.FixtureRequest) -> None:
+    marked = dataclasses.replace(lakeflow, test_marker=True)
+    with marked.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
+        assert job.job_id is not None
+        settings = marked.ws.jobs.get(job.job_id).settings
+        parameters = {p.name: p.default for p in (settings.parameters if settings else None) or []}
+        assert parameters["__pytest_test_id"] == request.node.nodeid
+        run = job.run()
+        assert run.succeeded, run
+        assert "__pytest_test_id" not in run.parameters
+        values = {p.name: p.value or p.default for p in marked.ws.jobs.get_run(run.run_id).job_parameters or []}
+        assert values["__pytest_test_id"] == request.node.nodeid
+
+
 def test_run_as_keep_runs_the_example_job(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}, run_as="keep") as job:
         assert job.run().succeeded
