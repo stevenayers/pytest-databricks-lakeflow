@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 from databricks.sdk.service import jobs
@@ -41,6 +42,12 @@ def test_with_block_creates_runs_and_deletes(pytester: pytest.Pytester, fake_ws:
     assert call["job_parameters"] == {"param1": "hi", "schema": "s"}
     assert call["only"] is None
     assert fake_ws.jobs.deleted == [call["job_id"]]
+
+
+def test_run_requests_resolved_values(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n').assert_outcomes(passed=1)
+    assert fake_ws.jobs.get_run_calls
+    assert all(call.get("include_resolved_values") is True for call in fake_ws.jobs.get_run_calls)
 
 
 def test_failure_inside_with_keeps_the_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
@@ -184,7 +191,7 @@ def test_timeout_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspace
 def test_exit_cancels_active_runs(
     pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken(run_id: int) -> jobs.Run:
+    def broken(run_id: int, **kwargs: Any) -> jobs.Run:
         raise RuntimeError("network down")
 
     fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))

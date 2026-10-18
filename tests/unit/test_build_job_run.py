@@ -200,3 +200,67 @@ def test_no_warning_without_truncation() -> None:
         warnings.simplefilter("always")
         build("probe_success", capture_task_values=CAPTURE)
     assert record == []
+
+
+def test_job_parameters_are_resolved() -> None:
+    run, _ = build("probe_failure")
+    assert run.parameters == {"param1": "explode", "param2": "world", "mode": "full", "schema": ""}
+
+
+def test_job_parameters_default_to_empty() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"a": "SUCCESS"})
+    assert run.job_parameters is None
+    assert build_from(ws, run).parameters == {}
+
+
+def test_task_parameters_from_resolved_values() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"transform": "SUCCESS", "jar": "SUCCESS", "plain": "SUCCESS"})
+    assert run.tasks is not None
+    notebook = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
+    run.tasks[0].resolved_values = jobs.ResolvedValues(notebook_task=notebook)
+    jar = jobs.ResolvedStringParamsValues(parameters=["--date", "2026-10-01"])
+    run.tasks[1].resolved_values = jobs.ResolvedValues(spark_jar_task=jar)
+    result = build_from(ws, run)
+    assert result.task("transform").parameters == {"row_count": "7"}
+    assert result.task("jar").parameters == ["--date", "2026-10-01"]
+    assert result.task("plain").parameters is None
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        (jobs.ResolvedValues(sql_task=jobs.ResolvedParamPairValues(parameters={"a": "1"})), {"a": "1"}),
+        (
+            jobs.ResolvedValues(python_wheel_task=jobs.ResolvedPythonWheelTaskValues(named_parameters={"b": "2"})),
+            {"b": "2"},
+        ),
+        (jobs.ResolvedValues(python_wheel_task=jobs.ResolvedPythonWheelTaskValues(parameters=["x"])), ["x"]),
+        (jobs.ResolvedValues(run_job_task=jobs.ResolvedRunJobTaskValues(job_parameters={"c": "3"})), {"c": "3"}),
+        (jobs.ResolvedValues(spark_python_task=jobs.ResolvedStringParamsValues(parameters=["p"])), ["p"]),
+        (jobs.ResolvedValues(spark_submit_task=jobs.ResolvedStringParamsValues(parameters=["s"])), ["s"]),
+        (jobs.ResolvedValues(dbt_task=jobs.ResolvedDbtTaskValues(commands=["dbt run"])), ["dbt run"]),
+        (jobs.ResolvedValues(condition_task=jobs.ResolvedConditionTaskValues(left="1", right="2")), None),
+        (jobs.ResolvedValues(), None),
+    ],
+)
+def test_task_parameters_of_each_task_type(resolved: jobs.ResolvedValues, expected: object) -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"t": "SUCCESS"})
+    assert run.tasks is not None
+    run.tasks[0].resolved_values = resolved
+    assert build_from(ws, run).task("t").parameters == expected
+
+
+def test_reserved_job_parameters_are_hidden() -> None:
+    ws = FakeWorkspaceClient()
+    run = make_run(1, {"a": "SUCCESS"})
+    run.job_parameters = [
+        jobs.JobParameter(name="__pytest_values", default="{}", value='{"k": 1}'),
+        jobs.JobParameter(name="date", default="2026-01-01"),
+        jobs.JobParameter(default="nameless"),
+    ]
+    parameters = build_from(ws, run).parameters
+    assert parameters == {"date": "2026-01-01"}
+    assert not any(key.startswith("__pytest_") for key in parameters)

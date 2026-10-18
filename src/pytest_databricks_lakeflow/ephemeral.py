@@ -188,7 +188,7 @@ class EphemeralJob:
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
         while True:
-            run = ws.jobs.get_run(run_id)
+            run = ws.jobs.get_run(run_id, include_resolved_values=True)
             if run_id not in self._run_urls and run.run_page_url:
                 self._run_urls[run_id] = run.run_page_url
                 item.user_properties.append(("lakeflow_run_url", run.run_page_url))
