@@ -57,6 +57,8 @@ Do not use `run.result_state`, the parent run's state, as the verdict. A job wit
 
 `run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` are in `run.skipped_tasks`, and the plugin's stubs and probes in `run.injected_tasks`.
 
+`run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out.
+
 Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`.
@@ -65,6 +67,7 @@ Each `TaskRun` has:
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
+- `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. Job parameters win over task parameters with the same key, and this shows which value the task ended up with.
 - `duration`, `attempt` and `run_url`.
 
 A failure test reads like this:
@@ -81,7 +84,7 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
 
 `raised()` compares class names, because the exception happened in another process. `error.type` keeps the name as Python printed it, so `json.decoder.JSONDecodeError` matches `raised(json.JSONDecodeError)`.
 
-`repr(run)` names the failing tasks with the first line of their errors and links to the run, so `assert run.succeeded, run` gives a useful failure message.
+`repr(run)` names the failing tasks with the first line of their errors and links to the run, so `assert run.succeeded, run` gives a useful failure message. When the run failed, it also prints `params={...}`, the run's job parameters, and `repr()` of a task with an error prints the task's `parameters`. Reprs of successful runs and tasks leave them out.
 
 `run.raise_for_failure()` gives the full detail in one call. It returns the run when `run.succeeded` is true, so `run = job.run().raise_for_failure()` works, and otherwise raises `LakeflowRunFailed`. The message is `repr(run)` followed by one line per failing task with its whole error, its root cause when there is one, and its run URL. The exception's `run` attribute holds the `JobRun`.
 

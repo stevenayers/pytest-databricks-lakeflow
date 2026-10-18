@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -211,7 +211,7 @@ def test_destroy_runs_after_interrupted_tests_are_cleaned_up(
         if len(args) > 1:
             order.append(f"cli {args[1]} deleted={fake_ws.jobs.deleted}")
 
-    def interrupted(run_id: int) -> jobs.Run:
+    def interrupted(run_id: int, **kwargs: Any) -> jobs.Run:
         raise KeyboardInterrupt
 
     fake_cli.before = record

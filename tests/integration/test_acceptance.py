@@ -25,6 +25,10 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         assert run.succeeded
         assert run.task("transform").output == "hello world"
         assert "Success! hello" in run.task("my_wheel_task").logs
+        assert run.parameters["param1"] == "hello"
+        transform = run.task("transform").parameters
+        assert isinstance(transform, dict)
+        assert transform["row_count"] == "7"
 
 
 def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:

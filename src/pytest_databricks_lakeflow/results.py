@@ -151,6 +151,11 @@ class TaskRun:
         task_values: Task values captured by a probe.
         missing_task_values: Keys that were requested from the probe but not captured.
         attempt: The attempt number, 0 for the first attempt.
+        parameters: The task's parameters after job parameters and `{{...}}` references were resolved. A dict for
+            notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named
+            parameters; a list for Python wheel tasks with positional parameters, Python script, JAR and
+            spark-submit tasks, and dbt tasks (`commands`); `None` for other task types or when the platform
+            reported no resolved values.
     """
 
     task_key: str
@@ -168,6 +173,7 @@ class TaskRun:
     task_values: TaskValues = field(default_factory=TaskValues)
     missing_task_values: list[str] = field(default_factory=list)
     attempt: int = 0
+    parameters: dict[str, str] | list[str] | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -217,7 +223,8 @@ class TaskRun:
 
     def __repr__(self) -> str:
         error = f", error={_first_line(str(self.error))!r}" if self.error else ""
-        return f"TaskRun({self.task_key!r}, {self.result_state}{error}, {self.run_url})"
+        params = f", params={self.parameters!r}" if self.error and self.parameters is not None else ""
+        return f"TaskRun({self.task_key!r}, {self.result_state}{error}{params}, {self.run_url})"
 
 
 @dataclass(frozen=True)
@@ -237,6 +244,8 @@ class JobRun:
         tasks: The user's tasks that were part of the run, by task key.
         injected_tasks: The stub and probe tasks added by the plugin, by task key.
         skipped_tasks: Tasks left out by `only`, by task key.
+        parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
+            Parameters the plugin injects are left out.
     """
 
     job_key: str
@@ -250,6 +259,7 @@ class JobRun:
     tasks: dict[str, TaskRun]
     injected_tasks: dict[str, TaskRun]
     skipped_tasks: dict[str, TaskRun] = field(default_factory=dict)
+    parameters: dict[str, str] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
@@ -304,7 +314,9 @@ class JobRun:
         return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
 
     def __repr__(self) -> str:
-        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, failing={describe_failing(self)})"
+        failing = describe_failing(self)
+        params = f"params={self.parameters!r}, " if failing and self.parameters else ""
+        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, {params}failing={failing})"
 
 
 def describe_failing(run: JobRun) -> list[str]:
@@ -363,7 +375,16 @@ def build_job_run(
         tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
         injected_tasks=injected,
         skipped_tasks={key: t for key, t in user.items() if t.result_state == "DISABLED"},
+        parameters=_job_parameters(run.job_parameters),
     )
+
+
+def _job_parameters(parameters: Sequence[jobs.JobParameter] | None) -> dict[str, str]:
+    return {
+        p.name: p.value if p.value is not None else p.default or ""
+        for p in parameters or []
+        if p.name and not p.name.startswith(PREFIX)
+    }
 
 
 def _outputs(ws: WorkspaceClient, tasks: list[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
@@ -404,7 +425,28 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         logs_truncated=bool(out.logs_truncated),
         error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
         attempt=task.attempt_number or 0,
+        parameters=_parameters(task.resolved_values),
     )
+
+
+def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[str] | None:
+    if resolved is None:
+        return None
+    if resolved.notebook_task is not None:
+        return resolved.notebook_task.base_parameters
+    if resolved.sql_task is not None:
+        return resolved.sql_task.parameters
+    if resolved.python_wheel_task is not None:
+        wheel = resolved.python_wheel_task
+        return wheel.named_parameters if wheel.named_parameters is not None else wheel.parameters
+    if resolved.run_job_task is not None:
+        return resolved.run_job_task.job_parameters
+    for strings in (resolved.spark_jar_task, resolved.spark_python_task, resolved.spark_submit_task):
+        if strings is not None:
+            return strings.parameters
+    if resolved.dbt_task is not None:
+        return resolved.dbt_task.commands
+    return None
 
 
 def _with_values(target: TaskRun, probe: TaskRun | None, keys: Sequence[str]) -> TaskRun:
