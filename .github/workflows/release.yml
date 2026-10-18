@@ -1,8 +1,8 @@
 name: Release
 
-# Publishes to PyPI for a version tag such as v0.2.0. release-please.yml dispatches this workflow for the tag
-# it creates when a release PR is merged, because tags pushed with the workflow token do not trigger `push`
-# events. A tag pushed by hand (`git tag vX.Y.Z && git push origin vX.Y.Z`) triggers it directly. The tag must
+# Publishes to PyPI for a version tag such as v0.2.0. release-please.yml creates the tag with the release App's
+# token when a release PR merges, and that tag push starts this workflow. A tag pushed by hand
+# (`git tag vX.Y.Z && git push origin vX.Y.Z`) starts it the same way. The tag must
 # match the version in pyproject.toml. The build job lints and unit-tests the tagged commit before building, so a
 # release does not depend on the CI run on main having finished. Publishing uses PyPI trusted publishing (OIDC):
 # the trusted publisher on PyPI is this file, release.yml, with the environment `pypi`. No API token is stored in
