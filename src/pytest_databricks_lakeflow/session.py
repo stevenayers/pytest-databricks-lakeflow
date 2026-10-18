@@ -7,6 +7,7 @@ import os
 import secrets
 import subprocess
 import time
+import urllib.parse
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -123,7 +124,8 @@ class SessionState:
             sweep_hours: The age after which leftover jobs are swept.
 
         Returns:
-            The target's state: its job templates, the errors of jobs that cannot be used, and the helper paths.
+            The target's state: its job templates, the errors of jobs that cannot be used, the helper paths, and the
+                workspace user.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -138,15 +140,16 @@ class SessionState:
                 return setup(ws, key)
 
             try:
-                self.setups[key] = shared_state(path, produce)
+                produced_state = shared_state(path, produce)
             except Exception as e:
                 self.setups[key] = e
                 raise
+            self.setups[key] = produced_state
             if key.sync == "deploy":
                 self.deployed.append((str(key.root), key.target, key.profile))
             if produced and self.sweep and not self.swept:
                 self.swept = True
-                sweep(ws, self.run_id, sweep_hours)
+                sweep(ws, self.run_id, sweep_hours, user=produced_state.get("user"))
         state = self.setups[key]
         if isinstance(state, Exception):
             raise LakeflowError(
@@ -226,7 +229,7 @@ def resolve_attribution(rootpath: Path) -> dict[str, str]:
         ci_url = f"{server.rstrip('/')}/{repository}/actions/runs/{run_id}"
     elif all(env.get(name) for name in AZURE_DEVOPS_URL_VARIABLES):
         collection, project, build_id = (env[name] for name in AZURE_DEVOPS_URL_VARIABLES)
-        ci_url = f"{collection}{project}/_build/results?buildId={build_id}"
+        ci_url = f"{collection}{urllib.parse.quote(project)}/_build/results?buildId={build_id}"
     attribution = {
         "pytest_ci_url": ci_url,
         "pytest_git_sha": _first(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
@@ -382,18 +385,19 @@ def exists(ws: WorkspaceClient, path: str) -> bool:
     return True
 
 
-def sweep(ws: WorkspaceClient, run_id: str, hours: float) -> list[int]:
+def sweep(ws: WorkspaceClient, run_id: str, hours: float, user: str | None = None) -> list[int]:
     """Delete this user's ephemeral jobs from other runs that are older than `hours`.
 
     Args:
         ws: The workspace client.
         run_id: The id of this run, whose jobs are kept.
         hours: The age after which a job is deleted.
+        user: The workspace user whose jobs are swept. Looked up when not given.
 
     Returns:
         The ids of the deleted jobs.
     """
-    me = ws.current_user.me().user_name
+    me = user or ws.current_user.me().user_name
     cutoff = (time.time() - hours * 3600) * 1000
     stale = [
         job.job_id

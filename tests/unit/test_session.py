@@ -122,6 +122,12 @@ def test_attribution_from_azure_devops(monkeypatch: pytest.MonkeyPatch, tmp_path
     }
 
 
+def test_attribution_quotes_the_azure_devops_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    set_ci(monkeypatch, {**AZURE_DEVOPS, "SYSTEM_TEAMPROJECT": "My Project"})
+    url = session.resolve_attribution(tmp_path)["pytest_ci_url"]
+    assert url == "https://dev.azure.com/org/My%20Project/_build/results?buildId=42"
+
+
 def test_attribution_from_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     set_ci(monkeypatch, {})
     sha = make_repository(tmp_path)
