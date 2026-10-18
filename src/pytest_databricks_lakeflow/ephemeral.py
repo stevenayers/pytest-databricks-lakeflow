@@ -39,7 +39,7 @@ class EphemeralJob:
         job_key: The bundle resource key of the job it copies.
         settings: The settings the job is created with.
         params: Job parameters for every run.
-        capture_values: The task value keys captured by probes, by task key.
+        capture_task_values: The task value keys captured by probes, by task key.
         stubs: Keys of the stub tasks.
         job_id: The job's id, once created.
         runs: The outcome of each finished run, in order.
@@ -51,14 +51,14 @@ class EphemeralJob:
         job_key: str,
         settings: jobs.JobSettings,
         params: Mapping[str, str] | None = None,
-        capture_values: Mapping[str, Sequence[str]] | None = None,
+        capture_task_values: Mapping[str, Sequence[str]] | None = None,
         stubs: Collection[str] = (),
     ) -> None:
         self.lakeflow = lakeflow
         self.job_key = job_key
         self.settings = settings
         self.params = dict(params or {})
-        self.capture_values = {key: list(keys) for key, keys in (capture_values or {}).items()}
+        self.capture_task_values = {key: list(keys) for key, keys in (capture_task_values or {}).items()}
         self.stubs = frozenset(stubs)
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
@@ -139,7 +139,12 @@ class EphemeralJob:
         run = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
         self._forget(run_id)
         result = build_job_run(
-            ws, run, job_key=self.job_key, job_id=self.job_id, stubs=self.stubs, capture_values=self.capture_values
+            ws,
+            run,
+            job_key=self.job_key,
+            job_id=self.job_id,
+            stubs=self.stubs,
+            capture_task_values=self.capture_task_values,
         )
         self.runs.append(result)
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)

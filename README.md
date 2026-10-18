@@ -71,7 +71,7 @@ def lakeflow() -> Lakeflow:
 
 ## Testing one task
 
-`lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_values` is replaced by a stub task that sets those task values, and `capture_values` adds a probe task that reports the values the task set, even when it failed.
+`lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_task_values` is replaced by a stub task that sets those task values, and `capture_task_values` adds a probe task that reports the values the task set, even when it failed.
 
 ```python
 import pytest
@@ -84,13 +84,13 @@ def test_transform(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
     with lakeflow.task(
         "my_example_job.transform",
         params={"param1": greeting, "param2": "world"},
-        upstream_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-        capture_values=["rows_written"],
+        upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+        capture_task_values=["rows_written"],
     ) as task:
         run = task.run()
         assert run.succeeded
         assert run.task("transform").output == expected
-        assert run.task("transform").values["rows_written"] == 42
+        assert run.task("transform").task_values["rows_written"] == 42
 ```
 
 Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")` and `{{tasks.extract.values.row_count}}` resolve against the stub. Reading a value the task never set raises a `KeyError` that says so.

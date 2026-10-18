@@ -53,7 +53,8 @@ def test_wrap_task_without_upstream_or_capture() -> None:
 
 
 def test_wrap_task_needs_stubs_for_referenced_values() -> None:
-    with pytest.raises(LakeflowError, match=r"refers to task values of \['extract'\].*Pass them in upstream_values"):
+    expected = r"refers to task values of \['extract'\].*Pass them in upstream_task_values"
+    with pytest.raises(LakeflowError, match=expected):
         wrap_task(example_settings(), "transform", {}, [], HELPERS)
 
 
@@ -124,14 +125,14 @@ def test_single_task_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspac
             with lakeflow.task(
                 "my_job.transform",
                 params={"param1": "hello"},
-                upstream_values={"extract": {"row_count": 42}},
-                capture_values=["stage", "rows_written"],
+                upstream_task_values={"extract": {"row_count": 42}},
+                capture_task_values=["stage", "rows_written"],
             ) as task:
                 run = task.run()
             assert run.succeeded
             assert sorted(run.tasks) == ["transform"]
             assert sorted(run.injected_tasks) == ["__pytest_probe__transform", "extract"]
-            assert run.task("transform").values == {"stage": "done", "rows_written": 7}
+            assert run.task("transform").task_values == {"stage": "done", "rows_written": 7}
 
         def test_bad_reference(lakeflow):
             with pytest.raises(KeyError, match="No job 'nope'"):
@@ -147,15 +148,16 @@ def test_single_task_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspac
     assert created["environments"][-1].environment_key == ENV_KEY
 
 
-def test_job_capture_values_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+def test_job_capture_task_values_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     fake_ws.jobs.queue(*recorded("probe_failure"))
     pytester.makepyfile(
         """
         def test_job(lakeflow):
-            with lakeflow.job("my_job", params={"param1": "explode"}, capture_values={"transform": ["stage"]}) as job:
+            captured = {"transform": ["stage"]}
+            with lakeflow.job("my_job", params={"param1": "explode"}, capture_task_values=captured) as job:
                 run = job.run()
             assert run.failed
-            assert run.task("transform").values["stage"] == "validation"
+            assert run.task("transform").task_values["stage"] == "validation"
             assert run.task("transform").raised(ValueError)
         """
     )
@@ -169,7 +171,7 @@ def test_helper_settings_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeW
     pytester.makepyfile(
         """
         def test_job(lakeflow):
-            with lakeflow.job("my_job", capture_values={"load": ["k"]}):
+            with lakeflow.job("my_job", capture_task_values={"load": ["k"]}):
                 pass
         """
     )
