@@ -107,6 +107,18 @@ The entries go to `jobs.create` unchanged, so they take `user_name`, `group_name
 
 The plugin logs to the `pytest_databricks_lakeflow` logger: INFO when it deploys, creates a job, starts and finishes a run, and deletes a job or drops a schema; WARNING when it keeps something or a cleanup call fails. Show the INFO lines with `pytest --log-cli-level=INFO`.
 
+While `run()` waits, every poll logs a line at INFO for each task run whose state changed, the plugin's stub and probe tasks included. A task run seen for the first time logs its state on its own; a later change logs the old and new state. The state is the V2 lifecycle state, such as `PENDING`, `QUEUED` or `RUNNING`, until the task run terminates, and its result state after that. A terminated task run adds its duration and the first line of its error, if it reported one:
+
+```text
+extract: PENDING
+transform: PENDING
+extract: PENDING -> SUCCESS in 0:00:31
+transform: PENDING -> RUNNING
+transform: RUNNING -> FAILED in 0:00:42 ValueError: no rows
+```
+
+A retried task run is labelled with its attempt, such as `transform (attempt 1): PENDING`. A task that has already terminated when it is first seen logs one line with its final state. The output of each task run is read once, as soon as it has terminated, which supplies the error for the line and is reused when the `JobRun` is built.
+
 Each test's job and run coordinates are appended to `item.user_properties`, so they appear as JUnit XML properties:
 
 | Property | Added | Value |
@@ -121,7 +133,7 @@ Each test's job and run coordinates are appended to `item.user_properties`, so t
 
 A job that runs more than once adds a set of run properties for each run. `lakeflow_failing` is added whenever the run failed, also when the test expects the failure.
 
-The same lines are attached as a `lakeflow` section to the setup, call and teardown reports of the test, so a job created in a fixture whose setup fails still shows its URL in the error. A test that fails in both call and teardown shows the section twice.
+The same lines are attached as a `lakeflow` section to the setup, call and teardown reports of the test, so a job created in a fixture whose setup fails still shows its URL in the error. The task state lines of every run follow the property lines in that section. They are recorded as they are logged, so a run that raises `LakeflowTimeout` still shows what its tasks did before the deadline. The section is shown for a failed test, and for every test with `-rA`. A test that fails in both call and teardown shows the section twice.
 
 At the end of the session, a `lakeflow` block in the terminal summary lists every kept job with its URL, every kept schema, and the number of runs cancelled at session end, followed by a reminder of `--lakeflow-sweep` when jobs were kept:
 

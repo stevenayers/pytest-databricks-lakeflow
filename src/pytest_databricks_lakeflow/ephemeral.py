@@ -14,7 +14,15 @@ from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
-from pytest_databricks_lakeflow.results import JobRun, build_job_run, describe_failing
+from pytest_databricks_lakeflow.results import (
+    JobRun,
+    build_job_run,
+    describe_failing,
+    duration,
+    error_line,
+    fetch_outputs,
+    has_output,
+)
 from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, select
 
 if TYPE_CHECKING:
@@ -26,6 +34,12 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 
 POLL_SECONDS = 2.0
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
+PROGRESS = pytest.StashKey[list[str]]()
+TERMINAL_LIFE_CYCLE = (
+    jobs.RunLifeCycleState.TERMINATED,
+    jobs.RunLifeCycleState.SKIPPED,
+    jobs.RunLifeCycleState.INTERNAL_ERROR,
+)
 
 
 class EphemeralJob:
@@ -164,7 +178,7 @@ class EphemeralJob:
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
         log.debug("Run %s was started with idempotency token %s", run_id, token)
-        run = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
+        run, outputs = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
         self._forget(run_id)
         result = build_job_run(
             ws,
@@ -174,6 +188,7 @@ class EphemeralJob:
             stubs=self.stubs,
             capture_task_values=self.capture_task_values,
             disabled={t.task_key for t in self.settings.tasks or [] if t.disabled and t.task_key},
+            outputs=outputs,
         )
         self.runs.append(result)
         item.user_properties.extend(
@@ -199,16 +214,20 @@ class EphemeralJob:
                 "Lakeflow(timeout=...), which sets the job's timeout, or a shorter run timeout."
             )
 
-    def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> jobs.Run:
+    def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
+        seen: dict[tuple[str, int], str | None] = {}
+        outputs: dict[int, jobs.RunOutput] = {}
+        progress = item.stash.setdefault(PROGRESS, [])
         while True:
             run = ws.jobs.get_run(run_id, include_resolved_values=True)
             if run_id not in self._run_urls and run.run_page_url:
                 self._run_urls[run_id] = run.run_page_url
                 item.user_properties.append(("lakeflow_run_url", run.run_page_url))
+            self._log_progress(run, seen, outputs, progress)
             if _terminated(run):
-                return run
+                return run, outputs
             if time.monotonic() >= deadline:
                 self._cancel(run_id)
                 raise LakeflowTimeout(
@@ -216,6 +235,35 @@ class EphemeralJob:
                     f"{run.run_page_url}"
                 )
             time.sleep(POLL_SECONDS)
+
+    def _log_progress(
+        self,
+        run: jobs.Run,
+        seen: dict[tuple[str, int], str | None],
+        outputs: dict[int, jobs.RunOutput],
+        progress: list[str],
+    ) -> None:
+        """Log each task run whose state changed since the last poll, reading the output of those that finished.
+
+        `seen` holds the last state logged for each task attempt, or `None` once it has been logged as terminated, so
+        a result state that appears on a later poll does not log a second line.
+        """
+        states = [(task, *_task_state(task)) for task in run.tasks or []]
+        finished = [
+            task
+            for task, _, done in states
+            if done and task.run_id is not None and task.run_id not in outputs and has_output(task)
+        ]
+        outputs.update(fetch_outputs(self.lakeflow.ws, finished))
+        for task, state, done in states:
+            key = (task.task_key or "", task.attempt_number or 0)
+            previous = seen.get(key, "")
+            if state is None or previous is None or previous == state:
+                continue
+            line = _transition(task, previous, state, outputs.get(task.run_id or 0) if done else None, done)
+            seen[key] = None if done else state
+            log.info("%s", line)
+            progress.append(line)
 
     def close(self, failed: bool = False) -> None:
         """Cancel active runs, then delete the job unless the keep rules say to keep it.
@@ -266,11 +314,42 @@ def _terminated(run: jobs.Run) -> bool:
     if run.status and run.status.state:
         return run.status.state == jobs.RunLifecycleStateV2State.TERMINATED
     state = run.state.life_cycle_state if run.state else None
-    return state in (
-        jobs.RunLifeCycleState.TERMINATED,
-        jobs.RunLifeCycleState.SKIPPED,
-        jobs.RunLifeCycleState.INTERNAL_ERROR,
-    )
+    return state in TERMINAL_LIFE_CYCLE
+
+
+def _task_state(task: jobs.RunTask) -> tuple[str | None, bool]:
+    """The state to report for a task run, and whether it has terminated.
+
+    The V2 `status.state` while running and the result state once terminated, falling back to the legacy life cycle
+    state when the run has no V2 status. Any field may be missing.
+    """
+    result = task.state.result_state.value if task.state and task.state.result_state else None
+    status = task.status.state if task.status else None
+    if status is not None:
+        if status != jobs.RunLifecycleStateV2State.TERMINATED:
+            return status.value, False
+        details = task.status.termination_details if task.status else None
+        code = details.code.value if details and details.code else None
+        return result or code or status.value, True
+    life_cycle = task.state.life_cycle_state if task.state else None
+    if life_cycle in TERMINAL_LIFE_CYCLE:
+        return result or life_cycle.value, True
+    return (life_cycle.value if life_cycle else None), False
+
+
+def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jobs.RunOutput | None, done: bool) -> str:
+    """Describe a task run's change of state, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: x`."""
+    label = task.task_key or "?"
+    if task.attempt_number:
+        label = f"{label} (attempt {task.attempt_number})"
+    line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
+    if not done:
+        return line
+    elapsed = duration(task.start_time, task.end_time)
+    if elapsed:
+        line = f"{line} in {timedelta(seconds=elapsed // timedelta(seconds=1))}"
+    error = error_line(task, output)
+    return f"{line} {error}" if error else line
 
 
 def item_failed(stash: pytest.Stash) -> bool:
