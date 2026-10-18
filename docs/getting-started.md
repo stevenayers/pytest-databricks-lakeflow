@@ -103,9 +103,9 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
 pytest --log-cli-level=INFO
 ```
 
-The plugin logs at INFO when it deploys, creates a job (with its URL), starts and finishes a run, and deletes the job. On the first run expect a `bundle deploy`, which builds and uploads any wheels, before the test itself starts. Later sessions deploy again, but an unchanged bundle deploys in seconds.
+The plugin logs at INFO when it deploys, creates a job (with its URL), starts and finishes a run, and deletes the job. While a run is in flight it also logs a line each time a task changes state, such as `transform: PENDING -> RUNNING` and `transform: RUNNING -> FAILED in 0:00:42 ValueError: no rows`, so a long run shows its progress. On the first run expect a `bundle deploy`, which builds and uploads any wheels, before the test itself starts. Later sessions deploy again, but an unchanged bundle deploys in seconds.
 
-When a test fails, its job is kept so you can open the run in the workspace. The job and run URLs are printed in a `lakeflow` section of the test report and recorded as JUnit XML properties, and a `lakeflow` block at the end of the run lists every kept job with its URL.
+When a test fails, its job is kept so you can open the run in the workspace. The job and run URLs, followed by the task state lines, are printed in a `lakeflow` section of the test report, and the URLs are also recorded as JUnit XML properties. A `lakeflow` block at the end of the run lists every kept job with its URL.
 
 Tests that use the fixture get the `lakeflow` marker automatically, so `pytest -m "not lakeflow"` runs only your fast tests. Nothing is deployed in a session that never creates a job.
 
