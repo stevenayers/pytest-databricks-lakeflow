@@ -64,6 +64,9 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
         assert run.task("transform").attempt == 0
         assert run.task("transform").attempts[-1].attempt == 0
         assert not run.timed_out
+        with pytest.raises(LakeflowRunFailed) as excinfo:
+            run.raise_for_failure()
+        assert "forbidden" in str(excinfo.value)
 
 
 def test_raise_for_failure_names_the_permission_error(lakeflow: Lakeflow) -> None:
