@@ -163,7 +163,11 @@ class FakeSchemas:
 
 
 class FakeCurrentUser:
+    def __init__(self) -> None:
+        self.me_calls = 0
+
     def me(self) -> iam.User:
+        self.me_calls += 1
         return iam.User(user_name="someone@example.com")
 
 

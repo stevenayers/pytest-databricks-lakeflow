@@ -8,7 +8,7 @@ import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
-from .conftest import FakeCli, configure_lakeflow
+from .conftest import GITHUB, FakeCli, configure_lakeflow, make_repository, set_ci
 from .fakes import HOST, FakeWorkspaceClient, make_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -49,6 +49,53 @@ def test_run_requests_resolved_values(pytester: pytest.Pytester, fake_ws: FakeWo
     run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n').assert_outcomes(passed=1)
     assert fake_ws.jobs.get_run_calls
     assert all(call.get("include_resolved_values") is True for call in fake_ws.jobs.get_run_calls)
+
+
+def test_jobs_carry_attribution_tags(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
+) -> None:
+    set_ci(monkeypatch, GITHUB)
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["tags"] == {
+        "dev": "someone",
+        "purpose": "pytest",
+        "pytest": "",
+        "pytest_run_id": "9",
+        "pytest_nodeid": "test_jobs.py::test_job",
+        "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
+        "pytest_user": "someone",
+        "pytest_git_sha": "abc",
+        "pytest_git_branch": "main",
+    }
+    assert created["description"] == "test_jobs.py::test_job https://github.com/o/r/actions/runs/9"
+
+
+def test_attribution_user_falls_back_to_the_workspace_user(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
+) -> None:
+    set_ci(monkeypatch, {})
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(pytester.path.parent))
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    tags = created["tags"]
+    assert tags["pytest_user"] == "someone@example.com"
+    assert not {"pytest_ci_url", "pytest_git_sha", "pytest_git_branch"} & set(tags)
+    assert created["description"] == "test_jobs.py::test_job"
+
+
+def test_attribution_from_git_in_the_rootdir(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
+) -> None:
+    set_ci(monkeypatch, {})
+    sha = make_repository(pytester.path)
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    with lakeflow.job("my_job"):\n        pass\n')
+    result.assert_outcomes(passed=1)
+    tags = fake_ws.jobs.created[0]["tags"]
+    assert tags["pytest_git_sha"] == sha
+    assert tags["pytest_git_branch"] == "topic"
 
 
 def test_failure_inside_with_keeps_the_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
@@ -635,7 +682,9 @@ def lakeflow(lakeflow):
     pytester.path.joinpath("team_a", "test_a.py").write_text(test)
     pytester.path.joinpath("team_b", "test_b.py").write_text(test)
     pytester.runpytest("team_a/test_a.py", "team_b/test_b.py").assert_outcomes(passed=2)
-    assert [created.get("description") for created in fake_ws.jobs.created] == ["team a", None]
+    descriptions = [created["description"] for created in fake_ws.jobs.created]
+    assert descriptions[0] == "team a"
+    assert descriptions[1].startswith("team_b/test_b.py::test_job")
     assert fake_ws.jobs.deleted == [1001, 1003]
     assert fake_cli.calls.count(["bundle", "deploy", "-t", "test", "--auto-approve"]) == 1
 

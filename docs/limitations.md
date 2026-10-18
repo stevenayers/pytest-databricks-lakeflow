@@ -35,11 +35,11 @@ The job's `performance_target` is `STANDARD`. The plugin warns about it. Pass `p
 
 ### How do I clean up after a crashed session?
 
-Ephemeral jobs are tagged `pytest` and `pytest_run_id`. `pytest --lakeflow-sweep` deletes your own jobs from other runs that are older than `sweep_hours`, 24 hours by default. `pytest --lakeflow-destroy` runs `bundle destroy` for the test target at the end of the session.
+Ephemeral jobs are tagged `pytest` and `pytest_run_id`, and, when they can be found out, `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch`, so a leftover job can be traced to its CI run, person and commit from the Jobs list. `pytest --lakeflow-sweep` deletes your own jobs from other runs that are older than `sweep_hours`, 24 hours by default. `pytest --lakeflow-destroy` runs `bundle destroy` for the test target at the end of the session.
 
 ### What does the plugin leave in my workspace?
 
-The deployed test target, the two helper notebooks under `helpers_path`, and any jobs kept by the keep rules. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
+The deployed test target, the two helper notebooks under `helpers_path`, and any jobs kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
 
 ### Why did the CLI fail with `exit status 45` under xdist?
 
