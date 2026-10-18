@@ -39,9 +39,8 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
             assert transform["row_count"] == "7"
         else:
             warnings.warn("The workspace returned no resolved values for transform", stacklevel=1)
-        # A run with several tasks reports its durations on the tasks and zero on the run itself.
-        if run.timing.execution == timedelta(0):
-            warnings.warn("The workspace reported no execution duration on the parent run", stacklevel=1)
+        # A run with several tasks reports its durations on the tasks and usually zero on the run itself.
+        assert run.timing.execution >= timedelta(0)
         assert run.task("transform").timing.execution > timedelta(0)
         if run.effective_performance_target is not None:
             assert run.effective_performance_target in {"STANDARD", "PERFORMANCE_OPTIMIZED"}

@@ -369,6 +369,8 @@ def test_timing_breakdown_from_a_recorded_run() -> None:
     data = json.loads((DATA / "runs" / "probe_success.json").read_text())["run"]
     run, _ = build("probe_success", capture_task_values=CAPTURE)
     assert "queue_duration" not in data
+    # probe_success has several tasks, so its parent run reports zero for setup, execution and cleanup. The
+    # comparisons below check those zeros; test_timing_on_a_single_task_parent_run covers non-zero parent values.
     assert run.timing.queue == timedelta(0)
     assert run.timing.setup == timedelta(milliseconds=data["setup_duration"])
     assert run.timing.execution == timedelta(milliseconds=data["execution_duration"])

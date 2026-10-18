@@ -116,7 +116,7 @@ class Timing:
     Attributes:
         queue: Time spent waiting in the queue.
         setup: Time spent setting up compute and the environment.
-        execution: Time spent running the task's code.
+        execution: Time spent running the code.
         cleanup: Time spent cleaning up afterwards.
     """
 
