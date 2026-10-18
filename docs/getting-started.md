@@ -125,6 +125,19 @@ steps:
 
 The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. Several processes refreshing a user-to-machine (`databricks-cli`) token at once can fail with `exit status 45`, which is why CI should use a service principal.
 
+Jobs that the service principal creates are visible only to it and to workspace admins. Give your team access with `permissions`, so that they can open a kept job from the CI log:
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}])
+```
+
 ## Next steps
 
 - [Writing job tests](job-tests.md): parameters, `only`, repeated runs, failures, temporary schemas and shared runs.

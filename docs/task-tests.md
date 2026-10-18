@@ -19,6 +19,7 @@ with lakeflow.task(
 - `params` are job parameters for every run. The job's declared parameters are kept, and the same rules apply as for [job tests](job-tests.md#make-a-job).
 - `upstream_task_values` maps upstream task keys to the task values their stubs set. Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
+- `run_as` chooses who the job runs as: `None` by default, which runs it as you, `"keep"` for the template's `run_as`, a user's email, a service principal's application id, or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity).
 
 The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. `run()`, `only`, the keep rules and the result objects all work the same way, and `with` is optional.
 

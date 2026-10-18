@@ -99,7 +99,8 @@ class EphemeralJob:
         if self.lakeflow.modify_settings is not None:
             self.lakeflow.modify_settings(self.settings, item)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
-        self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings)).job_id
+        acl = self.lakeflow.access_control_list()
+        self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings), access_control_list=acl).job_id
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
         item.user_properties.append(("lakeflow_job_id", self.job_id))

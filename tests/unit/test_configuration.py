@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Any, cast
 
 import pytest
+from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow
 
@@ -71,6 +72,22 @@ def test_defaults() -> None:
     assert lakeflow.sweep_hours == 24
     assert (lakeflow.keep, lakeflow.keep_failed) == (False, True)
     assert (lakeflow.modify_settings, lakeflow.run_finished) == (None, None)
+    assert lakeflow.permissions is None
+    assert lakeflow.access_control_list() is None
+
+
+def test_permissions_accept_dicts() -> None:
+    lakeflow = Lakeflow(permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}])
+    assert lakeflow.access_control_list() == [
+        jobs.JobAccessControlRequest(group_name="data-eng", permission_level=jobs.JobPermissionLevel.CAN_VIEW)
+    ]
+
+
+def test_permissions_accept_sdk_objects() -> None:
+    request = jobs.JobAccessControlRequest(
+        service_principal_name="0000-app-id", permission_level=jobs.JobPermissionLevel.CAN_MANAGE_RUN
+    )
+    assert Lakeflow(permissions=[request]).access_control_list() == [request]
 
 
 def test_arguments_are_keyword_only() -> None:
