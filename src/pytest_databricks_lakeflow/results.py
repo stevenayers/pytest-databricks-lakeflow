@@ -411,11 +411,11 @@ class JobRun:
             KeyError: If the task was not part of the run.
             LakeflowError: If the task is not a condition task, or the platform reported no outcome for it.
         """
-        outcome = self.task(key).condition_outcome
+        task = self.task(key)
+        outcome = task.condition_outcome
         if outcome is None:
-            state = self.tasks[key].result_state
             raise LakeflowError(
-                f"Task {key!r} is not a condition task or has no outcome; check its result_state ({state})"
+                f"Task {key!r} is not a condition task or has no outcome; check its result_state ({task.result_state})"
             )
         return outcome
 
@@ -508,7 +508,7 @@ def build_job_run(
         termination_code=_enum(details.code if details else None),
         termination_message=details.message if details else None,
         duration=duration(run.start_time, run.end_time),
-        tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
+        tasks={key: t for key, t in user.items() if not t.disabled},
         injected_tasks=injected,
         skipped_tasks={key: t for key, t in user.items() if t.disabled and key not in disabled},
         disabled_tasks={key: t for key, t in user.items() if t.disabled and key in disabled},
