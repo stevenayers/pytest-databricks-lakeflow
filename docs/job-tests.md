@@ -97,6 +97,7 @@ Each `TaskRun` has:
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
 - The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
+- `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
@@ -116,8 +117,7 @@ def test_alert_triggers_and_child_job_runs(lakeflow: Lakeflow) -> None:
         assert query is not None and query.query_output is not None
         assert query.query_output.warehouse_id == "abc123"
         assert run.task("check").alert_state == "TRIGGERED"
-        child = run.task("trigger").run_job_output
-        assert child is not None and child.run_id is not None
+        assert run.task("trigger").child_run_id is not None
 ```
 
 `run.timed_out` is true when the parent run ended `TIMEDOUT` or any task in `run.tasks` timed out. Such a run has failed, and `repr(run)` lists a timed-out task without an error as `load: TIMEDOUT`.
@@ -312,6 +312,40 @@ One worker deploys the bundle and loads the templates while the others wait, the
 A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pytest_git_sha` tags, and the test node id and CI run URL in its description.
 
 Every kept job and schema is listed in a `lakeflow` block at the end of the run, with a hint to run `pytest --lakeflow-sweep` when jobs were kept, so you do not need `--log-cli-level` to find them.
+
+## Jobs that run other jobs
+
+The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled and not inside a disabled `for_each_task` loop, naming the task, the job and the child's job id. The job is still created.
+
+Pass `children="refuse"` to raise `LakeflowError` instead, before anything is created, or disable the task (or the loop that holds it) to leave the child alone:
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError
+
+
+def test_parent_without_its_child(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("parent", disable=["trigger_child"]) as job:
+        assert job.run().succeeded
+
+
+def test_parent_is_refused(lakeflow: Lakeflow) -> None:
+    with pytest.raises(LakeflowError, match="runs the deployed job"):
+        lakeflow.job("parent", children="refuse")
+```
+
+When the child does run, `TaskRun.child_run_id` gives the id of its run, for example to look it up with `lakeflow.ws.jobs.get_run()`:
+
+```python
+def test_parent_triggers_child(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("parent") as job:
+        run = job.run().raise_for_failure()
+        child_run_id = run.task("trigger_child").child_run_id
+        assert child_run_id is not None
+        child = lakeflow.ws.jobs.get_run(child_run_id)
+        assert child.run_page_url is not None
+```
 
 ## Change the settings before the job is created
 

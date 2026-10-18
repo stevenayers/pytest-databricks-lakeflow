@@ -585,3 +585,19 @@ def test_recorded_runs_have_no_task_outputs(name: str) -> None:
         assert fields == (None,) * 5
         assert task.clean_rooms_notebook_output is None
         assert task.alert_state is None
+
+
+def test_child_run_id_of_a_run_job_task() -> None:
+    ws = FakeWorkspaceClient()
+    ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
+    run = build_from(ws, make_run(1, {"trigger_child": "SUCCESS"}))
+    assert run.task("trigger_child").child_run_id == 777
+
+
+def test_child_run_id_is_none_for_other_tasks() -> None:
+    run, _ = build("probe_success", capture_task_values=CAPTURE)
+    assert all(task.child_run_id is None for task in run.tasks.values())
+
+
+def test_child_run_id_is_none_when_the_platform_reports_no_run_id() -> None:
+    assert _built_task(jobs.RunOutput(run_job_output=jobs.RunJobOutput())).child_run_id is None

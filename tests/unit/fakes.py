@@ -385,3 +385,22 @@ def reporting_settings() -> jobs.JobSettings:
             ],
         }
     )
+
+
+def parent_settings() -> jobs.JobSettings:
+    """Build a parent job: a notebook task, then a Run Job task that triggers the deployed job 123."""
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] parent",
+            "deployment": {"kind": "BUNDLE", "metadata_file_path": "/Workspace/x/state/metadata.json"},
+            "parameters": [{"name": "schema", "default": ""}],
+            "tasks": [
+                {"task_key": "prepare", "notebook_task": {"notebook_path": "/Workspace/src/prepare"}},
+                {
+                    "task_key": "trigger_child",
+                    "depends_on": [{"task_key": "prepare"}],
+                    "run_job_task": {"job_id": 123, "job_parameters": {"schema": "{{job.parameters.schema}}"}},
+                },
+            ],
+        }
+    )
