@@ -13,7 +13,7 @@ All arguments are keyword-only.
 | `profile` | SDK default resolution | The Databricks config profile for both the CLI and the SDK. Without it, both read `DATABRICKS_CONFIG_PROFILE` and the other `DATABRICKS_*` variables. |
 | `workspace_client` | made from `profile` | A `WorkspaceClient` to use instead. The CLI still uses `profile`, or else the client's profile. |
 | `sync` | `"deploy"` | How to prepare the bundle: `"deploy"`, `"sync"` or `"none"`. See [sync strategies](#sync-strategies). |
-| `timeout` | 30 minutes | The default `timedelta` to wait for one run. |
+| `timeout` | 30 minutes | The default `timedelta` to wait for one run. Each job is created with `timeout_seconds` equal to this timeout plus 60 seconds, so the platform stops a run that the plugin can no longer cancel, for example after the pytest process was killed. A template with a smaller `timeout_seconds` keeps it. |
 | `catalog` | `None` | The catalog in which `schema()` creates temporary schemas. |
 | `helpers_path` | `/Users/<you>/.pytest-databricks-lakeflow` | The workspace folder for the two helper notebooks. |
 | `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for stub and probe tasks, for workspaces without serverless. |

@@ -3,9 +3,11 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import math
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
+from datetime import timedelta
 from typing import Any, Literal
 
 from databricks.sdk.service import compute, jobs
@@ -42,6 +44,7 @@ ENV_KEY = f"{PREFIX}serverless"
 MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
+TIMEOUT_GRACE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ def sanitise(
     performance_optimized: bool,
     run_as: RunAs = None,
     description: str | None = None,
+    timeout: timedelta | None = None,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
@@ -88,6 +92,9 @@ def sanitise(
             `jobs.JobRunAs` replaces it. Any other string names a user when it contains `@`, and otherwise a
             service principal by its application id.
         description: Put before the template's description, separated by a blank line.
+        timeout: The plugin's timeout for one run. The job's `timeout_seconds` becomes this plus
+            `TIMEOUT_GRACE_SECONDS`, so the platform stops a run that the plugin can no longer cancel. A template
+            with a smaller positive `timeout_seconds` keeps it.
 
     Returns:
         `settings`.
@@ -107,6 +114,10 @@ def sanitise(
     if performance_optimized:
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
+    if timeout is not None:
+        mirrored = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+        if not settings.timeout_seconds or settings.timeout_seconds > mirrored:
+            settings.timeout_seconds = mirrored
     settings.name = _trim(NAME_PREFIX + NEWLINES.sub(" ", name), MAX_NAME_BYTES)
     if description is not None:
         parts = [description, settings.description] if settings.description else [description]

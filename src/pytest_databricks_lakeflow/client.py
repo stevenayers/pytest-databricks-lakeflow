@@ -51,7 +51,8 @@ class Lakeflow:
         workspace_client: A client to use instead of making one from `profile`. The CLI still uses `profile`, or
             else the client's profile.
         sync: How to prepare the bundle: `deploy`, `sync` or `none`.
-        timeout: The default timeout for one job run.
+        timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
+            plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
         catalog: The catalog in which `schema()` creates temporary schemas.
         helpers_path: The workspace folder for the helper notebooks. Defaults to
             `/Users/<you>/.pytest-databricks-lakeflow`.
@@ -311,6 +312,7 @@ class Lakeflow:
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
             run_as=run_as,
+            timeout=self.timeout,
         )
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
