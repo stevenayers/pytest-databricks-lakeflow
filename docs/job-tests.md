@@ -171,7 +171,7 @@ The `==` and `!=` operators of a condition task compare their operands as string
 
 ### Errors from Spark
 
-A Py4J or Spark failure often wraps the real problem. `error.root_cause` is the text of the last `Caused by:` line in `error.trace`, or `None` when the trace has none. Python's own chained exceptions do not produce `Caused by:` lines. `error.code` is the Spark error class, such as `TABLE_OR_VIEW_NOT_FOUND` or `DELTA_INVALID_FORMAT.X`, when `error.message` or `error.root_cause` starts with one in square brackets, and `None` otherwise:
+A Py4J or Spark failure often wraps the real problem. `error.root_cause` is the text of the last `Caused by:` line of the first exception in `error.trace`. It also follows Python chains, from `raise ... from e` or an exception raised while handling another, to the first exception, such as `ZeroDivisionError: division by zero`, while `error.type` and `error.message` still describe the outer one. It is `None` when the trace has neither. `error.code` is the Spark error class, such as `TABLE_OR_VIEW_NOT_FOUND` or `DELTA_INVALID_FORMAT.X`, when `error.message` or `error.root_cause` starts with one in square brackets, and `None` otherwise:
 
 ```python
 error = run.task("transform").error
