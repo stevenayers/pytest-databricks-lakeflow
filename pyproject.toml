@@ -65,4 +65,3 @@ include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-lakeflow_bundle_root = "examples/bundle"

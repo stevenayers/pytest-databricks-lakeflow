@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -7,22 +8,160 @@ import secrets
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
+from databricks.sdk.errors.base import DatabricksError
+from databricks.sdk.service import jobs
 from filelock import FileLock
 
 from pytest_databricks_lakeflow import bundle, helpers
 from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.options import Options
+
+if TYPE_CHECKING:
+    from pytest_databricks_lakeflow.client import Lakeflow
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
 RUN_ID_VARIABLES = ("LAKEFLOW_RUN_ID", "GITHUB_RUN_ID", "BUILD_BUILDID")
-STATE_FILE = "lakeflow_state.json"
 CLIENT_ATTEMPTS = 4
+
+
+@dataclass(frozen=True)
+class BundleKey:
+    """A bundle target that is set up once per session, with everything that changes how it is set up."""
+
+    root: Path
+    target: str
+    profile: str | None
+    sync: str
+    helpers_path: str | None
+
+    def file_name(self) -> str:
+        """Name the file in which xdist workers share this target's setup."""
+        fields = [str(self.root), self.target, self.profile, self.sync, self.helpers_path]
+        return f"lakeflow_{hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:16]}.json"
+
+
+@dataclass(eq=False)
+class SessionState:
+    """What the `Lakeflow` instances of one pytest session share.
+
+    Attributes:
+        rootpath: The pytest rootdir, against which relative bundle roots are resolved.
+        run_id: The id of this test session, the same in every xdist worker.
+        state_dir: A directory shared by the session's xdist workers, or `None` without xdist.
+        keep: Whether `--lakeflow-keep` is set.
+        keep_failed: `True` for `--lakeflow-keep-failed`, `False` for `--no-lakeflow-keep-failed`, or `None`.
+        sweep: Whether `--lakeflow-sweep` is set.
+        destroy: Whether `--lakeflow-destroy` is set.
+        item: The test that is running, or `None` between tests.
+        setups: The outcome of setting up each bundle target: its state, or the error it failed with.
+        lakeflows: Every `Lakeflow` used in this session.
+        deployed: The root, target and profile of each bundle target that this session deployed.
+        swept: Whether this process has swept leftover jobs.
+        worker_dir: On the xdist controller, the directory that it shares with the workers.
+    """
+
+    rootpath: Path
+    run_id: str
+    state_dir: Path | None = None
+    keep: bool = False
+    keep_failed: bool | None = None
+    sweep: bool = False
+    destroy: bool = False
+    item: pytest.Item | None = None
+    setups: dict[BundleKey, dict[str, Any] | Exception] = field(default_factory=dict)
+    lakeflows: list[Lakeflow] = field(default_factory=list)
+    deployed: list[tuple[str, str, str | None]] = field(default_factory=list)
+    swept: bool = False
+    worker_dir: Path | None = None
+
+    def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
+        """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.
+
+        Args:
+            keep: `Lakeflow`'s `keep`.
+            keep_failed: `Lakeflow`'s `keep_failed`.
+            failed: Whether the test failed.
+
+        Returns:
+            Whether to keep it.
+        """
+        if self.keep_failed is not None:
+            keep_failed = self.keep_failed
+        return keep or self.keep or (failed and keep_failed)
+
+    def bundle_state(self, key: BundleKey, ws: WorkspaceClient, sweep_hours: float) -> dict[str, Any]:
+        """Set up a bundle target the first time it is used in this session, once for all xdist workers.
+
+        The worker that sets it up also sweeps leftover jobs when `--lakeflow-sweep` is set.
+
+        Args:
+            key: The bundle target.
+            ws: The workspace client.
+            sweep_hours: The age after which leftover jobs are swept.
+
+        Returns:
+            The target's state: its job templates, the errors of jobs that cannot be used, and the helper paths.
+
+        Raises:
+            LakeflowError: If setting it up failed earlier in this session.
+        """
+        if key not in self.setups:
+            path = None if self.state_dir is None else self.state_dir / key.file_name()
+            produced = False
+
+            def produce() -> dict[str, Any]:
+                nonlocal produced
+                produced = True
+                return setup(ws, key)
+
+            try:
+                self.setups[key] = shared_state(path, produce)
+            except Exception as e:
+                self.setups[key] = e
+                raise
+            if key.sync == "deploy":
+                self.deployed.append((str(key.root), key.target, key.profile))
+            if produced and self.sweep and not self.swept:
+                self.swept = True
+                sweep(ws, self.run_id, sweep_hours)
+        state = self.setups[key]
+        if isinstance(state, Exception):
+            raise LakeflowError(
+                f"Setting up {key.root} for target {key.target!r} failed earlier in this session: "
+                f"{type(state).__name__}: {state}"
+            )
+        return state
+
+
+_sessions: list[SessionState] = []
+
+
+def activate(state: SessionState) -> None:
+    _sessions.append(state)
+
+
+def deactivate(state: SessionState) -> None:
+    _sessions[:] = [s for s in _sessions if s is not state]
+
+
+def current() -> SessionState:
+    if not _sessions:
+        raise LakeflowError("Lakeflow works only in a pytest session with the pytest-databricks-lakeflow plugin")
+    return _sessions[-1]
+
+
+def current_item() -> pytest.Item:
+    item = current().item
+    if item is None:
+        raise LakeflowError("Use Lakeflow inside a test, or in a fixture that a test uses, to create ephemeral jobs")
+    return item
 
 
 def make_workspace_client(profile: str | None) -> WorkspaceClient:
@@ -52,14 +191,32 @@ def resolve_run_id() -> str:
     return secrets.token_hex(4)
 
 
-def shared_state(state_dir: Path | None, produce: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-    """Call `produce` once per session, even under xdist.
+def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
+    """Find the bundle root.
 
-    The first worker to take the lock produces the state and writes it to a file, and the others read it. A setup
+    Args:
+        bundle_root: `Lakeflow`'s `bundle_root`, which is relative to the rootdir unless absolute.
+        rootpath: The pytest rootdir.
+
+    Returns:
+        `bundle_root`, or without one the nearest directory with a databricks.yml, starting at the rootdir.
+
+    Raises:
+        LakeflowBundleError: If there is no databricks.yml.
+    """
+    if bundle_root is None:
+        return bundle.find_root(rootpath)
+    return bundle.require_root((rootpath / bundle_root).resolve())
+
+
+def shared_state(path: Path | None, produce: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Call `produce` once, even under xdist.
+
+    The first worker to take the lock produces the state and writes it to `path`, and the others read it. A setup
     error is shared the same way.
 
     Args:
-        state_dir: A directory shared by the session's xdist workers, or `None` without xdist.
+        path: A file in a directory shared by the session's xdist workers, or `None` without xdist.
         produce: Builds the state. It must be JSON-serialisable.
 
     Returns:
@@ -68,9 +225,8 @@ def shared_state(state_dir: Path | None, produce: Callable[[], dict[str, Any]]) 
     Raises:
         LakeflowError: If setup failed in another worker.
     """
-    if state_dir is None:
+    if path is None:
         return produce()
-    path = state_dir / STATE_FILE
     with FileLock(f"{path}.lock"):
         if path.is_file():
             state: dict[str, Any] = json.loads(path.read_text())
@@ -86,38 +242,31 @@ def shared_state(state_dir: Path | None, produce: Callable[[], dict[str, Any]]) 
     return state
 
 
-def setup(ws: WorkspaceClient, options: Options, rootpath: Path) -> dict[str, Any]:
+def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     """Prepare the bundle, load job templates and upload the helper notebooks.
 
     Args:
         ws: The workspace client.
-        options: The plugin's options.
-        rootpath: Where to start looking for the bundle root when `lakeflow_bundle_root` is not set.
+        key: The bundle target.
 
     Returns:
-        The session state, which is JSON-serialisable so that xdist workers can share it.
+        The target's state, which is JSON-serialisable so that xdist workers can share it.
 
     Raises:
-        LakeflowBundleError: If the bundle cannot be found, or a CLI command fails.
+        LakeflowBundleError: If a CLI command fails.
     """
-    root = bundle.find_root(rootpath) if options.bundle_root is None else bundle.require_root(options.bundle_root)
+    root = key.root
     bundle.check_cli_version(root)
-    if options.sync == "deploy":
-        bundle.deploy(root, options.target, options.profile)
-        templates, errors = templates_from_summary(ws, bundle.summary(root, options.target, options.profile))
+    if key.sync == "deploy":
+        bundle.deploy(root, key.target, key.profile)
+        templates, errors = templates_from_summary(ws, bundle.summary(root, key.target, key.profile))
     else:
-        if options.sync == "sync":
-            bundle.sync(root, options.target, options.profile)
-        config = bundle.validate(root, options.target, options.profile)
-        templates, errors = bundle.templates_from_validate(config, root, options.sync, lambda path: exists(ws, path))
-    folder = options.helpers_path or helpers.default_folder(ws)
-    state = {
-        "run_id": resolve_run_id(),
-        "bundle_root": str(root),
-        "templates": templates,
-        "template_errors": errors,
-        "helpers": helpers.upload(ws, folder),
-    }
+        if key.sync == "sync":
+            bundle.sync(root, key.target, key.profile)
+        config = bundle.validate(root, key.target, key.profile)
+        templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
+    folder = key.helpers_path or helpers.default_folder(ws)
+    state = {"templates": templates, "template_errors": errors, "helpers": helpers.upload(ws, folder)}
     log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
     return state
 
@@ -165,3 +314,39 @@ def exists(ws: WorkspaceClient, path: str) -> bool:
     except NotFound:
         return False
     return True
+
+
+def sweep(ws: WorkspaceClient, run_id: str, hours: float) -> list[int]:
+    """Delete this user's ephemeral jobs from other runs that are older than `hours`.
+
+    Args:
+        ws: The workspace client.
+        run_id: The id of this run, whose jobs are kept.
+        hours: The age after which a job is deleted.
+
+    Returns:
+        The ids of the deleted jobs.
+    """
+    me = ws.current_user.me().user_name
+    cutoff = (time.time() - hours * 3600) * 1000
+    stale = [
+        job.job_id
+        for job in ws.jobs.list(limit=100)
+        if job.job_id is not None and job.creator_user_name == me and _stale(job, run_id, cutoff)
+    ]
+    deleted = []
+    for job_id in stale:
+        try:
+            ws.jobs.delete(job_id)
+        except DatabricksError as e:
+            log.warning("Could not delete job %s: %s", job_id, e)
+        else:
+            deleted.append(job_id)
+    log.info("Swept %d leftover ephemeral jobs", len(deleted))
+    return deleted
+
+
+def _stale(job: jobs.BaseJob, run_id: str, cutoff_ms: float) -> bool:
+    tags = (job.settings.tags if job.settings else None) or {}
+    other_run = tags.get("pytest_run_id", run_id) != run_id
+    return "pytest" in tags and other_run and (job.created_time or 0) < cutoff_ms

@@ -86,10 +86,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - uses: databricks/setup-cli@v1.7.0
-      - run: >-
-          uv run pytest tests/integration -n 4 -rA --lakeflow-sweep
-          -o lakeflow_catalog="$LAKEFLOW_CATALOG"
-          --junitxml=integration.xml
+      # tests/integration/conftest.py reads LAKEFLOW_CATALOG.
+      - run: uv run pytest tests/integration -n 4 -rA --lakeflow-sweep --junitxml=integration.xml
       - if: always()
         uses: actions/upload-artifact@v7
         with:

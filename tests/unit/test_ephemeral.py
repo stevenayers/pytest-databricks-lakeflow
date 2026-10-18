@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 import pytest
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.client import Lakeflow
-from pytest_databricks_lakeflow.errors import LakeflowError
-
-from .conftest import FakeCli
-from .fakes import HOST, FakeWorkspaceClient, example_settings, make_run
-from .test_session import options
+from .conftest import FakeCli, configure_lakeflow
+from .fakes import HOST, FakeWorkspaceClient, make_run
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -113,8 +107,22 @@ def test_unused_job_is_never_created(pytester: pytest.Pytester, fake_ws: FakeWor
     assert (fake_ws.jobs.created, fake_ws.jobs.deleted) == ([], [])
 
 
-@pytest.mark.parametrize(("flags", "deleted"), [(["--lakeflow-keep"], False), (["--no-lakeflow-keep-failed"], True)])
-def test_keep_flags(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, flags: list[str], deleted: bool) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "flags", "deleted"),
+    [
+        ("", [], [1001]),
+        ("", ["--lakeflow-keep"], []),
+        ("", ["--no-lakeflow-keep-failed"], [1001, 1003]),
+        ("keep=True", [], []),
+        ("keep_failed=False", [], [1001, 1003]),
+        ("keep_failed=False", ["--lakeflow-keep-failed"], [1001]),
+        ("keep=True", ["--no-lakeflow-keep-failed"], []),
+    ],
+)
+def test_keep_rules_with_flags_winning(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str, flags: list[str], deleted: list[int]
+) -> None:
+    configure_lakeflow(pytester, arguments)
     source = """
         def test_ok(lakeflow):
             with lakeflow.job("my_job") as job:
@@ -127,7 +135,7 @@ def test_keep_flags(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fla
     """
     result = run_tests(pytester, source, *flags)
     result.assert_outcomes(passed=1, failed=1)
-    assert fake_ws.jobs.deleted == ([1001, 1003] if deleted else [])
+    assert fake_ws.jobs.deleted == deleted
 
 
 def test_timeout_cancels_the_run(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
@@ -150,6 +158,26 @@ def test_timeout_cancels_the_run(pytester: pytest.Pytester, fake_ws: FakeWorkspa
         """,
     )
     result.assert_outcomes(passed=1)
+
+
+def test_timeout_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+    configure_lakeflow(pytester, "timeout=timedelta(0)")
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowTimeout
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowTimeout, match="did not finish within 0:00:00"):
+                    job.run()
+        """,
+    )
+    result.assert_outcomes(passed=1)
+    assert fake_ws.jobs.cancelled == [77]
 
 
 def test_exit_cancels_active_runs(
@@ -199,16 +227,24 @@ def test_report_section_and_junit_properties(pytester: pytest.Pytester) -> None:
     assert '<property name="lakeflow_run_url"' in xml
 
 
-def test_hooks(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+def test_callbacks(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
     pytester.makeconftest(
         """
+        import pytest
+
+        from pytest_databricks_lakeflow import Lakeflow
+
         finished = []
 
-        def pytest_lakeflow_modify_settings(settings, request):
-            settings.description = f"from {request.node.name}"
+        def describe(settings, item):
+            settings.description = f"from {item.name}"
 
-        def pytest_lakeflow_run_finished(run, request):
-            finished.append((run.job_key, request.node.name))
+        def record(run, item):
+            finished.append((run.job_key, item.name))
+
+        @pytest.fixture(scope="session")
+        def lakeflow():
+            return Lakeflow(modify_settings=describe, run_finished=record)
         """
     )
     result = run_tests(
@@ -249,7 +285,7 @@ def test_bad_params_fail_before_creating(pytester: pytest.Pytester, fake_ws: Fak
         from pytest_databricks_lakeflow import LakeflowError
 
         def test_job(lakeflow):
-            with pytest.raises(LakeflowError, match="does not declare the parameters ..parm1.."):
+            with pytest.raises(LakeflowError, match="does not declare the parameters ..parm1.*allow_undeclared_params"):
                 with lakeflow.job("my_job", params={"parm1": "x"}):
                     pass
             with lakeflow.job("my_job") as job:
@@ -261,33 +297,55 @@ def test_bad_params_fail_before_creating(pytester: pytest.Pytester, fake_ws: Fak
     assert fake_ws.jobs.run_now_calls == []
 
 
+def test_undeclared_params_when_allowed(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, "allow_undeclared_params=True")
+    source = 'def test_job(lakeflow):\n    lakeflow.job("my_job", params={"typo": "x"}).run(params={"other": "y"})\n'
+    run_tests(pytester, source).assert_outcomes(passed=1)
+    assert fake_ws.jobs.run_now_calls[0]["job_parameters"] == {"typo": "x", "other": "y"}
+
+
 def test_standard_performance_target_warns(
     pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
 ) -> None:
     fake_ws.jobs.settings[fake_cli.deployed["my_job"]].performance_target = jobs.PerformanceTarget.STANDARD
     result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job")\n')
     result.assert_outcomes(passed=1, warnings=1)
-    result.stdout.fnmatch_lines(["*Job 'my_job' has performance_target STANDARD*"])
+    result.stdout.fnmatch_lines(["*Job 'my_job' has performance_target STANDARD*Pass performance_optimized=True*"])
 
 
-def test_session_cancels_runs_left_active() -> None:
-    ws = FakeWorkspaceClient()
-    lakeflow = Lakeflow(ws=cast(WorkspaceClient, ws), options=options(), run_id="r", templates={})
-    lakeflow.for_test(cast(pytest.FixtureRequest, None)).active_runs.update({3, 1})
-    lakeflow.cancel_active_runs()
-    assert ws.jobs.cancelled == [1, 3]
-    assert lakeflow.active_runs == set()
+def test_performance_optimized(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli) -> None:
+    fake_ws.jobs.settings[fake_cli.deployed["my_job"]].performance_target = jobs.PerformanceTarget.STANDARD
+    configure_lakeflow(pytester, "performance_optimized=True, disable_auto_optimization=False")
+    result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+    result.assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    assert created["performance_target"] == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+    assert not any(task.disable_auto_optimization for task in created["tasks"])
 
 
-def test_jobs_need_a_test() -> None:
-    lakeflow = Lakeflow(
-        ws=cast(WorkspaceClient, FakeWorkspaceClient()),
-        options=options(),
-        run_id="r",
-        templates={"my_job": example_settings().as_dict()},
+def test_module_fixture_shares_one_job(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    result = run_tests(
+        pytester,
+        """
+        import pytest
+
+        @pytest.fixture(scope="module")
+        def run(lakeflow):
+            with lakeflow.job("my_job") as job:
+                yield job.run()
+
+        def test_a(run):
+            assert run.succeeded
+
+        def test_b(run):
+            assert run.succeeded
+        """,
     )
-    with pytest.raises(LakeflowError, match="inside a test"):
-        lakeflow.job("my_job")
+    result.assert_outcomes(passed=2)
+    assert len(fake_ws.jobs.created) == 1
+    assert fake_ws.jobs.created[0]["name"] == "[pytest] test_jobs.py::test_a"
+    assert len(fake_ws.jobs.run_now_calls) == 1
+    assert fake_ws.jobs.deleted == [1001]
 
 
 def test_package_exports() -> None:
@@ -319,13 +377,22 @@ def test_skip_or_xfail_inside_with_deletes_the_job(pytester: pytest.Pytester, fa
     assert fake_ws.jobs.deleted == [1001, 1003]
 
 
-def test_params_declared_by_the_hook_are_accepted(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+def test_params_declared_by_modify_settings_are_accepted(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+) -> None:
     pytester.makeconftest(
         """
+        import pytest
         from databricks.sdk.service import jobs
 
-        def pytest_lakeflow_modify_settings(settings, request):
+        from pytest_databricks_lakeflow import Lakeflow
+
+        def declare_catalog(settings, item):
             settings.parameters = [*settings.parameters, jobs.JobParameterDefinition(name="catalog", default="")]
+
+        @pytest.fixture(scope="session")
+        def lakeflow():
+            return Lakeflow(modify_settings=declare_catalog)
         """
     )
     result = run_tests(
@@ -335,7 +402,7 @@ def test_params_declared_by_the_hook_are_accepted(pytester: pytest.Pytester, fak
 
         from pytest_databricks_lakeflow import LakeflowError
 
-        def test_declared_by_hook(lakeflow):
+        def test_declared_by_callback(lakeflow):
             with lakeflow.job("my_job", params={"catalog": "x"}) as job:
                 job.run()
 
@@ -373,9 +440,24 @@ def test_run_after_the_block_fails_clearly(pytester: pytest.Pytester, fake_ws: F
     assert len(fake_ws.jobs.run_now_calls) == 1
 
 
-def test_hooks_apply_only_below_their_conftest(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+def test_overrides_apply_only_below_their_conftest(
+    pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+) -> None:
     pytester.mkpydir("team_a").joinpath("conftest.py").write_text(
-        "def pytest_lakeflow_modify_settings(settings, request):\n    settings.description = 'team a'\n"
+        """
+import dataclasses
+
+import pytest
+
+
+def describe(settings, item):
+    settings.description = "team a"
+
+
+@pytest.fixture(scope="session")
+def lakeflow(lakeflow):
+    return dataclasses.replace(lakeflow, modify_settings=describe)
+"""
     )
     pytester.mkpydir("team_b")
     test = "def test_job(lakeflow):\n    with lakeflow.job('my_job') as job:\n        job.run()\n"
@@ -383,3 +465,5 @@ def test_hooks_apply_only_below_their_conftest(pytester: pytest.Pytester, fake_w
     pytester.path.joinpath("team_b", "test_b.py").write_text(test)
     pytester.runpytest("team_a/test_a.py", "team_b/test_b.py").assert_outcomes(passed=2)
     assert [created.get("description") for created in fake_ws.jobs.created] == ["team a", None]
+    assert fake_ws.jobs.deleted == [1001, 1003]
+    assert fake_cli.calls.count(["bundle", "deploy", "-t", "test", "--auto-approve"]) == 1

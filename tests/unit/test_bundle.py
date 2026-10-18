@@ -35,7 +35,7 @@ def test_find_root_walks_up(tmp_path: Path) -> None:
 
 
 def test_find_root_fails_clearly(tmp_path: Path) -> None:
-    with pytest.raises(LakeflowBundleError, match="No databricks.yml"):
+    with pytest.raises(LakeflowBundleError, match="No databricks.yml .* Pass bundle_root to Lakeflow"):
         bundle.find_root(tmp_path)
 
 
@@ -211,4 +211,4 @@ def test_templates_from_validate_with_sync_rejects_local_libraries(tmp_path: Pat
     templates, errors = bundle.templates_from_validate(validate_output(), tmp_path, "sync", lambda path: True)
     assert sorted(templates) == ["notebooks"]
     assert "uses local libraries (dist/*.whl, ./dist/*.whl)" in errors["wheels"]
-    assert "Use lakeflow_sync = deploy" in errors["wheels"]
+    assert 'Use Lakeflow(sync="deploy")' in errors["wheels"]

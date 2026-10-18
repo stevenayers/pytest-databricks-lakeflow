@@ -1,0 +1,460 @@
+2026-10-17T11:20:53.5970526Z =================================== FAILURES ===================================
+2026-10-17T11:20:53.5971347Z ___________ test_destroy_runs_after_interrupted_tests_are_cleaned_up ___________
+2026-10-17T11:20:53.5972191Z
+2026-10-17T11:20:53.5972947Z pytester = <Pytester PosixPath('/tmp/pytest-of-runner/pytest-0/test_destroy_runs_after_interrupted_tests_are_cleaned_up0')>
+2026-10-17T11:20:53.5974286Z fake_ws = <unit.fakes.FakeWorkspaceClient object at 0x7ffbdf095350>
+2026-10-17T11:20:53.5975087Z fake_cli = <unit.conftest.FakeCli object at 0x7ffbdf0956d0>
+2026-10-17T11:20:53.5975545Z
+2026-10-17T11:20:53.5975853Z     def test_destroy_runs_after_interrupted_tests_are_cleaned_up(
+2026-10-17T11:20:53.5976735Z         pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+2026-10-17T11:20:53.5977503Z     ) -> None:
+2026-10-17T11:20:53.5977879Z         order: list[str] = []
+2026-10-17T11:20:53.5978369Z
+2026-10-17T11:20:53.5978728Z         def record(args: list[str]) -> None:
+2026-10-17T11:20:53.5979222Z             if len(args) > 1:
+2026-10-17T11:20:53.5979816Z                 order.append(f"cli {args[1]} deleted={fake_ws.jobs.deleted}")
+2026-10-17T11:20:53.5980437Z
+2026-10-17T11:20:53.5980766Z         fake_cli.before = record
+2026-10-17T11:20:53.5981206Z         pytester.makepyfile(
+2026-10-17T11:20:53.5981620Z             """
+2026-10-17T11:20:53.5982306Z             from tests.unit.fakes import make_run
+2026-10-17T11:20:53.5982773Z
+2026-10-17T11:20:53.5983092Z             def test_job(lakeflow):
+2026-10-17T11:20:53.5983831Z                 lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+2026-10-17T11:20:53.5984437Z
+2026-10-17T11:20:53.5984791Z                 def interrupted(run_id):
+2026-10-17T11:20:53.5985303Z                     raise KeyboardInterrupt
+2026-10-17T11:20:53.5985743Z
+2026-10-17T11:20:53.5986549Z                 lakeflow.ws.jobs.get_run = interrupted
+2026-10-17T11:20:53.5987060Z                 lakeflow.job("my_job").run()
+2026-10-17T11:20:53.5987645Z             """
+2026-10-17T11:20:53.5987924Z         )
+2026-10-17T11:20:53.5988364Z         pytester.runpytest("--lakeflow-destroy", no_reraise_ctrlc=True)
+2026-10-17T11:20:53.5988936Z >       assert fake_ws.jobs.cancelled == [77]
+2026-10-17T11:20:53.5989355Z E       assert [] == [77]
+2026-10-17T11:20:53.5989659Z E
+2026-10-17T11:20:53.5989943Z E         Right contains one more item: 77
+2026-10-17T11:20:53.5990319Z E
+2026-10-17T11:20:53.5990583Z E         Full diff:
+2026-10-17T11:20:53.5990862Z E         + []
+2026-10-17T11:20:53.5991133Z E         - [
+2026-10-17T11:20:53.5991400Z E         -     77,
+2026-10-17T11:20:53.5991679Z E         - ]
+2026-10-17T11:20:53.5992072Z
+2026-10-17T11:20:53.5992689Z /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_cleanup.py:193: AssertionError
+2026-10-17T11:20:53.5993689Z ----------------------------- Captured stdout call -----------------------------
+2026-10-17T11:20:53.5994304Z ============================= test session starts ==============================
+2026-10-17T11:20:53.5994884Z platform linux -- Python 3.11.17, pytest-8.3.0, pluggy-1.7.0
+2026-10-17T11:20:53.5995691Z rootdir: /tmp/pytest-of-runner/pytest-0/test_destroy_runs_after_interrupted_tests_are_cleaned_up0
+2026-10-17T11:20:53.5996433Z plugins: databricks-lakeflow-0.1.0, xdist-3.0.2
+2026-10-17T11:20:53.5996875Z collected 0 items / 1 error
+2026-10-17T11:20:53.5997085Z
+2026-10-17T11:20:53.5997266Z ==================================== ERRORS ====================================
+2026-10-17T11:20:53.5997914Z _ ERROR collecting test_destroy_runs_after_interrupted_tests_are_cleaned_up.py _
+2026-10-17T11:20:53.5999299Z ImportError while importing test module '/tmp/pytest-of-runner/pytest-0/test_destroy_runs_after_interrupted_tests_are_cleaned_up0/test_destroy_runs_after_interrupted_tests_are_cleaned_up.py'.
+2026-10-17T11:20:53.6000643Z Hint: make sure your test modules/packages have valid Python names.
+2026-10-17T11:20:53.6001143Z Traceback:
+2026-10-17T11:20:53.6002050Z /home/runner/work/_temp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py:126: in import_module
+2026-10-17T11:20:53.6003017Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-10-17T11:20:53.6003721Z test_destroy_runs_after_interrupted_tests_are_cleaned_up.py:1: in <module>
+2026-10-17T11:20:53.6004302Z     from tests.unit.fakes import make_run
+2026-10-17T11:20:53.6004747Z E   ModuleNotFoundError: No module named 'tests'
+2026-10-17T11:20:53.6005256Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6005875Z ERROR test_destroy_runs_after_interrupted_tests_are_cleaned_up.py
+2026-10-17T11:20:53.6006496Z !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2026-10-17T11:20:53.6007071Z =============================== 1 error in 0.13s ===============================
+2026-10-17T11:20:53.6007643Z _________________________ test_timeout_cancels_the_run _________________________
+2026-10-17T11:20:53.6008041Z
+2026-10-17T11:20:53.6008446Z pytester = <Pytester PosixPath('/tmp/pytest-of-runner/pytest-0/test_timeout_cancels_the_run0')>
+2026-10-17T11:20:53.6008984Z
+2026-10-17T11:20:53.6009256Z     def test_timeout_cancels_the_run(pytester: pytest.Pytester) -> None:
+2026-10-17T11:20:53.6009804Z         result = run_tests(
+2026-10-17T11:20:53.6010200Z             pytester,
+2026-10-17T11:20:53.6010482Z             """
+2026-10-17T11:20:53.6010777Z             from datetime import timedelta
+2026-10-17T11:20:53.6011140Z
+2026-10-17T11:20:53.6011387Z             import pytest
+2026-10-17T11:20:53.6011677Z
+2026-10-17T11:20:53.6012214Z             from pytest_databricks_lakeflow import LakeflowTimeout
+2026-10-17T11:20:53.6012716Z             from tests.unit.fakes import make_run
+2026-10-17T11:20:53.6013096Z
+2026-10-17T11:20:53.6013548Z             def test_job(lakeflow):
+2026-10-17T11:20:53.6014064Z                 lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+2026-10-17T11:20:53.6014776Z                 with lakeflow.job("my_job") as job:
+2026-10-17T11:20:53.6015494Z                     with pytest.raises(LakeflowTimeout, match="Run 77 of 'my_job' did not finish within 0:00:00"):
+2026-10-17T11:20:53.6016210Z                         job.run(timeout=timedelta(0))
+2026-10-17T11:20:53.6016800Z                 assert lakeflow.ws.jobs.cancelled == [77]
+2026-10-17T11:20:53.6017261Z                 assert lakeflow.active_runs == set()
+2026-10-17T11:20:53.6017653Z             """,
+2026-10-17T11:20:53.6017908Z         )
+2026-10-17T11:20:53.6018187Z >       result.assert_outcomes(passed=1)
+2026-10-17T11:20:53.6018783Z E       AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6019370Z E
+2026-10-17T11:20:53.6019674Z E         Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6020108Z E         Differing items:
+2026-10-17T11:20:53.6020442Z E         {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6020826Z E         {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6021177Z E
+2026-10-17T11:20:53.6021423Z E         Full diff:
+2026-10-17T11:20:53.6021691Z E           {
+2026-10-17T11:20:53.6022194Z E         -     'errors': 0,
+2026-10-17T11:20:53.6022518Z E         ?               ^
+2026-10-17T11:20:53.6022829Z E         +     'errors': 1,
+2026-10-17T11:20:53.6023139Z E         ?               ^
+2026-10-17T11:20:53.6023452Z E               'failed': 0,
+2026-10-17T11:20:53.6023769Z E         -     'passed': 1,
+2026-10-17T11:20:53.6024073Z E         ?               ^
+2026-10-17T11:20:53.6024374Z E         +     'passed': 0,
+2026-10-17T11:20:53.6024680Z E         ?               ^
+2026-10-17T11:20:53.6024994Z E               'skipped': 0,
+2026-10-17T11:20:53.6025323Z E               'xfailed': 0,
+2026-10-17T11:20:53.6025640Z E               'xpassed': 0,
+2026-10-17T11:20:53.6025948Z E           }
+2026-10-17T11:20:53.6026103Z
+2026-10-17T11:20:53.6026687Z /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_ephemeral.py:153: AssertionError
+2026-10-17T11:20:53.6027688Z ----------------------------- Captured stdout call -----------------------------
+2026-10-17T11:20:53.6028283Z ============================= test session starts ==============================
+2026-10-17T11:20:53.6028837Z platform linux -- Python 3.11.17, pytest-8.3.0, pluggy-1.7.0
+2026-10-17T11:20:53.6029452Z rootdir: /tmp/pytest-of-runner/pytest-0/test_timeout_cancels_the_run0
+2026-10-17T11:20:53.6030031Z plugins: databricks-lakeflow-0.1.0, xdist-3.0.2
+2026-10-17T11:20:53.6030454Z collected 0 items / 1 error
+2026-10-17T11:20:53.6030660Z
+2026-10-17T11:20:53.6030840Z ==================================== ERRORS ====================================
+2026-10-17T11:20:53.6031418Z ________________________ ERROR collecting test_jobs.py _________________________
+2026-10-17T11:20:53.6032520Z ImportError while importing test module '/tmp/pytest-of-runner/pytest-0/test_timeout_cancels_the_run0/test_jobs.py'.
+2026-10-17T11:20:53.6033423Z Hint: make sure your test modules/packages have valid Python names.
+2026-10-17T11:20:53.6033915Z Traceback:
+2026-10-17T11:20:53.6034613Z /home/runner/work/_temp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py:126: in import_module
+2026-10-17T11:20:53.6035544Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-10-17T11:20:53.6036026Z test_jobs.py:6: in <module>
+2026-10-17T11:20:53.6036370Z     from tests.unit.fakes import make_run
+2026-10-17T11:20:53.6036800Z E   ModuleNotFoundError: No module named 'tests'
+2026-10-17T11:20:53.6037306Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6037769Z ERROR test_jobs.py
+2026-10-17T11:20:53.6038176Z !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2026-10-17T11:20:53.6038914Z =============================== 1 error in 0.13s ===============================
+2026-10-17T11:20:53.6039638Z ________________________ test_exit_cancels_active_runs _________________________
+2026-10-17T11:20:53.6040039Z
+2026-10-17T11:20:53.6040434Z pytester = <Pytester PosixPath('/tmp/pytest-of-runner/pytest-0/test_exit_cancels_active_runs0')>
+2026-10-17T11:20:53.6040983Z
+2026-10-17T11:20:53.6041255Z     def test_exit_cancels_active_runs(pytester: pytest.Pytester) -> None:
+2026-10-17T11:20:53.6041790Z         result = run_tests(
+2026-10-17T11:20:53.6042373Z             pytester,
+2026-10-17T11:20:53.6042663Z             """
+2026-10-17T11:20:53.6042935Z             import pytest
+2026-10-17T11:20:53.6043229Z
+2026-10-17T11:20:53.6043518Z             from tests.unit.fakes import make_run
+2026-10-17T11:20:53.6043906Z
+2026-10-17T11:20:53.6044162Z             def test_job(lakeflow):
+2026-10-17T11:20:53.6044611Z                 lakeflow.ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+2026-10-17T11:20:53.6045070Z
+2026-10-17T11:20:53.6045315Z                 def broken(run_id):
+2026-10-17T11:20:53.6045704Z                     raise RuntimeError("network down")
+2026-10-17T11:20:53.6046091Z
+2026-10-17T11:20:53.6046367Z                 lakeflow.ws.jobs.get_run = broken
+2026-10-17T11:20:53.6046788Z                 with pytest.raises(RuntimeError):
+2026-10-17T11:20:53.6047216Z                     with lakeflow.job("my_job") as job:
+2026-10-17T11:20:53.6047620Z                         job.run()
+2026-10-17T11:20:53.6048009Z                 assert lakeflow.ws.jobs.cancelled == [77]
+2026-10-17T11:20:53.6048465Z                 assert lakeflow.ws.jobs.deleted == []
+2026-10-17T11:20:53.6048848Z             """,
+2026-10-17T11:20:53.6049110Z         )
+2026-10-17T11:20:53.6049385Z >       result.assert_outcomes(passed=1)
+2026-10-17T11:20:53.6049983Z E       AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6050568Z E
+2026-10-17T11:20:53.6050884Z E         Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6051307Z E         Differing items:
+2026-10-17T11:20:53.6051657Z E         {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6052253Z E         {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6052625Z E
+2026-10-17T11:20:53.6052896Z E         Full diff:
+2026-10-17T11:20:53.6053197Z E           {
+2026-10-17T11:20:53.6053487Z E         -     'errors': 0,
+2026-10-17T11:20:53.6053832Z E         ?               ^
+2026-10-17T11:20:53.6054170Z E         +     'errors': 1,
+2026-10-17T11:20:53.6054499Z E         ?               ^
+2026-10-17T11:20:53.6054821Z E               'failed': 0,
+2026-10-17T11:20:53.6055160Z E         -     'passed': 1,
+2026-10-17T11:20:53.6055502Z E         ?               ^
+2026-10-17T11:20:53.6055831Z E         +     'passed': 0,
+2026-10-17T11:20:53.6056154Z E         ?               ^
+2026-10-17T11:20:53.6056476Z E               'skipped': 0,
+2026-10-17T11:20:53.6056816Z E               'xfailed': 0,
+2026-10-17T11:20:53.6057174Z E               'xpassed': 0,
+2026-10-17T11:20:53.6057498Z E           }
+2026-10-17T11:20:53.6057668Z
+2026-10-17T11:20:53.6058278Z /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_ephemeral.py:178: AssertionError
+2026-10-17T11:20:53.6059289Z ----------------------------- Captured stdout call -----------------------------
+2026-10-17T11:20:53.6059914Z ============================= test session starts ==============================
+2026-10-17T11:20:53.6060512Z platform linux -- Python 3.11.17, pytest-8.3.0, pluggy-1.7.0
+2026-10-17T11:20:53.6061183Z rootdir: /tmp/pytest-of-runner/pytest-0/test_exit_cancels_active_runs0
+2026-10-17T11:20:53.6061971Z plugins: databricks-lakeflow-0.1.0, xdist-3.0.2
+2026-10-17T11:20:53.6062451Z collected 0 items / 1 error
+2026-10-17T11:20:53.6062680Z
+2026-10-17T11:20:53.6062876Z ==================================== ERRORS ====================================
+2026-10-17T11:20:53.6063671Z ________________________ ERROR collecting test_jobs.py _________________________
+2026-10-17T11:20:53.6064655Z ImportError while importing test module '/tmp/pytest-of-runner/pytest-0/test_exit_cancels_active_runs0/test_jobs.py'.
+2026-10-17T11:20:53.6065794Z Hint: make sure your test modules/packages have valid Python names.
+2026-10-17T11:20:53.6066321Z Traceback:
+2026-10-17T11:20:53.6067078Z /home/runner/work/_temp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py:126: in import_module
+2026-10-17T11:20:53.6068058Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-10-17T11:20:53.6068602Z test_jobs.py:3: in <module>
+2026-10-17T11:20:53.6068974Z     from tests.unit.fakes import make_run
+2026-10-17T11:20:53.6069427Z E   ModuleNotFoundError: No module named 'tests'
+2026-10-17T11:20:53.6069951Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6070471Z ERROR test_jobs.py
+2026-10-17T11:20:53.6070917Z !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2026-10-17T11:20:53.6071599Z =============================== 1 error in 0.07s ===============================
+2026-10-17T11:20:53.6072728Z _________________________ test_single_task_end_to_end __________________________
+2026-10-17T11:20:53.6073076Z
+2026-10-17T11:20:53.6073407Z pytester = <Pytester PosixPath('/tmp/pytest-of-runner/pytest-0/test_single_task_end_to_end0')>
+2026-10-17T11:20:53.6074052Z fake_ws = <unit.fakes.FakeWorkspaceClient object at 0x7ffbdee993d0>
+2026-10-17T11:20:53.6074368Z
+2026-10-17T11:20:53.6074710Z     def test_single_task_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+2026-10-17T11:20:53.6075265Z         pytester.makepyfile(
+2026-10-17T11:20:53.6075523Z             """
+2026-10-17T11:20:53.6075744Z             import pytest
+2026-10-17T11:20:53.6075982Z
+2026-10-17T11:20:53.6076216Z             from tests.unit.fakes import recorded
+2026-10-17T11:20:53.6076528Z
+2026-10-17T11:20:53.6076752Z             def test_task(lakeflow):
+2026-10-17T11:20:53.6077110Z                 lakeflow.ws.jobs.queue(*recorded("probe_success"))
+2026-10-17T11:20:53.6077491Z                 with lakeflow.task(
+2026-10-17T11:20:53.6077782Z                     "my_job.transform",
+2026-10-17T11:20:53.6078094Z                     params={"param1": "hello"},
+2026-10-17T11:20:53.6078483Z                     upstream_values={"extract": {"row_count": 42}},
+2026-10-17T11:20:53.6078918Z                     capture_values=["stage", "rows_written"],
+2026-10-17T11:20:53.6079277Z                 ) as task:
+2026-10-17T11:20:53.6079544Z                     run = task.run()
+2026-10-17T11:20:53.6079850Z                 assert run.succeeded
+2026-10-17T11:20:53.6080189Z                 assert sorted(run.tasks) == ["transform"]
+2026-10-17T11:20:53.6080712Z                 assert sorted(run.injected_tasks) == ["__pytest_probe__transform", "extract"]
+2026-10-17T11:20:53.6081364Z                 assert run.task("transform").values == {"stage": "done", "rows_written": 7}
+2026-10-17T11:20:53.6082034Z
+2026-10-17T11:20:53.6082285Z             def test_bad_reference(lakeflow):
+2026-10-17T11:20:53.6082702Z                 with pytest.raises(KeyError, match="No job 'nope'"):
+2026-10-17T11:20:53.6083134Z                     lakeflow.task("nope.transform")
+2026-10-17T11:20:53.6083612Z                 with pytest.raises(Exception, match="Expected 'job_key.task_key'"):
+2026-10-17T11:20:53.6084099Z                     lakeflow.task("my_job")
+2026-10-17T11:20:53.6084416Z             """
+2026-10-17T11:20:53.6084633Z         )
+2026-10-17T11:20:53.6084909Z >       pytester.runpytest().assert_outcomes(passed=2)
+2026-10-17T11:20:53.6085466Z E       AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6085975Z E
+2026-10-17T11:20:53.6086239Z E         Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6086593Z E         Differing items:
+2026-10-17T11:20:53.6086874Z E         {'passed': 0} != {'passed': 2}
+2026-10-17T11:20:53.6087399Z E         {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6087810Z E
+2026-10-17T11:20:53.6088026Z E         Full diff:
+2026-10-17T11:20:53.6088257Z E           {
+2026-10-17T11:20:53.6088484Z E         -     'errors': 0,
+2026-10-17T11:20:53.6088760Z E         ?               ^
+2026-10-17T11:20:53.6089020Z E         +     'errors': 1,
+2026-10-17T11:20:53.6089281Z E         ?               ^
+2026-10-17T11:20:53.6089501Z E               'failed': 0,
+2026-10-17T11:20:53.6089726Z E         -     'passed': 2,
+2026-10-17T11:20:53.6089946Z E         ?               ^
+2026-10-17T11:20:53.6090170Z E         +     'passed': 0,
+2026-10-17T11:20:53.6090397Z E         ?               ^
+2026-10-17T11:20:53.6090612Z E               'skipped': 0,
+2026-10-17T11:20:53.6090841Z E               'xfailed': 0,
+2026-10-17T11:20:53.6091063Z E               'xpassed': 0,
+2026-10-17T11:20:53.6091276Z E           }
+2026-10-17T11:20:53.6091389Z
+2026-10-17T11:20:53.6091963Z /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_task_values.py:144: AssertionError
+2026-10-17T11:20:53.6092666Z ----------------------------- Captured stdout call -----------------------------
+2026-10-17T11:20:53.6093085Z ============================= test session starts ==============================
+2026-10-17T11:20:53.6093487Z platform linux -- Python 3.11.17, pytest-8.3.0, pluggy-1.7.0
+2026-10-17T11:20:53.6093914Z rootdir: /tmp/pytest-of-runner/pytest-0/test_single_task_end_to_end0
+2026-10-17T11:20:53.6094313Z plugins: databricks-lakeflow-0.1.0, xdist-3.0.2
+2026-10-17T11:20:53.6094614Z collected 0 items / 1 error
+2026-10-17T11:20:53.6094759Z
+2026-10-17T11:20:53.6094892Z ==================================== ERRORS ====================================
+2026-10-17T11:20:53.6095301Z _______________ ERROR collecting test_single_task_end_to_end.py ________________
+2026-10-17T11:20:53.6095996Z ImportError while importing test module '/tmp/pytest-of-runner/pytest-0/test_single_task_end_to_end0/test_single_task_end_to_end.py'.
+2026-10-17T11:20:53.6096692Z Hint: make sure your test modules/packages have valid Python names.
+2026-10-17T11:20:53.6097047Z Traceback:
+2026-10-17T11:20:53.6097545Z /home/runner/work/_temp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py:126: in import_module
+2026-10-17T11:20:53.6098182Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-10-17T11:20:53.6098546Z test_single_task_end_to_end.py:3: in <module>
+2026-10-17T11:20:53.6098847Z     from tests.unit.fakes import recorded
+2026-10-17T11:20:53.6099152Z E   ModuleNotFoundError: No module named 'tests'
+2026-10-17T11:20:53.6099500Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6099841Z ERROR test_single_task_end_to_end.py
+2026-10-17T11:20:53.6100174Z !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2026-10-17T11:20:53.6100572Z =============================== 1 error in 0.07s ===============================
+2026-10-17T11:20:53.6100966Z ______________________ test_job_capture_values_end_to_end ______________________
+2026-10-17T11:20:53.6101239Z
+2026-10-17T11:20:53.6101537Z pytester = <Pytester PosixPath('/tmp/pytest-of-runner/pytest-0/test_job_capture_values_end_to_end0')>
+2026-10-17T11:20:53.6102244Z fake_ws = <unit.fakes.FakeWorkspaceClient object at 0x7ffbdf3c7d90>
+2026-10-17T11:20:53.6102526Z
+2026-10-17T11:20:53.6102831Z     def test_job_capture_values_end_to_end(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+2026-10-17T11:20:53.6103329Z         pytester.makepyfile(
+2026-10-17T11:20:53.6103552Z             """
+2026-10-17T11:20:53.6103752Z             import pytest
+2026-10-17T11:20:53.6103959Z
+2026-10-17T11:20:53.6104167Z             from tests.unit.fakes import recorded
+2026-10-17T11:20:53.6104438Z
+2026-10-17T11:20:53.6104622Z             def test_job(lakeflow):
+2026-10-17T11:20:53.6104935Z                 lakeflow.ws.jobs.queue(*recorded("probe_failure"))
+2026-10-17T11:20:53.6105612Z                 with lakeflow.job("my_job", params={"param1": "explode"}, capture_values={"transform": ["stage"]}) as job:
+2026-10-17T11:20:53.6106197Z                     run = job.run()
+2026-10-17T11:20:53.6106442Z                 assert run.failed
+2026-10-17T11:20:53.6106766Z                 assert run.task("transform").values["stage"] == "validation"
+2026-10-17T11:20:53.6107169Z                 assert run.task("transform").raised(ValueError)
+2026-10-17T11:20:53.6107470Z             """
+2026-10-17T11:20:53.6107653Z         )
+2026-10-17T11:20:53.6107893Z >       pytester.runpytest().assert_outcomes(passed=1)
+2026-10-17T11:20:53.6108349Z E       AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6108755Z E
+2026-10-17T11:20:53.6108976Z E         Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6109271Z E         Differing items:
+2026-10-17T11:20:53.6109507Z E         {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6109786Z E         {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6110026Z E
+2026-10-17T11:20:53.6110211Z E         Full diff:
+2026-10-17T11:20:53.6110406Z E           {
+2026-10-17T11:20:53.6110597Z E         -     'errors': 0,
+2026-10-17T11:20:53.6110823Z E         ?               ^
+2026-10-17T11:20:53.6111042Z E         +     'errors': 1,
+2026-10-17T11:20:53.6111260Z E         ?               ^
+2026-10-17T11:20:53.6111475Z E               'failed': 0,
+2026-10-17T11:20:53.6111699Z E         -     'passed': 1,
+2026-10-17T11:20:53.6112101Z E         ?               ^
+2026-10-17T11:20:53.6112337Z E         +     'passed': 0,
+2026-10-17T11:20:53.6112564Z E         ?               ^
+2026-10-17T11:20:53.6112781Z E               'skipped': 0,
+2026-10-17T11:20:53.6113006Z E               'xfailed': 0,
+2026-10-17T11:20:53.6113230Z E               'xpassed': 0,
+2026-10-17T11:20:53.6113443Z E           }
+2026-10-17T11:20:53.6113551Z
+2026-10-17T11:20:53.6113956Z /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_task_values.py:167: AssertionError
+2026-10-17T11:20:53.6114629Z ----------------------------- Captured stdout call -----------------------------
+2026-10-17T11:20:53.6115044Z ============================= test session starts ==============================
+2026-10-17T11:20:53.6115436Z platform linux -- Python 3.11.17, pytest-8.3.0, pluggy-1.7.0
+2026-10-17T11:20:53.6115899Z rootdir: /tmp/pytest-of-runner/pytest-0/test_job_capture_values_end_to_end0
+2026-10-17T11:20:53.6116319Z plugins: databricks-lakeflow-0.1.0, xdist-3.0.2
+2026-10-17T11:20:53.6116612Z collected 0 items / 1 error
+2026-10-17T11:20:53.6116752Z
+2026-10-17T11:20:53.6116881Z ==================================== ERRORS ====================================
+2026-10-17T11:20:53.6117295Z ____________ ERROR collecting test_job_capture_values_end_to_end.py ____________
+2026-10-17T11:20:53.6118039Z ImportError while importing test module '/tmp/pytest-of-runner/pytest-0/test_job_capture_values_end_to_end0/test_job_capture_values_end_to_end.py'.
+2026-10-17T11:20:53.6118758Z Hint: make sure your test modules/packages have valid Python names.
+2026-10-17T11:20:53.6119107Z Traceback:
+2026-10-17T11:20:53.6119599Z /home/runner/work/_temp/uv-python-dir/cpython-3.11.17-linux-x86_64-gnu/lib/python3.11/importlib/__init__.py:126: in import_module
+2026-10-17T11:20:53.6120234Z     return _bootstrap._gcd_import(name[level:], package, level)
+2026-10-17T11:20:53.6120607Z test_job_capture_values_end_to_end.py:3: in <module>
+2026-10-17T11:20:53.6120925Z     from tests.unit.fakes import recorded
+2026-10-17T11:20:53.6121229Z E   ModuleNotFoundError: No module named 'tests'
+2026-10-17T11:20:53.6121571Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6122046Z ERROR test_job_capture_values_end_to_end.py
+2026-10-17T11:20:53.6122407Z !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+2026-10-17T11:20:53.6122920Z =============================== 1 error in 0.12s ===============================
+2026-10-17T11:20:53.6123296Z =============================== warnings summary ===============================
+2026-10-17T11:20:53.6123738Z tests/unit/test_ephemeral.py:335
+2026-10-17T11:20:53.6124418Z   /home/runner/work/pytest-databricks-lakeflow/pytest-databricks-lakeflow/tests/unit/test_ephemeral.py:335: DeprecationWarning: invalid escape sequence '\['
+2026-10-17T11:20:53.6125096Z     """
+2026-10-17T11:20:53.6125201Z
+2026-10-17T11:20:53.6125414Z -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2026-10-17T11:20:53.6125846Z =========================== short test summary info ============================
+2026-10-17T11:20:53.6126449Z FAILED tests/unit/test_cleanup.py::test_destroy_runs_after_interrupted_tests_are_cleaned_up - assert [] == [77]
+2026-10-17T11:20:53.6126941Z
+2026-10-17T11:20:53.6178820Z   Right contains one more item: 77
+2026-10-17T11:20:53.6179206Z
+2026-10-17T11:20:53.6179394Z   Full diff:
+2026-10-17T11:20:53.6179610Z   + []
+2026-10-17T11:20:53.6179980Z   - [
+2026-10-17T11:20:53.6180244Z   -     77,
+2026-10-17T11:20:53.6180435Z   - ]
+2026-10-17T11:20:53.6181049Z FAILED tests/unit/test_ephemeral.py::test_timeout_cancels_the_run - AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6181721Z
+2026-10-17T11:20:53.6182121Z   Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6182413Z   Differing items:
+2026-10-17T11:20:53.6182640Z   {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6182894Z   {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6183131Z
+2026-10-17T11:20:53.6183302Z   Full diff:
+2026-10-17T11:20:53.6183486Z     {
+2026-10-17T11:20:53.6183671Z   -     'errors': 0,
+2026-10-17T11:20:53.6183874Z   ?               ^
+2026-10-17T11:20:53.6184068Z   +     'errors': 1,
+2026-10-17T11:20:53.6184260Z   ?               ^
+2026-10-17T11:20:53.6184451Z         'failed': 0,
+2026-10-17T11:20:53.6184654Z   -     'passed': 1,
+2026-10-17T11:20:53.6184848Z   ?               ^
+2026-10-17T11:20:53.6185048Z   +     'passed': 0,
+2026-10-17T11:20:53.6185242Z   ?               ^
+2026-10-17T11:20:53.6185445Z         'skipped': 0,
+2026-10-17T11:20:53.6185652Z         'xfailed': 0,
+2026-10-17T11:20:53.6185851Z         'xpassed': 0,
+2026-10-17T11:20:53.6186041Z     }
+2026-10-17T11:20:53.6186617Z FAILED tests/unit/test_ephemeral.py::test_exit_cancels_active_runs - AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6187249Z
+2026-10-17T11:20:53.6187468Z   Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6187751Z   Differing items:
+2026-10-17T11:20:53.6187967Z   {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6188211Z   {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6188434Z
+2026-10-17T11:20:53.6188604Z   Full diff:
+2026-10-17T11:20:53.6188787Z     {
+2026-10-17T11:20:53.6188962Z   -     'errors': 0,
+2026-10-17T11:20:53.6189157Z   ?               ^
+2026-10-17T11:20:53.6189349Z   +     'errors': 1,
+2026-10-17T11:20:53.6189556Z   ?               ^
+2026-10-17T11:20:53.6189759Z         'failed': 0,
+2026-10-17T11:20:53.6189976Z   -     'passed': 1,
+2026-10-17T11:20:53.6190176Z   ?               ^
+2026-10-17T11:20:53.6190372Z   +     'passed': 0,
+2026-10-17T11:20:53.6190568Z   ?               ^
+2026-10-17T11:20:53.6190767Z         'skipped': 0,
+2026-10-17T11:20:53.6190973Z         'xfailed': 0,
+2026-10-17T11:20:53.6191173Z         'xpassed': 0,
+2026-10-17T11:20:53.6191365Z     }
+2026-10-17T11:20:53.6192109Z FAILED tests/unit/test_task_values.py::test_single_task_end_to_end - AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6192909Z
+2026-10-17T11:20:53.6193138Z   Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6193422Z   Differing items:
+2026-10-17T11:20:53.6193659Z   {'passed': 0} != {'passed': 2}
+2026-10-17T11:20:53.6193908Z   {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6194131Z
+2026-10-17T11:20:53.6194306Z   Full diff:
+2026-10-17T11:20:53.6194786Z     {
+2026-10-17T11:20:53.6194976Z   -     'errors': 0,
+2026-10-17T11:20:53.6195299Z   ?               ^
+2026-10-17T11:20:53.6195490Z   +     'errors': 1,
+2026-10-17T11:20:53.6195683Z   ?               ^
+2026-10-17T11:20:53.6195893Z         'failed': 0,
+2026-10-17T11:20:53.6196096Z   -     'passed': 2,
+2026-10-17T11:20:53.6196288Z   ?               ^
+2026-10-17T11:20:53.6196478Z   +     'passed': 0,
+2026-10-17T11:20:53.6196668Z   ?               ^
+2026-10-17T11:20:53.6196862Z         'skipped': 0,
+2026-10-17T11:20:53.6197066Z         'xfailed': 0,
+2026-10-17T11:20:53.6197267Z         'xpassed': 0,
+2026-10-17T11:20:53.6197458Z     }
+2026-10-17T11:20:53.6198036Z FAILED tests/unit/test_task_values.py::test_job_capture_values_end_to_end - AssertionError: assert {'errors': 1,...pped': 0, ...} == {'errors': 0,...pped': 0, ...}
+2026-10-17T11:20:53.6198666Z
+2026-10-17T11:20:53.6198880Z   Omitting 4 identical items, use -vv to show
+2026-10-17T11:20:53.6199168Z   Differing items:
+2026-10-17T11:20:53.6199387Z   {'passed': 0} != {'passed': 1}
+2026-10-17T11:20:53.6199650Z   {'errors': 1} != {'errors': 0}
+2026-10-17T11:20:53.6199878Z
+2026-10-17T11:20:53.6200062Z   Full diff:
+2026-10-17T11:20:53.6200257Z     {
+2026-10-17T11:20:53.6200431Z   -     'errors': 0,
+2026-10-17T11:20:53.6200623Z   ?               ^
+2026-10-17T11:20:53.6200815Z   +     'errors': 1,
+2026-10-17T11:20:53.6201006Z   ?               ^
+2026-10-17T11:20:53.6201195Z         'failed': 0,
+2026-10-17T11:20:53.6201404Z   -     'passed': 1,
+2026-10-17T11:20:53.6201604Z   ?               ^
+2026-10-17T11:20:53.6201936Z   +     'passed': 0,
+2026-10-17T11:20:53.6202146Z   ?               ^
+2026-10-17T11:20:53.6202343Z         'skipped': 0,
+2026-10-17T11:20:53.6202552Z         'xfailed': 0,
+2026-10-17T11:20:53.6202756Z         'xpassed': 0,
+2026-10-17T11:20:53.6202945Z     }
+2026-10-17T11:20:53.6203231Z ============ 5 failed, 154 passed, 9 deselected, 1 warning in 6.66s ============
+2026-10-17T11:20:53.7531504Z ##[error]Process completed with exit code 1.
+2026-10-17T11:20:53.7673328Z Post job cleanup.

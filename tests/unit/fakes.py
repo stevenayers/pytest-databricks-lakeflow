@@ -145,7 +145,8 @@ class FakeWorkspaceClient:
         self.files = FakeFiles(self.workspace)
         self.schemas = FakeSchemas()
         self.current_user = FakeCurrentUser()
-        self.config = SimpleNamespace(host=HOST)
+        self.config = SimpleNamespace(host=HOST, profile=None)
+        self.profiles: list[str | None] = []
 
 
 def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
