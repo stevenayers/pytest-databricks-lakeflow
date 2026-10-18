@@ -347,10 +347,10 @@ class JobRun:
     tasks: dict[str, TaskRun]
     injected_tasks: dict[str, TaskRun]
     skipped_tasks: dict[str, TaskRun] = field(default_factory=dict)
+    disabled_tasks: dict[str, TaskRun] = field(default_factory=dict)
     parameters: dict[str, str] = field(default_factory=dict)
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
-    disabled_tasks: dict[str, TaskRun] = field(default_factory=dict)
 
     @property
     def succeeded(self) -> bool:
@@ -373,7 +373,7 @@ class JobRun:
 
     @property
     def executed_tasks(self) -> list[str]:
-        """The sorted keys of the tasks in `tasks` that ran: not excluded, upstream-failed or cancelled."""
+        """The sorted keys of the tasks in `tasks` whose `ran` is true."""
         return sorted(key for key, t in self.tasks.items() if t.ran)
 
     def task(self, key: str) -> TaskRun:
@@ -511,10 +511,10 @@ def build_job_run(
         tasks={key: t for key, t in user.items() if t.result_state != "DISABLED"},
         injected_tasks=injected,
         skipped_tasks={key: t for key, t in user.items() if t.disabled and key not in disabled},
+        disabled_tasks={key: t for key, t in user.items() if t.disabled and key in disabled},
         parameters=_job_parameters(run.job_parameters),
         timing=Timing.from_run(run),
         effective_performance_target=_enum(run.effective_performance_target),
-        disabled_tasks={key: t for key, t in user.items() if t.disabled and key in disabled},
     )
 
 
