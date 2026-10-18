@@ -703,6 +703,15 @@ def test_single_node_rejects_standard_access_mode_on_inline_clusters() -> None:
         sanitised(settings, single_node=True)
 
 
+def test_single_node_changes_no_cluster_when_any_is_rejected() -> None:
+    settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "USER_ISOLATION"})
+    [classic] = settings.job_clusters or []
+    before = classic.new_cluster.as_dict() if classic.new_cluster else None
+    with pytest.raises(LakeflowError, match=r"'inline'.*dedicated"):
+        sanitised(settings, single_node=True)
+    assert classic.new_cluster is not None and classic.new_cluster.as_dict() == before
+
+
 def test_single_node_accepts_dedicated_access_mode() -> None:
     settings = with_inline_cluster({"spark_version": "17.3.x", "data_security_mode": "SINGLE_USER"})
     assert_single_node(task(sanitised(settings, single_node=True), "inline").new_cluster)
