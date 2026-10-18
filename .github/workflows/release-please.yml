@@ -1,9 +1,12 @@
 name: release-please
 
-# Opens and updates the release PR from conventional commits on main, then enables auto-merge on it so it
-# squash-merges itself once the checks pass. That merge runs this workflow again: release-please creates the
-# vX.Y.Z tag and the GitHub release, and the last step dispatches release.yml for the tag.
-# Needs "Allow GitHub Actions to create and approve pull requests" and "Allow auto-merge" in the repository settings.
+# Opens and updates the release PR from conventional commits on main and enables auto-merge on it, so it
+# squash-merges itself once the checks pass. That merge runs this workflow again, and release-please then
+# creates the vX.Y.Z tag and the GitHub release. The tag push starts release.yml, which publishes to PyPI.
+#
+# Everything here runs with a GitHub App installation token, not GITHUB_TOKEN. Pull requests opened with
+# GITHUB_TOKEN start their CI runs in an approval-required state, and tags pushed with it start no workflows,
+# so nothing would happen without a click. The App's token has neither restriction. Setup is in CONTRIBUTING.md.
 on:
   push:
     branches: [main]
@@ -20,22 +23,29 @@ jobs:
     name: Release PR
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write # push the release branch, create the tag and the GitHub release
-      pull-requests: write # open and update the release PR, enable auto-merge on it
-      issues: write # label the release PR
-      actions: write # dispatch release.yml for the new tag
+    environment: release # holds RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY, restricted to main
+    permissions: {}
     steps:
+      - name: Get a token for the release App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write # push the release branch, create the tag and the GitHub release
+          permission-pull-requests: write # open, update, auto-merge the release PR
+          permission-issues: write # label the release PR
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           target-branch: main
       - name: Enable auto-merge on the release PR
         if: steps.release.outputs.prs_created == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_JSON: ${{ steps.release.outputs.pr }}
         run: |
           number="$(jq -r '.number' <<< "$PR_JSON")"
@@ -46,9 +56,3 @@ jobs:
           fi
           gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --auto --squash
           echo "Enabled auto-merge on release PR #$number"
-      - name: Start the release workflow for the new tag
-        if: steps.release.outputs.release_created == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag_name }}
-        run: gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
