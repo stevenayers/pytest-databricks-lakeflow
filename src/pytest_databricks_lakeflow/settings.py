@@ -43,6 +43,7 @@ MAX_DESCRIPTION_BYTES = 27700
 ATTRIBUTION_TAGS = ("pytest_ci_url", "pytest_user", "pytest_git_sha", "pytest_git_branch")
 NEWLINES = re.compile(r"[\r\n]+")
 ENV_KEY = f"{PREFIX}serverless"
+MAX_ENVIRONMENTS = 10
 MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
@@ -77,12 +78,16 @@ def sanitise(
     description: str | None = None,
     timeout: timedelta | None = None,
     side_effects: str = "neutralise",
+    environment_version: str | None = None,
+    budget_policy_id: str | None = None,
+    existing_cluster_id: str | None = None,
 ) -> jobs.JobSettings:
     """Make a copied template safe to create as a throwaway job.
 
     Removes what would make the copy run on its own, notify people, or count as bundle-managed, and removes
     `run_as` unless `run_as` says otherwise. Pauses dashboard and SQL alert subscriptions unless `side_effects` is
-    `"keep"`. Names the job, adds `tags` to the template's tags and allows one run at a time.
+    `"keep"`. Names the job, adds `tags` to the template's tags and allows one run at a time. Applies the compute
+    overrides that are given.
 
     Args:
         settings: A copy of a template. It is changed in place.
@@ -101,6 +106,12 @@ def sanitise(
         side_effects: `"neutralise"` sets `dashboard_task.subscription.paused` on dashboard tasks with a
             subscription and `sql_task.alert.pause_subscriptions` on SQL alert tasks. `"keep"` leaves them as the
             template has them.
+        environment_version: The serverless environment version of every environment except the helper
+            environment and those whose spec sets `base_environment`.
+        budget_policy_id: The budget policy of the job.
+        existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
+            cluster, helper tasks included. The job clusters are removed. Serverless and warehouse tasks are left
+            alone.
 
     Returns:
         `settings`.
@@ -119,6 +130,12 @@ def sanitise(
             task.disable_auto_optimization = True
         if side_effects == "neutralise":
             _pause_subscriptions(task)
+    if environment_version is not None:
+        _set_environment_version(settings, environment_version)
+    if budget_policy_id is not None:
+        settings.budget_policy_id = budget_policy_id
+    if existing_cluster_id is not None:
+        _use_existing_cluster(settings, existing_cluster_id)
     if performance_optimized:
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
@@ -177,6 +194,22 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
     for key in keys:
         tasks[key].disabled = True
     return settings
+def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
+    for env in settings.environments or []:
+        if env.environment_key == ENV_KEY or (env.spec and getattr(env.spec, "base_environment", None)):
+            continue
+        if env.spec is None:
+            env.spec = compute.Environment.from_dict({})
+        env.spec.environment_version = version
+
+
+def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
+    for task in settings.tasks or []:
+        if task.job_cluster_key or task.new_cluster:
+            task.existing_cluster_id = cluster_id
+            task.job_cluster_key = None
+            task.new_cluster = None
+    settings.job_clusters = None
 
 
 def _run_as(run_as: str | jobs.JobRunAs | None) -> jobs.JobRunAs | None:
@@ -198,7 +231,7 @@ def _trim(text: str, max_bytes: int) -> str:
 
 
 def _serverless(task: jobs.Task) -> bool:
-    runs_code = task.notebook_task or task.spark_python_task or task.python_wheel_task
+    runs_code = task.notebook_task or task.spark_python_task or task.python_wheel_task or task.spark_jar_task
     on_cluster = task.job_cluster_key or task.new_cluster or task.existing_cluster_id
     on_warehouse = task.notebook_task and task.notebook_task.warehouse_id
     return bool(runs_code) and not on_cluster and not on_warehouse
@@ -223,6 +256,28 @@ def check_params(job_key: str, settings: jobs.JobSettings, params: Mapping[str, 
         raise LakeflowError(
             f"Job {job_key!r} does not declare the parameters {undeclared}. Declared: {sorted(declared)}. "
             "Pass allow_undeclared_params=True to Lakeflow to pass them anyway."
+        )
+
+
+def check_compute(settings: jobs.JobSettings) -> None:
+    """Fail early on tasks that the Jobs API rejects on serverless because they have no environment.
+
+    Args:
+        settings: The job's settings.
+
+    Raises:
+        LakeflowError: If a Python script, Python wheel, JAR or dbt task has no cluster and no `environment_key`.
+    """
+    missing = [
+        task.task_key
+        for task in settings.tasks or []
+        if (task.spark_python_task or task.python_wheel_task or task.spark_jar_task or task.dbt_task)
+        and not (task.job_cluster_key or task.new_cluster or task.existing_cluster_id or task.environment_key)
+    ]
+    if missing:
+        raise LakeflowError(
+            f"Tasks {missing} have no cluster and no environment_key. Serverless Python script, Python wheel, JAR "
+            "and dbt tasks need an environment_key that names one of the job's environments."
         )
 
 
@@ -423,6 +478,13 @@ def _add_helper_compute(settings: jobs.JobSettings, helpers: Helpers) -> None:
                 f"that key. Available: {clusters}"
             )
     elif not any(env.environment_key == ENV_KEY for env in settings.environments or []):
+        existing = [env.environment_key for env in settings.environments or []]
+        if len(existing) >= MAX_ENVIRONMENTS:
+            raise LakeflowError(
+                f"The job already has {len(existing)} environments, the most a job allows is {MAX_ENVIRONMENTS}: "
+                f"{existing}. One must go from the bundle job to make room for the helper "
+                f"environment {ENV_KEY!r}, or pass helpers_compute to run helper tasks on a job cluster."
+            )
         spec = compute.Environment.from_dict({"environment_version": helpers.environment_version})
         environment = jobs.JobEnvironment(environment_key=ENV_KEY, spec=spec)
         settings.environments = [*(settings.environments or []), environment]

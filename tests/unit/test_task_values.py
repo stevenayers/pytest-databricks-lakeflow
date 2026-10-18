@@ -180,3 +180,43 @@ def test_helper_settings_from_lakeflow(pytester: pytest.Pytester, fake_ws: FakeW
     probe = created["tasks"][-1]
     assert probe.job_cluster_key == "classic"
     assert probe.notebook_task.notebook_path == "/Shared/helpers/get_values"
+
+
+def with_environment_count(count: int) -> jobs.JobSettings:
+    settings = example_settings()
+    extra = [jobs.JobEnvironment.from_dict({"environment_key": f"env{i}"}) for i in range(1, count)]
+    settings.environments = [*(settings.environments or []), *extra]
+    return settings
+
+
+def test_helpers_refuse_an_eleventh_environment() -> None:
+    with pytest.raises(LakeflowError, match=r"10 environments.*'default', 'env1'.*'env9'.*make room") as e:
+        inject_probes(with_environment_count(10), {"transform": ["x"]}, HELPERS)
+    assert ENV_KEY in str(e.value)
+    settings = inject_probes(with_environment_count(9), {"transform": ["x"]}, HELPERS)
+    assert len(settings.environments or []) == 10
+    assert (settings.environments or [])[-1].environment_key == ENV_KEY
+
+
+def test_wrap_task_refuses_an_eleventh_environment() -> None:
+    with pytest.raises(LakeflowError, match="10"):
+        wrap_task(with_environment_count(10), "transform", UPSTREAM, [], HELPERS)
+    settings = wrap_task(with_environment_count(9), "transform", UPSTREAM, [], HELPERS)
+    assert (settings.environments or [])[-1].environment_key == ENV_KEY
+
+
+def test_helpers_on_existing_cluster(pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    configure_lakeflow(pytester, 'helpers_compute="classic", existing_cluster_id="0123-456789-abcdef"')
+    pytester.makepyfile(
+        """
+        def test_task(lakeflow):
+            with lakeflow.task("my_job.transform", upstream_task_values={"extract": {"row_count": 1}}):
+                pass
+        """
+    )
+    pytester.runpytest().assert_outcomes(passed=1)
+    [created] = fake_ws.jobs.created
+    stub = created["tasks"][0]
+    assert stub.task_key == "extract"
+    assert (stub.existing_cluster_id, stub.job_cluster_key) == ("0123-456789-abcdef", None)
+    assert "job_clusters" not in created

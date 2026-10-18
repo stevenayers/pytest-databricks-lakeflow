@@ -4,10 +4,12 @@ from datetime import timedelta
 from typing import Any
 
 import pytest
-from databricks.sdk.service import jobs
+from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
+    ENV_KEY,
+    check_compute,
     check_params,
     create_kwargs,
     disable_tasks,
@@ -18,6 +20,7 @@ from pytest_databricks_lakeflow.settings import (
 
 from .fakes import example_settings, reporting_settings
 
+CLUSTER = "0123-456789-abcdef"
 TAGS = {"pytest": "", "pytest_run_id": "r1", "pytest_nodeid": "tests/test_x.py::test_y"}
 
 
@@ -87,6 +90,102 @@ def test_auto_optimisation_is_disabled_on_serverless_code_tasks_only() -> None:
     assert task(settings, "classic").disable_auto_optimization is None
     kept = sanitised(disable_auto_optimization=False)
     assert task(kept, "extract").disable_auto_optimization is None
+
+
+def test_auto_optimisation_reaches_serverless_jar_tasks() -> None:
+    settings = example_settings()
+    jar = {"main_class_name": "x"}
+    settings.tasks = [
+        *(settings.tasks or []),
+        jobs.Task.from_dict({"task_key": "jar", "environment_key": "default", "spark_jar_task": jar}),
+        jobs.Task.from_dict({"task_key": "classic_jar", "job_cluster_key": "classic", "spark_jar_task": jar}),
+    ]
+    sanitised_settings = sanitised(settings)
+    assert task(sanitised_settings, "jar").disable_auto_optimization is True
+    assert task(sanitised_settings, "classic_jar").disable_auto_optimization is None
+
+
+def with_environments(*environments: dict[str, Any]) -> jobs.JobSettings:
+    settings = example_settings()
+    settings.environments = [
+        *(settings.environments or []),
+        *(jobs.JobEnvironment.from_dict(e) for e in environments),
+        jobs.JobEnvironment.from_dict({"environment_key": ENV_KEY, "spec": {"environment_version": "4"}}),
+    ]
+    return settings
+
+
+def versions(settings: jobs.JobSettings) -> dict[str, str | None]:
+    return {e.environment_key: e.spec.environment_version if e.spec else None for e in settings.environments or []}
+
+
+def test_environment_version_override() -> None:
+    other = {"environment_key": "other", "spec": {"environment_version": "3"}}
+    settings = sanitised(with_environments(other), environment_version="5")
+    assert versions(settings) == {"default": "5", "other": "5", ENV_KEY: "4"}
+
+
+@pytest.mark.skipif(
+    "base_environment" not in compute.Environment.__dataclass_fields__,
+    reason="this databricks-sdk has no base_environment",
+)
+def test_environment_version_leaves_base_environments_alone() -> None:
+    base = {"environment_key": "custom", "spec": {"base_environment": "/Workspace/envs/base.yml"}}
+    settings = sanitised(with_environments(base), environment_version="5")
+    assert versions(settings) == {"default": "5", "custom": None, ENV_KEY: "4"}
+
+
+def test_budget_policy_id_is_set() -> None:
+    assert sanitised(budget_policy_id="0123").budget_policy_id == "0123"
+
+
+def test_existing_cluster_id_moves_job_cluster_tasks() -> None:
+    settings = example_settings()
+    fresh = {"task_key": "fresh", "new_cluster": {"spark_version": "17.3.x"}, "notebook_task": {"notebook_path": "/x"}}
+    sql = {"task_key": "sql", "notebook_task": {"notebook_path": "/q", "warehouse_id": "w1"}}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(fresh), jobs.Task.from_dict(sql)]
+    after = sanitised(settings, existing_cluster_id=CLUSTER)
+    assert after.job_clusters is None
+    for key in ("classic", "fresh"):
+        moved = task(after, key)
+        assert (moved.existing_cluster_id, moved.job_cluster_key, moved.new_cluster) == (CLUSTER, None, None)
+    assert task(after, "sql").existing_cluster_id is None
+    before = sanitised()
+    for key in ("extract", "transform", "load"):
+        assert task(after, key) == task(before, key)
+
+
+def test_sanitise_without_compute_knobs_changes_nothing() -> None:
+    plain = sanitised()
+    assert sanitised(environment_version=None, budget_policy_id=None, existing_cluster_id=None) == plain
+    assert plain.budget_policy_id is None
+    assert plain.job_clusters == example_settings().job_clusters
+    assert plain.environments == example_settings().environments
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        {"python_wheel_task": {"package_name": "pkg", "entry_point": "main"}},
+        {"spark_python_task": {"python_file": "/x.py"}},
+        {"spark_jar_task": {"main_class_name": "x"}},
+        {"dbt_task": {"commands": ["dbt run"]}},
+    ],
+)
+def test_check_compute_names_tasks_without_environment(code: dict[str, Any]) -> None:
+    settings = example_settings()
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict({"task_key": "bare", **code})]
+    with pytest.raises(LakeflowError, match=r"\['bare'\].*environment_key"):
+        check_compute(settings)
+
+
+def test_check_compute_accepts_example_settings() -> None:
+    check_compute(example_settings())
+    settings = example_settings()
+    wheel = {"package_name": "pkg", "entry_point": "main"}
+    on_cluster = {"task_key": "c", "existing_cluster_id": "c-1", "python_wheel_task": wheel}
+    settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(on_cluster)]
+    check_compute(settings)
 
 
 def test_performance_target() -> None:

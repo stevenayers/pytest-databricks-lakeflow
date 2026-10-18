@@ -21,6 +21,9 @@ All arguments are keyword-only.
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks so that a failure fails once and fast, instead of being retried by the platform. |
 | `performance_optimized` | `False` | Run every ephemeral job with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. |
 | `side_effects` | `"neutralise"` | `"neutralise"` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral job, so test runs do not email snapshots or notify subscribers. `"keep"` leaves them as the template has them. Any other value raises `ValueError`. |
+| `environment_version` | `None` | The serverless environment version of every environment copied from the template, such as `"5"`. Environments whose spec sets `base_environment` keep it, and the helper environment `__pytest_serverless` keeps `helpers_environment_version`. |
+| `budget_policy_id` | `None` | The budget policy of every ephemeral job. |
+| `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, stub and probe tasks included, so that tests skip cluster start-up. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. |
 | `allow_undeclared_params` | `False` | Allow job parameters that the job does not declare. |
 | `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
 | `keep` | `False` | Keep every ephemeral job and temporary schema. |
