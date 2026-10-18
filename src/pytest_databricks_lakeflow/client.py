@@ -61,6 +61,8 @@ class Lakeflow:
         workspace_client: A client to use instead of making one from `profile`. The CLI still uses `profile`, or
             else the client's profile.
         sync: How to prepare the bundle: `deploy`, `sync` or `none`.
+        variables: Bundle variables, passed as `--var name=value` to every `bundle` command, `bundle destroy`
+            included. Instances with different variables set the target up separately.
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
         catalog: The catalog in which `schema()` creates temporary schemas.
@@ -99,6 +101,7 @@ class Lakeflow:
     profile: str | None = None
     workspace_client: WorkspaceClient | None = field(default=None, repr=False)
     sync: Sync = "deploy"
+    variables: Mapping[str, str] | None = None
     timeout: timedelta = timedelta(minutes=30)
     catalog: str | None = None
     helpers_path: str | None = None
@@ -297,6 +300,7 @@ class Lakeflow:
             profile=self.profile or (self.workspace_client.config.profile if self.workspace_client else None),
             sync=self.sync,
             helpers_path=self.helpers_path,
+            variables=tuple(sorted((self.variables or {}).items())),
         )
         state = current.bundle_state(key, self.ws, self.sweep_hours)
         current.lakeflows.append(self)
