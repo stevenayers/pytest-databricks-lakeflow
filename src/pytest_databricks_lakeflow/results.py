@@ -313,6 +313,28 @@ class NotebookView:
         return f"NotebookView(cells={len(self.cells)}, failed_cell={index})"
 
 
+@dataclass(frozen=True)
+class DebugNotebook:
+    """A notebook in the workspace that reproduces a notebook task of a run, written by `EphemeralJob.debug_notebook()`.
+
+    It sets the task's resolved parameters as widgets and runs the task's notebook with `%run`.
+
+    Attributes:
+        task_key: The task's key.
+        run_id: The id of the job run whose parameters it replays.
+        path: The notebook's workspace path.
+        url: The notebook's page in the workspace.
+    """
+
+    task_key: str
+    run_id: int
+    path: str
+    url: str
+
+    def __str__(self) -> str:
+        return self.url
+
+
 def parse_notebook_export(html: str) -> NotebookView:
     """Read the cells of a notebook view exported by `jobs.export_run`.
 

@@ -93,14 +93,15 @@ The `deploy_flags` argument passes `--fail-on-active-runs` to `bundle deploy`, w
 ## Session end
 
 1. Every process cancels the runs it started that are still active, and counts them.
-2. xdist workers report the bundle targets they deployed, the jobs and schemas they kept and the number of runs they cancelled to the controller.
+2. xdist workers report the bundle targets they deployed, the jobs and schemas they kept, the debug notebooks they wrote and the number of runs they cancelled to the controller.
 3. With `--lakeflow-destroy`, the controller, or the single process, runs `databricks bundle destroy -t <target> --auto-approve` for each target deployed with `sync="deploy"`, with the same `--var` arguments as its deploy. A failed destroy is printed with the summary and turns a passing session into a failed one.
-4. The controller, or the single process, prints a `lakeflow` block in the terminal summary with the kept jobs and schemas and the cancelled runs, when there are any. See [logging and reports](configuration.md#logging-and-reports).
+4. The controller, or the single process, prints a `lakeflow` block in the terminal summary with the kept jobs and schemas, the debug notebooks and the cancelled runs, when there are any. See [logging and reports](configuration.md#logging-and-reports).
 
 ## What is left in the workspace
 
 - The deployed test target, unless you pass `--lakeflow-destroy`. It is only a template source, and leaving it makes the next session's deploy fast.
 - The two helper notebooks under `helpers_path`, and the `setup_<hash>` and `teardown_<hash>` notebooks of any `setup=` and `teardown=` functions. Each edit of a function, and each plugin upgrade that changes the notebook around it, uploads a new one. `--lakeflow-sweep --lakeflow-sweep-notebooks` deletes those not uploaded for `sweep_hours`.
+- Debug notebooks from `debug_notebook()` and `--lakeflow-debug-notebook`, under `helpers_path/debug/`, one per job, task and run. The sweep does not delete them.
 - Jobs kept by the keep rules. Their runs stay with them. `--lakeflow-sweep` deletes them once they are older than `sweep_hours`, or with `--lakeflow-keep-ttl` once their `pytest_expires` time has passed. Their `pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` tags say where each one came from.
 - Schemas kept by `keep` or `--lakeflow-keep`. `--lakeflow-sweep --lakeflow-sweep-schemas=<catalog>` drops them once they are older than `sweep_hours`.
 - Nothing else. Deleting an ephemeral job removes its runs.
