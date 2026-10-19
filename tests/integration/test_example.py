@@ -305,16 +305,27 @@ def test_environment_version_override(lakeflow_on_version_4: Lakeflow) -> None:
 
 
 def test_per_job_environment_version(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", environments={"default": {"environment_version": "5"}}) as job:
+    # A key the job does not have adds an environment that no task uses; the Jobs API accepts it and the run succeeds.
+    overrides = {
+        "default": {"environment_version": "5"},
+        "spare": {"environment_version": "4", "dependencies": ["inflection==0.5.1"]},
+    }
+    with lakeflow.job("my_example_job", environments=overrides) as job:
         run = job.run()
         assert run.succeeded, run
         assert job.job_id is not None
         settings = lakeflow.ws.jobs.get(job.job_id).settings
         environments = (settings.environments if settings else None) or []
-        spec = environments[0].spec
-        assert spec is not None
-        assert spec.environment_version == "5"
-        assert spec.dependencies and spec.dependencies[0].endswith(".whl"), "the bundle's wheel is kept"
+        specs = {env.environment_key: env.spec for env in environments}
+        assert list(specs) == ["default", "spare"]
+        default = specs["default"]
+        assert default is not None
+        assert default.environment_version == "5"
+        assert default.dependencies and default.dependencies[0].endswith(".whl"), "the bundle's wheel is kept"
+        spare = specs["spare"]
+        assert spare is not None
+        assert spare.environment_version == "4"
+        assert spare.dependencies == ["inflection==0.5.1"], "a new environment holds only the fields passed"
 
 
 def test_task_params_override_one_task(lakeflow: Lakeflow) -> None:
