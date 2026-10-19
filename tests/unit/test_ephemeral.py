@@ -626,6 +626,56 @@ class TestCreateSettings:
         [classic] = single["tasks"]
         assert classic.libraries == [compute.Library(whl="/Volumes/c/s/v/helpers.whl")]
 
+    def test_per_job_environments_reach_jobs_create(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(pytester, 'environment_version="4", helpers_environment_version="3"')
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                environments = {"default": {"environment_version": "5"}}
+                with lakeflow.job("my_job", environments=environments, capture_task_values={"load": ["k"]}):
+                    pass
+
+            def test_unchanged(lakeflow):
+                with lakeflow.job("my_job", environments=None), lakeflow.job("my_job", environments={}):
+                    pass
+
+            def test_reserved(lakeflow):
+                with pytest.raises(LakeflowError, match="reserved"):
+                    lakeflow.job("my_job", environments={"__pytest_serverless": {"environment_version": "5"}})
+            """,
+        )
+        result.assert_outcomes(passed=3)
+        overridden, *unchanged = fake_ws.jobs.created
+        versions = {e.environment_key: e.spec.environment_version for e in overridden["environments"]}
+        assert versions == {"default": "5", "__pytest_serverless": "3"}
+        for created in unchanged:
+            assert [e.spec.environment_version for e in created["environments"]] == ["4"]
+
+    def test_per_job_environments_on_task_jobs(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            """
+            def test_task(lakeflow):
+                environments = {"default": {"dependencies": ["chispa"]}, "gpu": {"environment_version": "4"}}
+                with lakeflow.task("my_job.load", extra_dependencies=["pytest>=8"], environments=environments):
+                    pass
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        specs = {e.environment_key: e.spec.as_dict() for e in created["environments"]}
+        assert specs == {
+            "default": {"environment_version": "4", "dependencies": ["chispa"]},
+            "gpu": {"environment_version": "4"},
+        }
+
 
 class TestDisabledTasks:
     """Disabling tasks on the copy, and telling disabled tasks from those `only` left out."""

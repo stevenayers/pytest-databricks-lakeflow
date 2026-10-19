@@ -21,6 +21,7 @@ from pytest_databricks_lakeflow.settings import (
     force_conditions,
     inject_lifecycle,
     inject_test_marker,
+    merge_environments,
     pipeline_params,
     run_job_tasks,
     sanitise,
@@ -755,6 +756,67 @@ class TestAddDependencies:
         assert repr(dependency) in str(e.value)
         assert 'sync="deploy"' in str(e.value)
         assert settings == example_settings(), "nothing changes before the error"
+
+
+class TestMergeEnvironments:
+    """merge_environments merges per-job environment overrides into the copy, and refuses what would break it."""
+
+    @staticmethod
+    def with_dependencies() -> jobs.JobSettings:
+        settings = example_settings()
+        settings.environments = [
+            jobs.JobEnvironment.from_dict(
+                {"environment_key": "default", "spec": {"environment_version": "4", "dependencies": ["./dist/*.whl"]}}
+            )
+        ]
+        return settings
+
+    @staticmethod
+    def specs(settings: jobs.JobSettings) -> dict[str, dict[str, Any]]:
+        return {e.environment_key: e.spec.as_dict() if e.spec else {} for e in settings.environments or []}
+
+    @pytest.mark.parametrize(
+        ("override", "expected"),
+        [
+            ({"environment_version": "5"}, {"environment_version": "5", "dependencies": ["./dist/*.whl"]}),
+            ({"dependencies": ["chispa"]}, {"environment_version": "4", "dependencies": ["chispa"]}),
+        ],
+        ids=["version", "dependencies-replaced"],
+    )
+    def test_merge_environments_replaces_fields_of_an_existing_key(
+        self, override: dict[str, Any], expected: dict[str, Any]
+    ) -> None:
+        settings = merge_environments(self.with_dependencies(), {"default": override})
+        assert self.specs(settings) == {"default": expected}
+
+    def test_merge_environments_appends_a_new_key(self) -> None:
+        gpu = {"environment_version": "4", "dependencies": ["torch"]}
+        settings = merge_environments(example_settings(), {"gpu": gpu})
+        assert self.specs(settings) == {"default": {"environment_version": "4"}, "gpu": gpu}
+        assert merge_environments(example_settings(), {}) == example_settings()
+
+    def test_merge_environments_rejects_reserved_keys(self) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=r"starting with '__pytest_' are reserved.*\['__pytest_serverless'\]"):
+            merge_environments(settings, {"__pytest_serverless": {"environment_version": "5"}})
+        assert settings == example_settings(), "nothing changes before the error"
+
+    def test_merge_environments_rejects_unknown_fields(self) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=r"environments\['default'\] has fields.*\['version'\]") as e:
+            merge_environments(settings, {"default": {"version": "5", "dependencies": ["x"]}})
+        assert "environment_version" in str(e.value), "the error lists the fields that are accepted"
+        assert settings == example_settings(), "nothing changes before the error"
+
+    @pytest.mark.skipif(not HAS_BASE_ENVIRONMENT, reason="this databricks-sdk has no base_environment")
+    def test_merge_environments_rejects_version_and_base_environment_together(self) -> None:
+        base = {"base_environment": "/Workspace/envs/base.yml"}
+        with pytest.raises(LakeflowError, match=r"environments\['default'\] would set both environment_version and"):
+            merge_environments(example_settings(), {"default": base})
+        with pytest.raises(LakeflowError, match=r"environments\['new'\] would set both"):
+            merge_environments(example_settings(), {"new": {**base, "environment_version": "5"}})
+        settings = merge_environments(example_settings(), {"default": {**base, "environment_version": None}})
+        assert self.specs(settings) == {"default": base}
 
 
 class TestForceConditions:

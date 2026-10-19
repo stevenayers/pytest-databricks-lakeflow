@@ -340,6 +340,74 @@ def _library(dependency: str) -> compute.Library:
     return compute.Library(pypi=compute.PythonPyPiLibrary(package=dependency))
 
 
+def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Mapping[str, Any]]) -> jobs.JobSettings:
+    """Merge per-job overrides into the job's serverless environments.
+
+    A field in the override of an existing environment replaces the template's field, so `dependencies` replaces
+    the list rather than appending to it. A key the job does not have is appended as a new environment. Call it after
+    `sanitise`, so that an `environment_version` here wins over the session-wide one, and after the helper
+    environment is added, so that it counts towards the cap.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        environments: The fields of each environment's `spec` to set, by `environment_key`.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key starts with `__pytest_`, an override holds a field that `compute.Environment` does
+            not have, a spec would set both `environment_version` and `base_environment`, or the job would have more
+            than 10 environments. Nothing is changed then.
+    """
+    if not environments:
+        return settings
+    reserved = sorted(key for key in environments if key.startswith(PREFIX))
+    if reserved:
+        raise LakeflowError(f"Environment keys starting with {PREFIX!r} are reserved for the plugin: {reserved}")
+    known = sorted(f.name for f in fields(compute.Environment))
+    for key, override in environments.items():
+        # Environment.from_dict drops a field it does not know without a word.
+        unknown = sorted(set(override) - set(known))
+        if unknown:
+            raise LakeflowError(
+                f"environments[{key!r}] has fields that a serverless environment does not take: {unknown}. "
+                f"Known fields: {known}"
+            )
+    merged = list(settings.environments or [])
+    positions = {env.environment_key: index for index, env in enumerate(merged)}
+    for key, override in environments.items():
+        if key in positions:
+            index = positions[key]
+            merged[index] = _merged_environment(key, merged[index].spec, override)
+        else:
+            merged.append(_merged_environment(key, None, override))
+    if len(merged) > MAX_ENVIRONMENTS:
+        keys = [env.environment_key for env in merged]
+        raise LakeflowError(
+            f"The job would have {len(merged)} environments, more than the {MAX_ENVIRONMENTS} a job allows: {keys}. "
+            "Add fewer environments in environments=, or remove some from the bundle job."
+        )
+    settings.environments = merged
+    return settings
+
+
+def _merged_environment(
+    key: str, template: compute.Environment | None, override: Mapping[str, Any]
+) -> jobs.JobEnvironment:
+    current: dict[str, Any] = {}
+    if template is not None:
+        current = template.as_dict()
+    spec = compute.Environment.from_dict({**current, **override})
+    # Environment.base_environment only exists in recent databricks-sdk releases.
+    if spec.environment_version and getattr(spec, "base_environment", None):
+        raise LakeflowError(
+            f"environments[{key!r}] would set both environment_version and base_environment, which a job does not "
+            "accept. Set the one you do not want to None in the override."
+        )
+    return jobs.JobEnvironment(environment_key=key, spec=spec)
+
+
 def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSettings:
     """Set `disabled` on the named tasks, so the job skips them.
 
