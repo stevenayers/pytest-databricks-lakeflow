@@ -1,0 +1,11 @@
+resources:
+  jobs:
+    sql_job:
+      name: sql_job
+      description: SQL task job for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: query
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/queries/count.sql

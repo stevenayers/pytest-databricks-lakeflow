@@ -146,6 +146,8 @@ jobs:
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       LAKEFLOW_CATALOG: ${{ vars.LAKEFLOW_CATALOG }}
+      # Optional: a SQL warehouse for the sql bundle. tests/integration/test_sql.py skips when it is unset.
+      LAKEFLOW_WAREHOUSE_ID: ${{ vars.LAKEFLOW_WAREHOUSE_ID }}
       LAKEFLOW_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -33,10 +33,10 @@ The unit tests use pytest's `pytester` and an in-memory fake of the parts of `Wo
 
 ```bash
 LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-    uv run pytest tests/integration -n 4 --lakeflow-sweep
+    LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 4 --lakeflow-sweep
 ```
 
-Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
+`LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, passed as the bundle variable `warehouse_id`; `test_sql.py` skips when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
 
 ### Bundles
 
@@ -50,7 +50,12 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
+        sql/                     # name: lakeflow_sql, a SQL file task on the warehouse from LAKEFLOW_WAREHOUSE_ID
+            databricks.yml
+            resources/*.job.yml
+            src/queries/*.sql
     test_example.py              # one module per bundle, named after it
+    test_sql.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
@@ -75,7 +80,7 @@ tests/integration/
 
 Names that reach the workspace (bundle names, job names, task keys, notebooks, schemas, tags, parameters) must be neutral and specific to the use case.
 
-In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped.
+In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped. The optional repository variable `LAKEFLOW_WAREHOUSE_ID` names a SQL warehouse the service principal can use; without it the `sql` bundle's tests are skipped.
 
 ## Making a change
 
