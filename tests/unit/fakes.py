@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
-from collections.abc import Iterator, Mapping, Sequence
+import urllib.parse
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +36,8 @@ class FakeJobs:
         self.output_calls: list[int] = []
         self.resolved: dict[int, jobs.ResolvedValues | Exception] = {}
         self.get_run_calls: list[dict[str, Any]] = []
+        self.exports: dict[int, str | Exception] = {}
+        self.export_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.list_calls = 0
         self.gets: list[int] = []
@@ -143,6 +147,17 @@ class FakeJobs:
             raise output
         return output
 
+    def export_run(self, run_id: int, *, views_to_export: jobs.ViewsToExport | None = None) -> jobs.ExportRunOutput:
+        """Serve the notebook HTML recorded in `exports` for a task run, or no views when none was recorded."""
+        self.export_calls.append({"run_id": run_id, "views_to_export": views_to_export})
+        content = self.exports.get(run_id)
+        if isinstance(content, Exception):
+            raise content
+        if content is None:
+            return jobs.ExportRunOutput(views=[])
+        view = jobs.ViewItem(content=content, name="notebook", type=jobs.ViewType.NOTEBOOK)
+        return jobs.ExportRunOutput(views=[view])
+
     def cancel_run(self, run_id: int) -> None:
         self.cancelled.append(run_id)
 
@@ -249,6 +264,19 @@ def run_notebook(source: str, widgets: Mapping[str, str], spark: object = None) 
     return None
 
 
+def notebook_export(commands: Sequence[dict[str, Any]]) -> str:
+    """Build the HTML of a notebook view as `jobs.export_run` returns it, with a notebook model of `commands`.
+
+    Like the real export, the model is JSON, URL-encoded as `encodeURIComponent` does, then base64-encoded.
+    """
+    model = json.dumps({"version": "NotebookV1", "name": "notebook", "language": "python", "commands": commands})
+    encoded = base64.b64encode(urllib.parse.quote(model, safe="!~*'()").encode()).decode()
+    return (
+        "<!DOCTYPE html>\n<html>\n<head>\n<title>notebook - Databricks</title>\n"
+        f"<script>var __DATABRICKS_NOTEBOOK_MODEL = '{encoded}';</script>\n</head>\n<body></body>\n</html>"
+    )
+
+
 def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
     """Load a run recorded during the spikes, with its task outputs by task run id."""
     data = json.loads((DATA / "runs" / f"{name}.json").read_text())
@@ -263,6 +291,7 @@ def make_run(
     code: str = "SUCCESS",
     attempts: Mapping[str, Sequence[str]] | None = None,
     condition_outcomes: Mapping[str, str] | None = None,
+    notebooks: Collection[str] = (),
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -273,6 +302,8 @@ def make_run(
     ids are `run_id * 100` plus the position of the attempt among all task runs.
 
     `condition_outcomes` makes the tasks it names condition tasks, with the given `outcome`, such as `"true"`.
+
+    `notebooks` makes the tasks it names notebook tasks, which the run reports with their `notebook_task`.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -292,6 +323,7 @@ def make_run(
                     start_time=1_000,
                     end_time=3_000,
                     condition_task=_condition(condition_outcomes, key),
+                    notebook_task=_notebook(notebooks, key),
                 )
             )
     return jobs.Run(
@@ -340,6 +372,12 @@ def _condition(outcomes: Mapping[str, str] | None, key: str) -> jobs.RunConditio
     if outcomes is None or key not in outcomes:
         return None
     return jobs.RunConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="", right="", outcome=outcomes[key])
+
+
+def _notebook(notebooks: Collection[str], key: str) -> jobs.NotebookTask | None:
+    if key not in notebooks:
+        return None
+    return jobs.NotebookTask(notebook_path=f"/Workspace/src/{key}")
 
 
 def _details(state: str) -> jobs.TerminationDetails:

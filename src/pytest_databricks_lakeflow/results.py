@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
+import urllib.parse
 import warnings
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING
+from html import unescape
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
@@ -37,6 +41,13 @@ CHAIN_MARKERS = re.compile(
     re.MULTILINE,
 )
 ERROR_CLASS = re.compile(r"^\[([A-Z][A-Z0-9_]*(?:\.[A-Z0-9_]+)*)\]")
+
+NotebookExport = Literal["never", "failed", "always"]
+NOTEBOOK_EXPORTS: tuple[str, ...] = get_args(NotebookExport)
+NOTEBOOK_MODEL = "__DATABRICKS_NOTEBOOK_MODEL"
+NOTEBOOK_MODEL_LINE = re.compile(NOTEBOOK_MODEL + r"\s*=\s*'([^']*)'")
+HTML_TAG = re.compile(r"<[^>]*>")
+HTML_RESULTS = frozenset({"html", "htmlSandbox"})
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -228,6 +239,205 @@ class TaskValues(dict[str, object]):
 
 
 @dataclass(frozen=True)
+class NotebookCell:
+    """One cell of a notebook exported from a task run.
+
+    Attributes:
+        index: The cell's position in `NotebookView.cells`, counting from 0.
+        code: The cell's source.
+        output: The cell's text output, such as what it printed, one result per line, with HTML tags and ANSI colour
+            codes removed and HTML entities unescaped. Empty when the cell had no output.
+        output_html: The cell's results as exported, unchanged: HTML for an HTML result, otherwise the text the
+            notebook wrote.
+        error: The exception the cell raised, as `Name: message`, or `None` when it raised nothing. A cell skipped
+            because an earlier cell failed has no error.
+    """
+
+    index: int
+    code: str
+    output: str = ""
+    output_html: str = field(default="", repr=False)
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class NotebookView:
+    """A notebook task run as `jobs.export_run` renders it, with every cell's code and output.
+
+    The output comes from the rendered notebook, so it is complete only once the task has terminated.
+
+    Attributes:
+        html: The exported HTML, unchanged.
+        cells: The notebook's cells in order. Empty when the export could not be read.
+    """
+
+    html: str
+    cells: list[NotebookCell] = field(default_factory=list)
+
+    @property
+    def stdout(self) -> str:
+        """The text output of every cell, in order, which is what `print()` produced."""
+        return _join_lines(cell.output for cell in self.cells)
+
+    @property
+    def failed_cell(self) -> NotebookCell | None:
+        """The first cell that raised an exception, or `None`."""
+        for cell in self.cells:
+            if cell.error is not None:
+                return cell
+        return None
+
+    def save(self, path: str | Path) -> Path:
+        """Write the exported HTML to a file, which opens in a browser like the run page.
+
+        Args:
+            path: The file to write. Missing parent directories are created.
+
+        Returns:
+            The path written.
+        """
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.html, encoding="utf-8")
+        return target
+
+    def __repr__(self) -> str:
+        failed = self.failed_cell
+        index = failed.index if failed else None
+        return f"NotebookView(cells={len(self.cells)}, failed_cell={index})"
+
+
+def parse_notebook_export(html: str) -> NotebookView:
+    """Read the cells of a notebook view exported by `jobs.export_run`.
+
+    The export embeds the notebook as a `__DATABRICKS_NOTEBOOK_MODEL` line holding base64 of URL-encoded JSON. The
+    format is not documented, so parsing is best effort: when the model is missing or unreadable, the view has no
+    cells, keeps the HTML, and a `UserWarning` names the marker.
+
+    Args:
+        html: The `content` of a `NOTEBOOK` view.
+
+    Returns:
+        The notebook's cells and the HTML.
+    """
+    model = _notebook_model(html)
+    if model is None:
+        warnings.warn(
+            f"The exported notebook has no readable {NOTEBOOK_MODEL} model, so its cells are empty; "
+            "NotebookView.html keeps the export",
+            stacklevel=2,
+        )
+        return NotebookView(html=html)
+    commands: list[dict[str, Any]] = []
+    for command in model.get("commands") or []:
+        if isinstance(command, dict):
+            commands.append(command)
+    commands.sort(key=_position)
+    cells = [_notebook_cell(index, command) for index, command in enumerate(commands)]
+    return NotebookView(html=html, cells=cells)
+
+
+def _notebook_model(html: str) -> dict[str, Any] | None:
+    match = NOTEBOOK_MODEL_LINE.search(html)
+    if match is None:
+        return None
+    try:
+        encoded = base64.b64decode(match[1]).decode()
+        model = json.loads(urllib.parse.unquote(encoded))
+    except ValueError:
+        return None
+    if not isinstance(model, dict):
+        return None
+    return model
+
+
+def _position(command: dict[str, Any]) -> float:
+    position = command.get("position")
+    if isinstance(position, int | float):
+        return float(position)
+    return 0.0
+
+
+def _notebook_cell(index: int, command: dict[str, Any]) -> NotebookCell:
+    results = command.get("results")
+    if not isinstance(results, dict):
+        results = {}
+    is_error = results.get("type") == "error"
+    texts: list[str] = []
+    raw: list[str] = []
+    if not is_error:
+        for kind, data in _result_items(results):
+            raw.append(data)
+            if kind in HTML_RESULTS:
+                texts.append(_html_text(data))
+            else:
+                texts.append(ANSI.sub("", data))
+    trace = command.get("error")
+    if not trace and is_error:
+        trace = "".join(data for _, data in _result_items(results))
+    code = command.get("command")
+    if not isinstance(code, str):
+        code = ""
+    return NotebookCell(
+        index=index,
+        code=code,
+        output=_join_lines(texts),
+        output_html="".join(raw),
+        error=_cell_error(command.get("errorSummary"), trace),
+    )
+
+
+def _result_items(results: dict[str, Any]) -> list[tuple[str | None, str]]:
+    # `results.data` is a string, or a list of items with their own `type` and `data`, or rows of a table.
+    data = results.get("data")
+    if isinstance(data, str):
+        return [(results.get("type"), data)]
+    if not isinstance(data, list):
+        return []
+    items: list[tuple[str | None, str]] = []
+    for item in data:
+        if isinstance(item, dict) and isinstance(item.get("data"), str):
+            items.append((item.get("type"), item["data"]))
+    return items
+
+
+def _cell_error(summary: object, trace: object) -> str | None:
+    # The platform marks a cell skipped after a failure as an error with the summary "Command skipped" and no trace.
+    if not isinstance(trace, str) or not trace.strip():
+        return None
+    if isinstance(summary, str) and summary.strip():
+        return _error_text(summary).strip()
+    text = _error_text(trace)
+    last = _last_exception_line(text.splitlines())
+    if last is None:
+        return _first_line(text)
+    name, message = last
+    if message:
+        return f"{name}: {message}"
+    return name
+
+
+def _html_text(text: str) -> str:
+    return unescape(HTML_TAG.sub("", ANSI.sub("", text)))
+
+
+def _error_text(text: str) -> str:
+    # Older exports render errors as HTML; a plain trace keeps names such as `<locals>` and `<command-1>`.
+    if "</" in text:
+        return _html_text(text)
+    return ANSI.sub("", text)
+
+
+def _join_lines(parts: Iterable[str]) -> str:
+    joined = ""
+    for part in parts:
+        if part and not part.endswith("\n"):
+            part += "\n"
+        joined += part
+    return joined
+
+
+@dataclass(frozen=True)
 class TaskRun:
     """The outcome of one task in a job run.
 
@@ -244,7 +454,8 @@ class TaskRun:
         output: The value the notebook passed to `dbutils.notebook.exit()`. For a clean room notebook task, the
             value from `clean_rooms_notebook_output` when the top-level notebook output is missing or has no result.
         output_truncated: Whether `output` was cut at 5 MB.
-        logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks.
+        logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks, whose printed text
+            is in `notebook`.
         logs_truncated: Whether `logs` holds only the last 5 MB.
         error: The task's error, or `None` if it succeeded or did not run.
         task_values: Task values captured by a probe.
@@ -282,6 +493,10 @@ class TaskRun:
         dashboard_output: The output of a dashboard task, with its `page_snapshots`, or `None`.
         clean_rooms_notebook_output: The output of a clean room notebook task, with `notebook_output` and
             `clean_room_job_run_state`, or `None`.
+        notebook: The rendered notebook of a notebook task, with each cell's code, output and error, read with
+            `jobs.export_run` once the run finished. Exported for the tasks that `Lakeflow(notebook_export=...)`
+            selects: by default, a notebook task that ran and did not succeed. `None` for any other task, and when
+            `export_run` failed, which logs a warning.
     """
 
     task_key: str
@@ -312,6 +527,7 @@ class TaskRun:
     child_run: JobRun | None = None
     dashboard_output: jobs.DashboardTaskOutput | None = None
     clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
+    notebook: NotebookView | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -601,6 +817,32 @@ def task_outcome(task: TaskRun) -> str:
     return str(task.result_state)
 
 
+def describe_notebooks(run: JobRun, tail: int = 50) -> list[str]:
+    """Describe the exported notebook of each failing task of `run`.
+
+    Each gets the first code line of the cell that failed and the last `tail` lines of what the notebook printed.
+    """
+    described: list[str] = []
+    for task in run._failing_tasks():
+        notebook = task.notebook
+        if notebook is None:
+            continue
+        key = task.task_key
+        failed = notebook.failed_cell
+        if failed is not None:
+            described.append(f"{key}: notebook.cells[{failed.index}] failed: {_first_line(failed.code)}")
+        lines = notebook.stdout.splitlines()
+        if not lines:
+            continue
+        if len(lines) > tail:
+            described.append(f"{key}: notebook stdout, last {tail} of {len(lines)} lines:")
+        else:
+            described.append(f"{key}: notebook stdout:")
+        for line in lines[-tail:]:
+            described.append(f"  {line}")
+    return described
+
+
 def failing_parameters(run: JobRun) -> dict[str, str]:
     """Format the resolved parameters of each failing task of `run` that has any, by task key."""
     formatted: dict[str, str] = {}
@@ -622,6 +864,7 @@ def build_job_run(
     disabled: Collection[str] = (),
     outputs: Mapping[int, jobs.RunOutput] | None = None,
     job_keys: Mapping[int, str] | None = None,
+    notebook_export: NotebookExport = "failed",
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output and resolved parameters.
 
@@ -639,6 +882,9 @@ def build_job_run(
             a disabled task and one left out by `only` both end `DISABLED`.
         outputs: Task outputs already read, by task run id. Only the outputs missing from it are fetched.
         job_keys: Bundle resource keys by job id, which name the child runs of run-job tasks.
+        notebook_export: Which notebook tasks to export with `jobs.export_run`: `failed` for those that ran and did
+            not succeed, `always` for every one that ran, `never` for none. Only the last attempt of a user task is
+            exported.
 
     Returns:
         The run's outcome.
@@ -664,7 +910,7 @@ def build_job_run(
         for task_run in task_runs:
             run_id = task_run.run_id or 0
             attempt = _task_run(task_run, known_outputs.get(run_id), resolved.get(run_id))
-            attempts[key].append(_with_child_run(ws, attempt, job_keys or {}))
+            attempts[key].append(_with_child_run(ws, attempt, job_keys or {}, notebook_export))
 
     injected: dict[str, TaskRun] = {}
     user: dict[str, TaskRun] = {}
@@ -677,6 +923,7 @@ def build_job_run(
         if target in user:
             probe = injected.get(f"{PROBE_PREFIX}{target}")
             user[target] = _with_values(user[target], probe, keys)
+    user = _with_notebooks(ws, user, task_runs_by_key, notebook_export)
     injected = {key: _with_attempts(task, attempts[key]) for key, task in injected.items()}
     user = {key: _with_attempts(task, attempts[key]) for key, task in user.items()}
 
@@ -721,7 +968,9 @@ def _task_runs_by_key(run: jobs.Run) -> dict[str, list[jobs.RunTask]]:
     return by_key
 
 
-def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, str]) -> TaskRun:
+def _with_child_run(
+    ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, str], notebook_export: NotebookExport
+) -> TaskRun:
     if task.child_run_id is None or not task.ran:
         return task
     try:
@@ -733,8 +982,39 @@ def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, s
     key = job_keys.get(job_id) or str(job_id)
     # `only` never applies to a child run, so every task of it that ended DISABLED is disabled in the child job.
     disabled = {t.task_key for t in child.tasks or [] if t.task_key}
-    child_run = build_job_run(ws, child, job_key=key, job_id=job_id, disabled=disabled, job_keys=job_keys)
+    child_run = build_job_run(
+        ws, child, job_key=key, job_id=job_id, disabled=disabled, job_keys=job_keys, notebook_export=notebook_export
+    )
     return replace(task, child_run=child_run)
+
+
+def _with_notebooks(
+    ws: WorkspaceClient,
+    tasks: dict[str, TaskRun],
+    task_runs_by_key: Mapping[str, Sequence[jobs.RunTask]],
+    notebook_export: NotebookExport,
+) -> dict[str, TaskRun]:
+    wanted: list[TaskRun] = []
+    for key, task in tasks.items():
+        is_notebook = task_runs_by_key[key][-1].notebook_task is not None
+        if is_notebook and _should_export(notebook_export, task):
+            wanted.append(task)
+    exports = fetch_notebook_exports(ws, wanted)
+    # Parsed here rather than in the fetching threads, so that a parse warning reaches the test's warning capture.
+    with_notebooks = dict(tasks)
+    for key, html in exports.items():
+        with_notebooks[key] = replace(tasks[key], notebook=parse_notebook_export(html))
+    return with_notebooks
+
+
+def _should_export(notebook_export: NotebookExport, task: TaskRun) -> bool:
+    if not task.ran:
+        return False
+    if notebook_export == "always":
+        return True
+    if notebook_export == "failed":
+        return not task.succeeded
+    return False
 
 
 def _with_attempts(last: TaskRun, attempts: list[TaskRun]) -> TaskRun:
@@ -772,6 +1052,34 @@ def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[in
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         return {task.run_id or 0: output for task, output in zip(tasks, pool.map(fetch, tasks), strict=True)}
+
+
+def fetch_notebook_exports(ws: WorkspaceClient, tasks: Sequence[TaskRun]) -> dict[str, str]:
+    """Export the notebook of each task run in parallel, as HTML by task key.
+
+    `jobs.export_run` works only on a notebook task run; on a job run or another task type it fails with
+    `InvalidParameterValue`. A task run that cannot be exported, or whose export has no notebook view, is left out.
+    """
+    if not tasks:
+        return {}
+
+    def fetch(task: TaskRun) -> str | None:
+        try:
+            export = ws.jobs.export_run(task.run_id, views_to_export=jobs.ViewsToExport.CODE)
+        except DatabricksError as e:
+            log.warning("Could not export the notebook of task %s (%s): %s", task.task_key, task.run_url, e)
+            return None
+        for view in export.views or []:
+            if view.type == jobs.ViewType.NOTEBOOK and view.content is not None:
+                return view.content
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        exports: dict[str, str] = {}
+        for task, html in zip(tasks, pool.map(fetch, tasks), strict=True):
+            if html is not None:
+                exports[task.task_key] = html
+        return exports
 
 
 def fetch_resolved_values(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.ResolvedValues]:

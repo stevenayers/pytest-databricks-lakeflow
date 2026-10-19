@@ -14,6 +14,7 @@ from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
 from .fakes import (
+    DATA,
     HOST,
     FakeWorkspaceClient,
     example_settings,
@@ -1028,6 +1029,40 @@ class TestReportSection:
         assert '<property name="lakeflow_params" value="{&quot;param1&quot;: &quot;hi&quot;}"' in xml
         expected = "{&quot;extract&quot;: {&quot;limit&quot;: &quot;10&quot;, &quot;param1&quot;: &quot;hi&quot;}}"
         assert f'<property name="lakeflow_task_params" value="{expected}"' in xml
+
+    def test_report_section_includes_notebook_stdout(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        for _ in range(2):
+            run = make_run(77, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"transform"})
+            fake_ws.jobs.queue(run, {7701: jobs.RunOutput(error="PermissionError: forbidden")})
+        fake_ws.jobs.exports[7701] = (DATA / "notebook_export_failed.html").read_text()
+        result = run_tests(
+            pytester,
+            """
+            def test_expects_the_failure(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    assert job.run().failed
+
+            def test_fails(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.run()
+                assert False
+            """,
+            "-rA",
+        )
+        result.assert_outcomes(passed=1, failed=1)
+        result.stdout.fnmatch_lines(
+            [
+                "*_ test_fails _*",
+                "*- lakeflow -*",
+                'transform: notebook.cells[2] failed: dbutils.jobs.taskValues.set(key="stage", value="validation")',
+                "transform: notebook stdout:",
+                "  transform: checking forbidden against /Volumes/example/raw/landing",
+                "  transform: 7 rows expected",
+            ]
+        )
+        assert result.stdout.str().count("transform: checking forbidden") == 1
 
     def test_section_is_attached_to_setup_failures(self, pytester: pytest.Pytester) -> None:
         result = run_tests(

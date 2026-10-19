@@ -93,6 +93,7 @@ class TestLakeflowArguments:
         assert not lakeflow.test_marker
         assert lakeflow.sweep_hours == 24
         assert lakeflow.side_effects == "neutralise"
+        assert lakeflow.notebook_export == "failed"
         assert (lakeflow.keep, lakeflow.keep_failed) == (False, True)
         assert (lakeflow.modify_settings, lakeflow.run_finished) == (None, None)
         assert lakeflow.permissions is None
@@ -121,6 +122,7 @@ class TestLakeflowArguments:
         [
             ({"sync": "upload"}, "sync must be one of deploy, sync, none, got 'upload'"),
             ({"side_effects": "other"}, "side_effects must be one of neutralise, keep, got 'other'"),
+            ({"notebook_export": "bogus"}, "notebook_export must be one of never, failed, always, got 'bogus'"),
         ],
     )
     def test_rejects_an_unknown_choice(self, arguments: dict[str, Any], message: str) -> None:

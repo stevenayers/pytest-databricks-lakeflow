@@ -19,6 +19,7 @@ from pytest_databricks_lakeflow.results import (
     JobRun,
     build_job_run,
     describe_failing,
+    describe_notebooks,
     duration,
     error_line,
     failing_parameters,
@@ -39,6 +40,7 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 POLL_SECONDS = 2.0
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
+NOTEBOOKS = pytest.StashKey[list[str]]()
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.TERMINATED,
@@ -221,6 +223,7 @@ class EphemeralJob:
             disabled=disabled,
             outputs=outputs,
             job_keys=self.lakeflow._job_keys(),
+            notebook_export=self.lakeflow.notebook_export,
         )
         self.runs.append(result)
         _record_outcome(item, result)
@@ -333,7 +336,10 @@ def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
 
 
 def _record_outcome(item: pytest.Item, result: JobRun) -> None:
-    """Record the run's outcome in the test's user properties, with its resolved parameters when it failed."""
+    """Record the run's outcome in the test's user properties, with its resolved parameters when it failed.
+
+    The notebook lines of the failing tasks go to the stash instead, for the report section of a failed test.
+    """
     item.user_properties.extend(
         [
             ("lakeflow_run_id", result.run_id),
@@ -344,6 +350,7 @@ def _record_outcome(item: pytest.Item, result: JobRun) -> None:
     if not result.failed:
         return
     item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
+    item.stash.setdefault(NOTEBOOKS, []).extend(describe_notebooks(result))
     run_params = format_parameters(result.parameters)
     if run_params:
         item.user_properties.append(("lakeflow_params", run_params))

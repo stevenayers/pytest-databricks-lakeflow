@@ -9,14 +9,15 @@ from typing import Any, cast
 
 import pytest
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import NotFound
+from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run
 
-from .fakes import DATA, FakeWorkspaceClient, make_run, recorded
+from .fakes import DATA, HOST, FakeWorkspaceClient, make_run, recorded
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
+FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
 
 NEW_ALERT_TASK = pytest.mark.skipif(
     not hasattr(jobs, "AlertTaskOutput"), reason="this databricks-sdk has no alert task output"
@@ -753,3 +754,76 @@ class TestChildRuns:
         assert last.child_run.run_id == 778
         assert task.child_run == last.child_run
         assert task.attempts[-1].child_run == task.child_run
+
+
+def notebook_run(ws: FakeWorkspaceClient) -> jobs.Run:
+    """Build a run with notebook tasks that succeeded, failed and did not run, a failed wheel task and a probe.
+
+    Every task run has a recorded notebook export, so the calls to `export_run` alone say which were exported.
+    """
+    states = {
+        "extract": "SUCCESS",
+        "transform": "FAILED",
+        "load": "UPSTREAM_FAILED",
+        "wheel": "FAILED",
+        "__pytest_probe__transform": "SUCCESS",
+    }
+    notebooks = {"extract", "transform", "load", "__pytest_probe__transform"}
+    run = make_run(1, states, "FAILED", "RUN_EXECUTION_ERROR", notebooks=notebooks)
+    for key in states:
+        ws.jobs.exports[run_id_of(run, key)] = FAILED_EXPORT
+    return run
+
+
+def exported(ws: FakeWorkspaceClient, run: jobs.Run) -> list[str]:
+    """The sorted keys of the tasks of `run` whose task run was exported, checking each call asked for the code."""
+    keys = {task.run_id: task.task_key for task in run.tasks or []}
+    for call in ws.jobs.export_calls:
+        assert call["views_to_export"] == jobs.ViewsToExport.CODE
+    return sorted(str(keys[call["run_id"]]) for call in ws.jobs.export_calls)
+
+
+class TestNotebookExport:
+    """Which notebook tasks are exported with jobs.export_run, and what an export failure does."""
+
+    def test_exports_failed_notebook_tasks_only_by_default(self) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"extract", "transform"})
+        ws.jobs.exports[run_id_of(raw, "transform")] = FAILED_EXPORT
+        run = build_from(ws, raw)
+        assert ws.jobs.export_calls == [
+            {"run_id": run_id_of(raw, "transform"), "views_to_export": jobs.ViewsToExport.CODE}
+        ]
+        transform = run.task("transform")
+        assert transform.notebook is not None
+        assert transform.notebook.failed_cell is not None
+        assert transform.attempts[-1].notebook is transform.notebook
+        assert run.task("extract").notebook is None
+
+    @pytest.mark.parametrize(
+        ("policy", "expected"),
+        [
+            pytest.param("never", [], id="never"),
+            pytest.param("failed", ["transform"], id="failed"),
+            pytest.param("always", ["extract", "transform"], id="always"),
+        ],
+    )
+    def test_notebook_export_never_and_always(self, policy: str, expected: list[str]) -> None:
+        ws = FakeWorkspaceClient()
+        raw = notebook_run(ws)
+        run = build_from(ws, raw, notebook_export=policy)
+        assert exported(ws, raw) == expected
+        for key in ("load", "wheel"):
+            assert run.task(key).notebook is None
+        assert run.injected_tasks["__pytest_probe__transform"].notebook is None
+
+    def test_export_run_errors_are_warnings(self, caplog: pytest.LogCaptureFixture) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"extract", "transform"})
+        ws.jobs.exports[run_id_of(raw, "transform")] = PermissionDenied("not allowed")
+        run = build_from(ws, raw)
+        assert run.task("transform").notebook is None
+        assert "Could not export the notebook of task transform" in caplog.text
+        assert f"{HOST}/jobs/runs/{run_id_of(raw, 'transform')}" in caplog.text
+        unexported = build_from(FakeWorkspaceClient(), raw, notebook_export="never")
+        assert (run.succeeded, repr(run)) == (unexported.succeeded, repr(unexported))

@@ -117,7 +117,7 @@ Everything else is on the docs site: <https://stevenayers.github.io/pytest-datab
 - [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): stubs, probes, value rules, helper compute
 - [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every `Lakeflow` argument, command-line flag and sync strategy
 - [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): the deploy and teardown lifecycle, xdist, timing
-- [Limitations and FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/limitations/): no logs for notebook tasks, what probes cost, what stays in the workspace
+- [Limitations and FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/limitations/): notebook output read from the rendered notebook, what probes cost, what stays in the workspace
 - [API reference](https://stevenayers.github.io/pytest-databricks-lakeflow/api/)
 
 ## Contributing and licence

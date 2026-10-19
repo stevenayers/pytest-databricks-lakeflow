@@ -111,7 +111,8 @@ Each `TaskRun` has:
 - The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
 - `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
-- `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs, see [Limitations](limitations.md).
+- `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs; what a notebook printed is in `notebook`, see [Read what a notebook printed](#read-what-a-notebook-printed).
+- `notebook`, a `NotebookView` of a notebook task that ran and did not succeed, read from the rendered notebook, or `None`. See [Read what a notebook printed](#read-what-a-notebook-printed).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
 - `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. The platform gives job parameters precedence over task parameters with the same key, and the value here shows the job parameter's.
@@ -207,6 +208,40 @@ assert run.task("transform").output_json == {"rows_written": 7}
 ```
 
 `output_json` raises a `ValueError` that names the task when the notebook never called `dbutils.notebook.exit()`, when the output was cut at 5 MB, or when the output is not JSON.
+
+### Read what a notebook printed
+
+The Jobs API returns no stdout for a notebook task, but it renders the notebook of a task run with every cell's output. After a run, the plugin exports the notebook of each notebook task that ran and did not succeed with `jobs.export_run`, one call per task, and parses it into `task.notebook`:
+
+```python
+def test_transform_prints_its_input(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
+        run = job.run()
+        notebook = run.task("transform").notebook
+        assert notebook is not None
+        assert "transform: checking forbidden" in notebook.stdout
+        assert notebook.failed_cell is not None
+        assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
+        notebook.save("build/lakeflow/transform.html")
+```
+
+A `NotebookView` has:
+
+- `cells`, the notebook's cells in order, each a `NotebookCell` with `index` (its position in `cells`), `code`, `output` (the text it printed or displayed, with HTML tags and ANSI colour codes removed), `output_html` (its results as exported) and `error` (the exception it raised as `Name: message`, or `None`).
+- `stdout`, the text output of every cell, in order.
+- `failed_cell`, the first cell that raised, or `None`. Cells skipped after it have no error.
+- `html`, the exported HTML, unchanged, and `save(path)`, which writes it to a file that opens in a browser like the run page.
+
+The output comes from the rendered notebook, so it is complete only once the task has terminated, which it has by the time `run()` returns. The export format is not documented, so the plugin parses it best effort: when the notebook model cannot be found in the HTML, `cells` is empty, `html` keeps the export and a `UserWarning` names the missing `__DATABRICKS_NOTEBOOK_MODEL` marker. When `export_run` fails, `notebook` is `None` and a warning with the task key and run URL is logged; the run's outcome is unchanged.
+
+`Lakeflow(notebook_export=...)` chooses the tasks: `"failed"` (the default) exports the notebook tasks that ran and did not succeed, `"always"` every notebook task that ran, so that tests can assert on what a passing notebook printed, and `"never"` none. Only notebook tasks are exported, never Python script, wheel, JAR or SQL tasks or the plugin's stubs and probes, and only the last attempt of a retried task. When a test fails, its `lakeflow` report section shows, for each failing task with a notebook, the first code line of the cell that failed and the last 50 lines of `stdout`:
+
+```text
+transform: notebook.cells[2] failed: dbutils.jobs.taskValues.set(key="stage", value="validation")
+transform: notebook stdout:
+  transform: checking forbidden against /Volumes/example/raw/landing
+  transform: 7 rows expected
+```
 
 ### Truncated output and logs
 

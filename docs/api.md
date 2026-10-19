@@ -46,6 +46,14 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 
 ::: pytest_databricks_lakeflow.Timing
 
+## `NotebookView`
+
+::: pytest_databricks_lakeflow.NotebookView
+
+## `NotebookCell`
+
+::: pytest_databricks_lakeflow.NotebookCell
+
 ## Errors
 
 ::: pytest_databricks_lakeflow.LakeflowError
