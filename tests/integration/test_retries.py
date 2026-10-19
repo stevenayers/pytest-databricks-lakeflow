@@ -6,7 +6,7 @@ and ``slow_job``, whose ``sleep`` task sleeps for the ``seconds`` job parameter 
 Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_retries.py -n 4 --lakeflow-sweep
+        uv run pytest tests/integration/test_retries.py -n 4 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations

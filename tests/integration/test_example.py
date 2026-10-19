@@ -1,9 +1,10 @@
 r"""Integration tests for the ``example`` bundle (tests/integration/bundles/example), run in a real workspace.
 
-Run them with:
+Tests that only read the same run share it through a module-scoped fixture, and are marked with an ``xdist_group``
+named after that fixture, so that ``--dist loadgroup`` sends them to one worker and the run happens once. Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_example.py -n 4 --lakeflow-sweep
+        uv run pytest tests/integration/test_example.py -n 4 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import posixpath
 import re
 import time
 import warnings
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,7 +25,7 @@ import pytest
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed, session
+from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session
 from pytest_databricks_lakeflow.results import serialise
 
 from .conftest import BUNDLES, lakeflow_for
@@ -37,60 +39,72 @@ def lakeflow() -> Lakeflow:
     return lakeflow_for("example")
 
 
-def test_job_succeeds(lakeflow: Lakeflow) -> None:
+@pytest.fixture(scope="module")
+def hello_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
-        run = job.run()
-        assert run.succeeded
-        assert run.task("transform").output == "hello world"
-        assert run.task("transform").notebook is None, "only failed notebook tasks are exported by default"
-        assert "Success! hello" in run.task("my_wheel_task").logs
-        assert run.parameters["param1"] == "hello"
-        transform = run.task("transform").parameters
-        assert isinstance(transform, dict)
-        assert transform["row_count"] == "7"
-        assert transform["param1"] == "hello", "job parameters reach notebook tasks too"
-        # A run with several tasks reports its durations on the tasks and usually zero on the run itself.
-        assert run.timing.execution >= timedelta(0)
-        assert run.task("transform").timing.execution > timedelta(0)
-        if run.effective_performance_target is not None:
-            assert run.effective_performance_target in {"STANDARD", "PERFORMANCE_OPTIMIZED"}
-        else:
-            warnings.warn("The workspace returned no effective performance target", stacklevel=1)
-        assert job.job_id is not None
-        settings = lakeflow.ws.jobs.get(job.job_id).settings
-        tags = (settings.tags if settings else None) or {}
-        assert tags["pytest_user"]
-        if (Path(__file__).parents[2] / ".git").exists():
-            assert re.fullmatch(r"[0-9a-f]{40}", tags["pytest_git_sha"])
+        yield job.run()
 
 
-def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
+@pytest.mark.xdist_group("hello_run")
+def test_job_succeeds(lakeflow: Lakeflow, hello_run: JobRun) -> None:
+    assert hello_run.succeeded
+    assert hello_run.task("transform").output == "hello world"
+    assert hello_run.task("transform").notebook is None, "only failed notebook tasks are exported by default"
+    assert "Success! hello" in hello_run.task("my_wheel_task").logs
+    assert hello_run.parameters["param1"] == "hello"
+    transform = hello_run.task("transform").parameters
+    assert isinstance(transform, dict)
+    assert transform["row_count"] == "7"
+    assert transform["param1"] == "hello", "job parameters reach notebook tasks too"
+    # A run with several tasks reports its durations on the tasks and usually zero on the run itself.
+    assert hello_run.timing.execution >= timedelta(0)
+    assert hello_run.task("transform").timing.execution > timedelta(0)
+    if hello_run.effective_performance_target is not None:
+        assert hello_run.effective_performance_target in {"STANDARD", "PERFORMANCE_OPTIMIZED"}
+    else:
+        warnings.warn("The workspace returned no effective performance target", stacklevel=1)
+    # The fixture's job is deleted after the module, so it still exists here.
+    settings = lakeflow.ws.jobs.get(hello_run.job_id).settings
+    tags = (settings.tags if settings else None) or {}
+    assert tags["pytest_user"]
+    if (Path(__file__).parents[2] / ".git").exists():
+        assert re.fullmatch(r"[0-9a-f]{40}", tags["pytest_git_sha"])
+
+
+# The run's report.json goes to the first test that uses it, test_job_surfaces_permission_error, where the CI report
+# check looks for the exported transform notebook.
+@pytest.fixture(scope="module")
+def forbidden_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
-        run = job.run()
-        assert run.failed
-        assert run.termination_code == "RUN_EXECUTION_ERROR"
-        assert run.task("transform").raised(PermissionError)
-        assert run.task("load").result_state == "UPSTREAM_FAILED"
-        assert run.task("transform").attempt == 0
-        assert run.task("transform").attempts[-1].attempt == 0
-        assert not run.timed_out
-        # transform.py prints two lines in its second cell and raises in its third.
-        notebook = run.task("transform").notebook
-        assert notebook is not None
-        assert "transform: checking forbidden against /Volumes/example/raw/landing" in notebook.stdout
-        assert notebook.failed_cell is not None
-        assert notebook.failed_cell.index == 2
-        assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
-        assert run.task("extract").notebook is None
-        # --lakeflow-report-dir writes this as report.json, with the notebook saved as <run_id>/transform.html.
-        data = json.loads(json.dumps(serialise(run)))
-        transform = data["tasks"]["transform"]
-        assert transform["notebook_file"] == f"{run.run_id}/transform.html"
-        assert transform["error"]["type"] == "PermissionError"
-        assert data["tasks"]["load"]["result_state"] == "UPSTREAM_FAILED"
-        with pytest.raises(LakeflowRunFailed) as excinfo:
-            run.raise_for_failure()
-        assert "forbidden" in str(excinfo.value)
+        yield job.run()
+
+
+@pytest.mark.xdist_group("forbidden_run")
+def test_job_surfaces_permission_error(forbidden_run: JobRun) -> None:
+    assert forbidden_run.failed
+    assert forbidden_run.termination_code == "RUN_EXECUTION_ERROR"
+    assert forbidden_run.task("transform").raised(PermissionError)
+    assert forbidden_run.task("load").result_state == "UPSTREAM_FAILED"
+    assert forbidden_run.task("transform").attempt == 0
+    assert forbidden_run.task("transform").attempts[-1].attempt == 0
+    assert not forbidden_run.timed_out
+    # transform.py prints two lines in its second cell and raises in its third.
+    notebook = forbidden_run.task("transform").notebook
+    assert notebook is not None
+    assert "transform: checking forbidden against /Volumes/example/raw/landing" in notebook.stdout
+    assert notebook.failed_cell is not None
+    assert notebook.failed_cell.index == 2
+    assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
+    assert forbidden_run.task("extract").notebook is None
+    # --lakeflow-report-dir writes this as report.json, with the notebook saved as <run_id>/transform.html.
+    data = json.loads(json.dumps(serialise(forbidden_run)))
+    transform = data["tasks"]["transform"]
+    assert transform["notebook_file"] == f"{forbidden_run.run_id}/transform.html"
+    assert transform["error"]["type"] == "PermissionError"
+    assert data["tasks"]["load"]["result_state"] == "UPSTREAM_FAILED"
+    with pytest.raises(LakeflowRunFailed) as excinfo:
+        forbidden_run.raise_for_failure()
+    assert "forbidden" in str(excinfo.value)
 
 
 def test_task_overrides_retry_a_failing_task(lakeflow: Lakeflow) -> None:
@@ -105,14 +119,13 @@ def test_task_overrides_retry_a_failing_task(lakeflow: Lakeflow) -> None:
         assert run.task("load").result_state == "UPSTREAM_FAILED"
 
 
-def test_raise_for_failure_names_the_permission_error(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
-        run = job.run()
-        with pytest.raises(LakeflowRunFailed) as excinfo:
-            run.raise_for_failure()
-        assert excinfo.value.run is run
-        assert "PermissionError" in str(excinfo.value)
-        assert "transform" in str(excinfo.value)
+@pytest.mark.xdist_group("forbidden_run")
+def test_raise_for_failure_names_the_permission_error(forbidden_run: JobRun) -> None:
+    with pytest.raises(LakeflowRunFailed) as excinfo:
+        forbidden_run.raise_for_failure()
+    assert excinfo.value.run is forbidden_run
+    assert "PermissionError" in str(excinfo.value)
+    assert "transform" in str(excinfo.value)
 
 
 def test_root_cause_follows_the_exception_chain(lakeflow: Lakeflow) -> None:
@@ -130,12 +143,12 @@ def test_root_cause_follows_the_exception_chain(lakeflow: Lakeflow) -> None:
         assert "root cause: KeyError: 'root cause'" in str(excinfo.value)
 
 
-def test_output_json_refuses_a_plain_exit_value(lakeflow: Lakeflow) -> None:
+@pytest.mark.xdist_group("hello_run")
+def test_output_json_refuses_a_plain_exit_value(hello_run: JobRun) -> None:
     # extract.py exits with the plain string "extracted 7 rows", so there is no JSON output to parse.
-    with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
-        run = job.run().raise_for_failure()
-        with pytest.raises(ValueError, match="Output of task 'extract' is not JSON"):
-            _ = run.task("extract").output_json
+    run = hello_run.raise_for_failure()
+    with pytest.raises(ValueError, match="Output of task 'extract' is not JSON"):
+        _ = run.task("extract").output_json
 
 
 def test_subset_of_job(lakeflow: Lakeflow) -> None:
@@ -210,23 +223,27 @@ def test_start_two_jobs_and_wait(lakeflow: Lakeflow) -> None:
         assert second_started < first_ended
 
 
-def test_values_captured_even_on_failure(lakeflow: Lakeflow) -> None:
-    with lakeflow.job(
-        "my_example_job", params={"param1": "explode"}, capture_task_values={"transform": ["stage"]}
-    ) as job:
-        run = job.run()
-        assert run.failed
-        assert run.task("transform").task_values["stage"] == "validation"
+@pytest.fixture(scope="module")
+def explode_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
+    # transform sets stage before it raises, never sets never_set, and load does not run.
+    capture = {"transform": ["stage", "never_set"], "load": ["anything"]}
+    with lakeflow.job("my_example_job", params={"param1": "explode"}, capture_task_values=capture) as job:
+        yield job.run()
 
 
-def test_missing_task_values_explain_themselves(lakeflow: Lakeflow) -> None:
-    job = lakeflow.job("my_example_job", capture_task_values={"transform": ["never_set"], "load": ["anything"]})
-    run = job.run(params={"param1": "explode"})
-    assert run.task("transform").missing_task_values == ["never_set"]
+@pytest.mark.xdist_group("explode_run")
+def test_values_captured_even_on_failure(explode_run: JobRun) -> None:
+    assert explode_run.failed
+    assert explode_run.task("transform").task_values["stage"] == "validation"
+
+
+@pytest.mark.xdist_group("explode_run")
+def test_missing_task_values_explain_themselves(explode_run: JobRun) -> None:
+    assert explode_run.task("transform").missing_task_values == ["never_set"]
     with pytest.raises(KeyError, match="Task 'transform' never set value 'never_set'"):
-        run.task("transform").task_values["never_set"]
+        explode_run.task("transform").task_values["never_set"]
     with pytest.raises(KeyError, match=r"Task 'load' did not run \(UPSTREAM_FAILED\)"):
-        run.task("load").task_values["anything"]
+        explode_run.task("load").task_values["anything"]
 
 
 def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
@@ -241,11 +258,20 @@ def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
         assert run.task("transform").task_values["source_path"] == source_path
 
 
-def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
-    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
-    assert first.succeeded, first
-    assert first.task("extract").task_values == {"row_count": 7, "source_path": "/Volumes/example/raw/landing"}
-    with lakeflow.task("my_example_job.transform", upstream_from=first, capture_task_values=["source_path"]) as task:
+@pytest.fixture(scope="module")
+def captured_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
+    with lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}) as job:
+        yield job.run()
+
+
+@pytest.mark.xdist_group("captured_run")
+def test_replay_transform_from_a_full_run(lakeflow: Lakeflow, captured_run: JobRun) -> None:
+    assert captured_run.succeeded, captured_run
+    extract = captured_run.task("extract")
+    assert extract.task_values == {"row_count": 7, "source_path": "/Volumes/example/raw/landing"}
+    with lakeflow.task(
+        "my_example_job.transform", upstream_from=captured_run, capture_task_values=["source_path"]
+    ) as task:
         run = task.run()
         assert run.succeeded, run
         assert run.task("transform").output == "hello world"
@@ -271,10 +297,10 @@ def test_downstream_half_with_stubbed_extract(lakeflow: Lakeflow) -> None:
         assert sorted(run.tasks) == ["transform"]
 
 
-def test_replay_downstream_half_from_a_full_run(lakeflow: Lakeflow) -> None:
-    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
-    assert first.succeeded, first
-    run = lakeflow.job("my_example_job").run(only=["transform+"], replay=first)
+@pytest.mark.xdist_group("captured_run")
+def test_replay_downstream_half_from_a_full_run(lakeflow: Lakeflow, captured_run: JobRun) -> None:
+    assert captured_run.succeeded, captured_run
+    run = lakeflow.job("my_example_job").run(only=["transform+"], replay=captured_run)
     assert run.succeeded, run
     assert sorted(run.injected_tasks) == ["extract"]
     transform = run.task("transform").parameters
