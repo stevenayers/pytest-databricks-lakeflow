@@ -43,6 +43,13 @@ def built_task(output: jobs.RunOutput, key: str = "t") -> TaskRun:
     return build_from(ws, run).task(key)
 
 
+def run_id_of(run: jobs.Run, key: str) -> int:
+    """Return the task run id of task `key` in `run`, so an output can be keyed by it."""
+    task = next(t for t in run.tasks or [] if t.task_key == key)
+    assert task.run_id is not None
+    return task.run_id
+
+
 def recorded_data(name: str) -> dict[str, Any]:
     return json.loads((DATA / "runs" / f"{name}.json").read_text())["run"]
 
@@ -134,7 +141,9 @@ class TestTaskValues:
     def test_values_when_the_probe_is_missing_or_fails(self) -> None:
         ws = FakeWorkspaceClient()
         run = make_run(1, {"transform": "SUCCESS", "__pytest_probe__transform": "FAILED", "other": "SUCCESS"})
-        ws.jobs.outputs[101] = jobs.RunOutput(error="PermissionError: cannot read {values}")
+        ws.jobs.outputs[run_id_of(run, "__pytest_probe__transform")] = jobs.RunOutput(
+            error="PermissionError: cannot read {values}"
+        )
         result = build_from(ws, run, capture_task_values={"transform": ["k"], "other": ["k"]})
         with pytest.raises(KeyError, match=r"probe task __pytest_probe__transform ended FAILED: PermissionError"):
             result.task("transform").task_values["k"]
@@ -145,7 +154,7 @@ class TestTaskValues:
         ws = FakeWorkspaceClient()
         run = make_run(1, {"transform": "SUCCESS", "__pytest_probe__transform": "SUCCESS"})
         notebook = jobs.NotebookOutput(result='{"values": {"k": "', truncated=True)
-        ws.jobs.outputs[101] = jobs.RunOutput(notebook_output=notebook)
+        ws.jobs.outputs[run_id_of(run, "__pytest_probe__transform")] = jobs.RunOutput(notebook_output=notebook)
         with pytest.warns(UserWarning, match="__pytest_probe__transform"):
             result = build_from(ws, run, capture_task_values={"transform": ["k"]})
         with pytest.raises(KeyError, match=r"returned unreadable output \(truncated\)"):
@@ -217,33 +226,41 @@ class TestOutputs:
         assert sorted(ws.jobs.output_calls) == sorted(set(outputs) - {extract.run_id})
 
     @pytest.mark.parametrize(
-        ("output", "message"),
+        ("output", "message", "output_truncated", "logs_truncated"),
         [
             (
                 jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="x", truncated=True)),
                 "The output of task 'transform' was cut at the 5 MB limit",
+                True,
+                False,
             ),
             (
                 jobs.RunOutput(logs="tail", logs_truncated=True),
                 "The logs of task 'transform' was cut at the 5 MB limit",
+                False,
+                True,
             ),
             (
                 jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="x", truncated=True), logs_truncated=True),
                 "The output and logs of task 'transform' were cut at the 5 MB limit",
+                True,
+                True,
             ),
         ],
         ids=["output", "logs", "output_and_logs"],
     )
-    def test_truncated_output_warns(self, output: jobs.RunOutput, message: str) -> None:
+    def test_truncated_output_warns(
+        self, output: jobs.RunOutput, message: str, output_truncated: bool, logs_truncated: bool
+    ) -> None:
         ws = FakeWorkspaceClient()
         run = make_run(1, {"extract": "SUCCESS", "transform": "SUCCESS"})
-        ws.jobs.outputs[101] = output
+        ws.jobs.outputs[run_id_of(run, "transform")] = output
         with pytest.warns(UserWarning) as record:
             result = build_from(ws, run)
         assert [str(w.message) for w in record] == [message]
         transform = result.task("transform")
-        assert transform.output_truncated is bool(output.notebook_output and output.notebook_output.truncated)
-        assert transform.logs_truncated is bool(output.logs_truncated)
+        assert transform.output_truncated is output_truncated
+        assert transform.logs_truncated is logs_truncated
 
     def test_no_warning_without_truncation(self) -> None:
         with warnings.catch_warnings(record=True) as record:
