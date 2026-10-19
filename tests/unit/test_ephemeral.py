@@ -76,6 +76,18 @@ def queue_transform_failure(ws: FakeWorkspaceClient) -> None:
     ws.jobs.queue_polls(polls, {7701: jobs.RunOutput(error="ValueError: no rows\nmore detail")})
 
 
+def queue_until_cancelled(ws: FakeWorkspaceClient) -> None:
+    """Queue run 77, which keeps running for 100 polls unless it is cancelled, and then ends `CANCELED`."""
+    cancelled = make_run(77, {"t": "CANCELED"}, result_state="CANCELED", code="USER_CANCELED")
+    ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100, after_cancel=cancelled)
+
+
+def record_finished_runs(pytester: pytest.Pytester) -> None:
+    """Configure a `run_finished` callback that appends each run id to `conftest.finished`."""
+    extra = "\nfinished = []\n\n\ndef record(run, item):\n    finished.append(run.run_id)\n"
+    configure_lakeflow(pytester, "run_finished=record", extra=extra)
+
+
 class TestLifecycle:
     """Creating the copy, running it and deleting it, with and without a `with` block."""
 
@@ -293,8 +305,7 @@ class TestRunHandle:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
         fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
-        extra = "\nfinished = []\n\n\ndef record(run, item):\n    finished.append(run.run_id)\n"
-        configure_lakeflow(pytester, "run_finished=record", extra=extra)
+        record_finished_runs(pytester)
         result = run_tests(
             pytester,
             """
@@ -1467,10 +1478,139 @@ class TestTimeouts:
                         handle.wait(timeout=timedelta(hours=1))
                 assert "timeout_seconds of 120 (0:02:00)" in str(e.value)
                 assert "run(timeout=...)" in str(e.value)
+                assert "start(timeout=...)" in str(e.value)
             """,
         )
         result.assert_outcomes(passed=1)
         assert fake_ws.jobs.updated == []
+
+    def test_start_timeout_raises_the_job_timeout_before_the_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        # Lakeflow's timeout of zero would time the wait out, so a wait() that returns used start()'s timeout.
+        configure_lakeflow(pytester, "timeout=timedelta(0)")
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=3)
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    handle = job.start(timeout=timedelta(hours=1))
+                    with pytest.raises(LakeflowError, match=r"wait\\(timeout=2:00:00\\) of 'my_job'"):
+                        handle.wait(timeout=timedelta(hours=2))
+                    assert handle.wait().succeeded
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        created = fake_ws.jobs.created[0]
+        assert created["timeout_seconds"] == 60
+        assert fake_ws.jobs.updated == [(1001, jobs.JobSettings(timeout_seconds=3660, tasks=created["tasks"]))]
+        assert fake_ws.jobs.run_timeouts == [3660]
+        assert fake_ws.jobs.cancelled == []
+
+
+class TestStopAfter:
+    """`stop_after` cancels a run that does not end on its own and returns it as a cancelled `JobRun`."""
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param("job.run(stop_after=timedelta(0))", id="run"),
+            pytest.param("job.start(timeout=timedelta(minutes=5)).wait(stop_after=timedelta(0))", id="wait"),
+        ],
+    )
+    def test_stop_after_returns_a_cancelled_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        record_finished_runs(pytester)
+        result = run_tests(
+            pytester,
+            f"""
+            from datetime import timedelta
+
+            import conftest
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    run = {call}
+                    assert (run.cancelled, run.result_state, run.failed) == (True, "CANCELED", True)
+                    task = run.task("t")
+                    assert (task.ran, task.error) == (False, None)
+                    assert job.runs == [run]
+                    assert lakeflow.active_runs == set()
+                assert conftest.finished == [77]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
+
+    @pytest.mark.parametrize(
+        ("call", "active", "started"),
+        [
+            pytest.param(
+                "job.run(stop_after=timedelta(minutes=5), timeout=timedelta(minutes=1))", "set()", 0, id="run"
+            ),
+            # wait() learns stop_after only after the run started, so the run keeps going until the job closes.
+            pytest.param(
+                "job.start(timeout=timedelta(minutes=1)).wait(stop_after=timedelta(minutes=5))", "{77}", 1, id="wait"
+            ),
+        ],
+    )
+    def test_stop_after_longer_than_timeout_fails_early(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str, active: str, started: int
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            f"""
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                message = "stop_after=0:05:00 of 'my_job' is longer than its timeout of 0:01:00"
+                with lakeflow.job("my_job") as job:
+                    with pytest.raises(LakeflowError, match=message):
+                        {call}
+                    assert lakeflow.active_runs == {active}
+                    assert lakeflow.ws.jobs.cancelled == []
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.run_now_calls) == started
+
+    def test_stop_after_then_timeout_still_raises(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowTimeout
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    with pytest.raises(LakeflowTimeout, match="Run 77 of 'my_job' did not finish within 0:00:00"):
+                        job.run(stop_after=timedelta(0), timeout=timedelta(0))
+                    assert job.runs == []
+                    assert lakeflow.active_runs == set()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
 
 
 class TestReportSection:
@@ -1630,6 +1770,43 @@ class TestReportSection:
         )
 
 
+# Tests whose run the plugin cancels, at the wait() deadline or when the job closes, with the get_run calls made
+# before the cancel.
+CANCELLED_BY_THE_PLUGIN = [
+    pytest.param(
+        """
+        from datetime import timedelta
+
+        import conftest
+        import pytest
+
+        from pytest_databricks_lakeflow import LakeflowTimeout
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                with pytest.raises(LakeflowTimeout, match="did not finish within 0:00:00"):
+                    job.run(timeout=timedelta(0))
+                assert job.runs == []
+            assert conftest.finished == []
+        """,
+        2,
+        id="timeout",
+    ),
+    pytest.param(
+        """
+        import conftest
+
+        def test_job(lakeflow):
+            with lakeflow.job("my_job") as job:
+                job.start()
+            assert job.runs == []
+            assert conftest.finished == []
+        """,
+        1,
+        id="closed-job",
+    ),
+]
+
 REPORTED_JOB = """
 def test_job(lakeflow):
     with lakeflow.job("my_job", params={"param1": "hi"}) as job:
@@ -1744,6 +1921,49 @@ class TestReportDir:
         )
         result.assert_outcomes(passed=2)
         result.stdout.fnmatch_lines(["*Could not write the lakeflow report of test_jobs.py::test_job to *out*"])
+
+    @pytest.mark.parametrize(("source", "polls"), CANCELLED_BY_THE_PLUGIN)
+    def test_a_run_the_plugin_cancels_is_reported(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str, polls: int
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        record_finished_runs(pytester)
+        run_tests(pytester, source, "--lakeflow-report-dir=out").assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
+        _, report = report_of(pytester.path / "out")
+        [entry] = report["runs"]
+        assert (entry["run_id"], entry["result_state"], entry["succeeded"]) == (77, "CANCELED", False)
+        assert entry["tasks"]["t"]["result_state"] == "CANCELED"
+
+    @pytest.mark.parametrize(("source", "polls"), CANCELLED_BY_THE_PLUGIN)
+    def test_without_the_flag_a_cancelled_run_is_not_polled_again(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str, polls: int
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        record_finished_runs(pytester)
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
+        assert fake_ws.jobs.get_run_calls == [{"run_id": 77}] * polls
+        assert not (pytester.path / "out").exists()
+
+    def test_a_cancelled_run_that_does_not_end_is_left_out(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        monkeypatch.setattr(ephemeral, "TIMEOUT_GRACE_SECONDS", 0)
+        source = 'def test_job(lakeflow):\n    with lakeflow.job("my_job") as job:\n        job.start()\n'
+        result = run_tests(
+            pytester, source, "--lakeflow-report-dir=out", "-o", "log_cli=true", "--log-cli-level=WARNING"
+        )
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines(
+            [
+                "*Run 77 of 'my_job' had not ended 0 seconds after it was cancelled, so report.json does not list "
+                f"it: {HOST}/jobs/runs/77*"
+            ]
+        )
+        assert fake_ws.jobs.cancelled == [77]
+        assert not (pytester.path / "out").exists()
 
 
 class TestProgress:

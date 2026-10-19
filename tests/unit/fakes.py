@@ -33,6 +33,7 @@ class FakeJobs:
         self.tokens: dict[str, int] = {}
         self.listed: list[jobs.BaseJob] = []
         self.queued: list[list[jobs.Run]] = []
+        self.after_cancel: dict[int, list[jobs.Run]] = {}
         self.polls: dict[int, list[jobs.Run]] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
         self.raw_outputs: dict[int, dict[str, Any] | Exception] = {}
@@ -113,16 +114,22 @@ class FakeJobs:
         outputs: Mapping[int, jobs.RunOutput] | None = None,
         polls: int = 1,
         running: jobs.Run | None = None,
+        after_cancel: jobs.Run | None = None,
     ) -> None:
         """Make the next `run_now` return `run`, reported as running for `polls` calls to `get_run`.
 
-        `running` is the snapshot those calls report, by default a running run with no tasks.
+        `running` is the snapshot those calls report, by default a running run with no tasks. When `after_cancel` is
+        set, `cancel_run` replaces the polls left with one `running` poll and then `after_cancel`, as a run that the
+        platform stops a few seconds after the cancel.
         """
         if running is None:
             status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
             running = jobs.Run(run_id=run.run_id, run_page_url=run.run_page_url, status=status)
         self.queued.append([running] * polls + [run])
         self.outputs.update(outputs or {})
+        if after_cancel is not None:
+            assert run.run_id is not None
+            self.after_cancel[run.run_id] = [running, after_cancel]
 
     def queue_polls(self, polls: Sequence[jobs.Run], outputs: Mapping[int, jobs.RunOutput] | None = None) -> None:
         """Make the next `run_now` report `polls` in order, one per call to `get_run`, then keep reporting the last."""
@@ -211,6 +218,8 @@ class FakeJobs:
 
     def cancel_run(self, run_id: int) -> None:
         self.cancelled.append(run_id)
+        if run_id in self.after_cancel:
+            self.polls[run_id] = self.after_cancel.pop(run_id)
 
     def list(self, **kwargs: Any) -> Iterator[jobs.BaseJob]:
         self.list_calls += 1

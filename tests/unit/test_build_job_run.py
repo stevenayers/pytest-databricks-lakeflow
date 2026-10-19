@@ -146,6 +146,7 @@ class TestRecordedRuns:
         assert (run.result_state, run.termination_code) == ("CANCELED", "USER_CANCELED")
         assert (task.result_state, task.ran, task.error) == ("CANCELED", False, None)
         assert run.failed
+        assert run.cancelled
 
     def test_logs_of_wheel_and_script_tasks(self) -> None:
         run, _ = build("wheel_logs")
@@ -510,6 +511,26 @@ class TestTimeouts:
         assert run.task("load").timed_out
         assert run.failed
         assert "load: TIMEDOUT" in repr(run)
+
+
+class TestCancelledRuns:
+    """A run that ended `CANCELED` is cancelled, and so failed."""
+
+    @pytest.mark.parametrize(
+        ("raw", "cancelled"),
+        [
+            pytest.param(
+                make_run(9, {"t": "CANCELED"}, result_state="CANCELED", code="USER_CANCELED"), True, id="cancelled"
+            ),
+            pytest.param(make_run(9, {"t": "SUCCESS"}), False, id="succeeded"),
+        ],
+    )
+    def test_cancelled_property(self, raw: jobs.Run, cancelled: bool) -> None:
+        run = build_from(FakeWorkspaceClient(), raw)
+        assert run.cancelled is cancelled
+        assert run.failed is cancelled
+        task = run.task("t")
+        assert (task.ran, task.error) == (not cancelled, None)
 
 
 class TestTiming:
