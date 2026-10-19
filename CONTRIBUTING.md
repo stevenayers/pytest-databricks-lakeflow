@@ -70,11 +70,16 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
+        retries/                 # name: lakeflow_retries, a task that retries and a task that times out
+            databricks.yml
+            resources/*.job.yml
+            src/notebooks/*.py
     test_example.py              # one module per bundle, named after it
     test_run_job.py              # child_run and the children= option against the run_job bundle
     test_sql.py
     test_branches.py
     test_classic.py
+    test_retries.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
