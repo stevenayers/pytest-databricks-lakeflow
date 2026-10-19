@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import subprocess
 import time
 from pathlib import Path
@@ -15,7 +17,15 @@ from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 
 from .conftest import AZURE_DEVOPS, GITHUB, FakeCli, configure_lakeflow, git, make_repository, set_ci
-from .fakes import ACCOUNT_ID, HOST, FakeWorkspaceClient, example_settings, sp_rule_set
+from .fakes import (
+    ACCOUNT_ID,
+    HOST,
+    TOKEN_RACE,
+    ContendedTokenCache,
+    FakeWorkspaceClient,
+    example_settings,
+    sp_rule_set,
+)
 
 UNIT_TESTS = Path(__file__).parent
 DEPLOY = ["bundle", "deploy", "-t", "test", "--auto-approve"]
@@ -372,34 +382,40 @@ class TestAttribution:
 class TestWorkspaceClient:
     """How `Lakeflow` gets its workspace client, and which profile reaches the CLI."""
 
-    def test_client_construction_retries_token_contention(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        attempts: list[str | None] = []
+    def test_client_construction_retries_token_contention(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        contended = ContendedTokenCache(collisions=2)
         sleeps: list[float] = []
-
-        def flaky(profile: str | None = None) -> str:
-            attempts.append(profile)
-            if len(attempts) < 3:
-                raise ValueError("databricks-cli auth: cannot get access token: forced token refresh: exit status 45")
-            return "client"
-
-        monkeypatch.setattr(session, "WorkspaceClient", flaky)
+        monkeypatch.setattr(session, "WorkspaceClient", contended)
         monkeypatch.setattr(time, "sleep", sleeps.append)
-        assert cast(Any, session.make_workspace_client("dev")) == "client"
-        assert attempts == ["dev", "dev", "dev"]
+        monkeypatch.setattr(random, "uniform", lambda low, high: 0)
+        with caplog.at_level(logging.INFO, logger="pytest_databricks_lakeflow"):
+            assert cast(Any, session.make_workspace_client("dev")) == "client"
+        assert contended.profiles == ["dev", "dev", "dev"]
         assert sleeps == [2, 4]
+        assert caplog.messages == [f"Retrying workspace client after: {TOKEN_RACE}"] * 2
+
+    @pytest.mark.parametrize(
+        ("bound", "expected"), [pytest.param(0, [2, 4], id="lower"), pytest.param(1, [4, 8], id="upper")]
+    )
+    def test_collided_workers_retry_at_different_times(
+        self, monkeypatch: pytest.MonkeyPatch, bound: int, expected: list[float]
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr(session, "WorkspaceClient", ContendedTokenCache(collisions=2))
+        monkeypatch.setattr(time, "sleep", sleeps.append)
+        monkeypatch.setattr(random, "uniform", lambda low, high: (low, high)[bound])
+        session.make_workspace_client("dev")
+        assert sleeps == expected
 
     def test_client_construction_gives_up_after_the_last_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        attempts: list[str | None] = []
-
-        def always_contended(profile: str | None = None) -> None:
-            attempts.append(profile)
-            raise ValueError("databricks-cli auth: cannot get access token: forced token refresh: exit status 45")
-
-        monkeypatch.setattr(session, "WorkspaceClient", always_contended)
+        contended = ContendedTokenCache(collisions=session.CLIENT_ATTEMPTS)
+        monkeypatch.setattr(session, "WorkspaceClient", contended)
         monkeypatch.setattr(time, "sleep", lambda seconds: None)
         with pytest.raises(ValueError, match="cannot get access token"):
             session.make_workspace_client("dev")
-        assert len(attempts) == session.CLIENT_ATTEMPTS
+        assert len(contended.profiles) == session.CLIENT_ATTEMPTS
 
     def test_client_construction_fails_fast_on_other_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def broken(profile: str | None = None) -> None:
