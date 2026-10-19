@@ -4,12 +4,14 @@ import inspect
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import compute, jobs
 
+from pytest_databricks_lakeflow import ephemeral
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
@@ -25,6 +27,9 @@ from .fakes import (
     reporting_settings,
     running_run,
 )
+
+if TYPE_CHECKING:
+    from pytest_databricks_lakeflow import Lakeflow
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -208,6 +213,122 @@ class TestLifecycle:
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*PermissionDenied: User is not authorised to set run_as to 0000-app-id*"])
         assert fake_ws.jobs.run_now_calls == []
+
+
+class TestRunHandle:
+    """Starting a run without waiting, then waiting for it or cancelling it."""
+
+    def test_start_and_wait_two_jobs(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+        fake_ws.jobs.queue(make_run(78, {"t": "SUCCESS"}))
+        result = run_tests(
+            pytester,
+            """
+            from pytest_databricks_lakeflow import RunHandle
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as first, lakeflow.job("my_job") as second:
+                    handle = first.start(params={"param1": "hi"})
+                    other = second.start()
+                    assert isinstance(handle, RunHandle)
+                    assert (handle.job, handle.run_id, other.job, other.run_id) == (first, 77, second, 78)
+                    assert lakeflow.active_runs == {77, 78}
+                    run = handle.wait()
+                    run2 = other.wait()
+                    assert run.succeeded and run2.succeeded
+                    assert (first.runs, second.runs) == ([run], [run2])
+                    assert lakeflow.active_runs == set()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert [call["job_parameters"] for call in fake_ws.jobs.run_now_calls] == [{"param1": "hi"}, None]
+        assert fake_ws.jobs.cancelled == []
+
+    def test_handle_cancel_removes_the_active_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            f"""
+            def test_job(lakeflow, request):
+                with lakeflow.job("my_job") as job:
+                    handle = job.start()
+                    assert handle.url == "{HOST}/jobs/runs/77"
+                    assert ("lakeflow_run_url", handle.url) in request.node.user_properties
+                    handle.cancel()
+                    assert lakeflow.ws.jobs.cancelled == [77]
+                    assert lakeflow.active_runs == set()
+                assert lakeflow.ws.jobs.cancelled == [77]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param(
+                'def test_job(lakeflow):\n    with lakeflow.job("my_job") as job:\n        job.start()\n',
+                id="with-exit",
+            ),
+            # An interrupted test does not reach its teardown, so the run is still active at session end.
+            pytest.param(
+                'def test_job(lakeflow):\n    lakeflow.job("my_job").start()\n    raise KeyboardInterrupt\n',
+                id="session-end",
+            ),
+        ],
+    )
+    def test_unwaited_handle_is_cancelled(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        pytester.makepyfile(test_jobs=source)
+        pytester.runpytest(no_reraise_ctrlc=True)
+        assert fake_ws.jobs.cancelled == [77]
+        assert fake_ws.jobs.get_run_calls == [{"run_id": 77}]
+
+    def test_wait_twice_returns_the_same_run_and_calls_run_finished_once(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+        extra = "\nfinished = []\n\n\ndef record(run, item):\n    finished.append(run.run_id)\n"
+        configure_lakeflow(pytester, "run_finished=record", extra=extra)
+        result = run_tests(
+            pytester,
+            """
+            import conftest
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    handle = job.start()
+                    assert handle.wait() is handle.wait()
+                    assert len(job.runs) == 1
+                assert handle.wait() is job.runs[0]
+                assert conftest.finished == [77]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_wait_after_the_job_closed_fails_clearly(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    handle = job.start()
+                with pytest.raises(LakeflowError, match="The ephemeral job for 'my_job' has already been closed"):
+                    handle.wait()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
 
 
 class TestKeepRules:
@@ -954,7 +1075,53 @@ class TestRunOptions:
 
 
 class TestTimeouts:
-    """The run timeout, the job's `timeout_seconds` and cancelling on expiry."""
+    """The poll interval, the run timeout, the job's `timeout_seconds` and cancelling on expiry."""
+
+    @pytest.mark.parametrize(
+        ("poll_interval", "sleeps"), [(timedelta(seconds=5), [5.0]), (None, [3.0])], ids=["set", "default"]
+    )
+    def test_poll_interval(
+        self,
+        fake_ws: FakeWorkspaceClient,
+        monkeypatch: pytest.MonkeyPatch,
+        poll_interval: timedelta | None,
+        sleeps: list[float],
+    ) -> None:
+        slept: list[float] = []
+        monkeypatch.setattr(ephemeral, "POLL_SECONDS", 3.0)
+        monkeypatch.setattr(ephemeral.time, "sleep", slept.append)
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
+        fake_ws.jobs.run_now(1001)
+        lakeflow = SimpleNamespace(
+            ws=fake_ws, poll_interval=poll_interval, active_runs=set(), timeout=timedelta(minutes=1), run_finished=None
+        )
+        job = EphemeralJob(cast("Lakeflow", lakeflow), "my_job", jobs.JobSettings())
+        item = SimpleNamespace(stash=pytest.Stash(), user_properties=[])
+        run, _ = job._wait(77, timedelta(minutes=1), cast("pytest.Item", item))
+        assert run.state is not None and run.state.result_state == jobs.RunResultState.SUCCESS
+        assert slept == sleeps
+
+    def test_timeout_message_lists_task_states(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        running = running_run(77, {"extract": "SUCCESS", "transform": "RUNNING", "load": "PENDING"})
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100, running=running)
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowTimeout
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    with pytest.raises(LakeflowTimeout) as e:
+                        job.run(timeout=timedelta(0))
+                assert str(e.value).endswith("Tasks when cancelled: extract SUCCESS, transform RUNNING, load PENDING")
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [77]
 
     @pytest.mark.parametrize(
         ("arguments", "call"),
@@ -1453,12 +1620,14 @@ class TestPublicApi:
             "Timing",
             "LakeflowTimeout",
             "LakeflowRunFailed",
+            "RunHandle",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__
         assert issubclass(pytest_databricks_lakeflow.LakeflowRunFailed, pytest_databricks_lakeflow.LakeflowError)
 
-    def test_pipeline_refresh_options_are_keyword_only(self) -> None:
-        parameters = inspect.signature(EphemeralJob.run).parameters
+    @pytest.mark.parametrize("method", ["run", "start"])
+    def test_pipeline_refresh_options_are_keyword_only(self, method: str) -> None:
+        parameters = inspect.signature(getattr(EphemeralJob, method)).parameters
         names = ("full_refresh", "full_refresh_selection", "refresh_selection")
         assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY for name in names)

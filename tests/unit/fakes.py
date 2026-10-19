@@ -70,10 +70,20 @@ class FakeJobs:
         self.deleted.append(job_id)
         self.settings.pop(job_id, None)
 
-    def queue(self, run: jobs.Run, outputs: Mapping[int, jobs.RunOutput] | None = None, polls: int = 1) -> None:
-        """Make the next `run_now` return `run`, reported as running for `polls` calls to `get_run`."""
-        status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
-        running = jobs.Run(run_id=run.run_id, run_page_url=run.run_page_url, status=status)
+    def queue(
+        self,
+        run: jobs.Run,
+        outputs: Mapping[int, jobs.RunOutput] | None = None,
+        polls: int = 1,
+        running: jobs.Run | None = None,
+    ) -> None:
+        """Make the next `run_now` return `run`, reported as running for `polls` calls to `get_run`.
+
+        `running` is the snapshot those calls report, by default a running run with no tasks.
+        """
+        if running is None:
+            status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
+            running = jobs.Run(run_id=run.run_id, run_page_url=run.run_page_url, status=status)
         self.queued.append([running] * polls + [run])
         self.outputs.update(outputs or {})
 
