@@ -26,6 +26,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 
 ::: pytest_databricks_lakeflow.EphemeralJob
 
+## `RunHandle`
+
+::: pytest_databricks_lakeflow.RunHandle
+
 ## `JobRun`
 
 ::: pytest_databricks_lakeflow.JobRun
