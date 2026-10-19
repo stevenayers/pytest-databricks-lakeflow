@@ -12,6 +12,7 @@ from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.client import Lakeflow
 from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, cancel_run
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
+from pytest_databricks_lakeflow.report import write as write_report
 from pytest_databricks_lakeflow.session import (
     SessionState,
     activate,
@@ -42,6 +43,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     group.addoption("--lakeflow-sweep", action="store_true", help="Delete leftover ephemeral jobs at session start.")
     group.addoption("--lakeflow-destroy", action="store_true", help="Run bundle destroy at the end of the session.")
+    group.addoption(
+        "--lakeflow-report-dir",
+        dest="lakeflow_report_dir",
+        default=None,
+        metavar="DIR",
+        help="Write each test's runs to DIR: a report.json per test, with raw logs and exported notebooks.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -53,6 +61,10 @@ def pytest_configure(config: pytest.Config) -> None:
     workerinput: dict[str, Any] = getattr(config, "workerinput", {})
     state_dir = workerinput.get("lakeflow_state_dir")
     attribution = workerinput.get("lakeflow_attribution")
+    report_dir = None
+    if config.getoption("lakeflow_report_dir"):
+        # Relative to where pytest was invoked, as --junitxml is, not to the rootdir.
+        report_dir = config.invocation_params.dir / config.getoption("lakeflow_report_dir")
     state = SessionState(
         rootpath=config.rootpath,
         run_id=workerinput.get("lakeflow_run_id") or resolve_run_id(),
@@ -62,6 +74,7 @@ def pytest_configure(config: pytest.Config) -> None:
         keep_failed=config.getoption("lakeflow_keep_failed"),
         sweep=config.getoption("lakeflow_sweep"),
         destroy=config.getoption("lakeflow_destroy"),
+        report_dir=report_dir,
     )
     config.stash[STATE] = state
     activate(state)
@@ -101,6 +114,8 @@ def pytest_runtest_protocol(item: pytest.Item) -> Generator[None, object, object
         return (yield)
     finally:
         state.item = previous
+        if state.report_dir is not None:
+            write_report(state.report_dir, item)
 
 
 @pytest.hookimpl(wrapper=True)

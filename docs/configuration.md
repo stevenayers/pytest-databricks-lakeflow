@@ -69,6 +69,7 @@ These apply to one pytest run and win over the matching arguments.
 | `--no-lakeflow-keep-failed` | Delete the ephemeral job even when its test fails. |
 | `--lakeflow-sweep` | At session start, delete your own jobs tagged `pytest` from other runs that are older than `sweep_hours`. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
+| `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`, relative to the directory pytest was invoked from: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](#report-directory). |
 
 ## Environment variables
 
@@ -187,3 +188,34 @@ hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours
 ```
 
 It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing and cancelled nothing prints no block.
+
+### Report directory
+
+`pytest --lakeflow-report-dir=build/lakeflow` keeps a record of every run that outlives the job, to attach to a CI build as an artefact. The path is resolved against the directory pytest was invoked from, as `--junitxml` is. Each test that waited for at least one run gets a directory of its own, named after its node id with every character outside letters, digits, `.`, `_` and `-` replaced by `_`, cut to 80 characters, plus `-` and the first 8 hex characters of the node id's SHA-256:
+
+```text
+build/lakeflow/
+  test_jobs.py__test_job-3f9a2c1b/
+    report.json            # the test's outcome and one entry per run
+    77/load.log            # raw logs, by run id and task key
+    77/transform.html      # an exported notebook, which opens in a browser
+```
+
+`report.json` holds the test's `nodeid`, its `outcome` per phase, such as `{"setup": "passed", "call": "failed", "teardown": "passed"}`, and `runs`, one entry per `JobRun` the test waited for, runs made in a fixture included, in the order they finished. Each entry is [`serialise(run)`](api.md#serialise) with three more keys: `job_url`, `params` (the job's `params`) and `settings` (the copy's `JobSettings` as the Jobs API's JSON).
+
+`serialise` keeps every field of the run and its tasks. Durations are in seconds, as `duration_seconds` and a `timing` of `queue_seconds`, `setup_seconds`, `execution_seconds` and `cleanup_seconds`; `error` is a dict of `type`, `message`, `trace`, `root_cause` and `code`; `missing_task_value_reasons` says why each of `missing_task_values` is missing. Logs, up to 5 MB per task, and the exported notebook HTML are written as files instead, named in `logs_file` and `notebook_file` relative to the test's directory, or `None` (`null` in the file) when the task has none. An earlier attempt of a retried task gets `.attempt-<n>` before the suffix, such as `77/load.attempt-0.log`, and the tasks of a `child_run` are under the child run's id.
+
+```python
+from pytest_databricks_lakeflow import Lakeflow
+from pytest_databricks_lakeflow.results import serialise
+
+
+def test_rejects_forbidden_input(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
+        run = job.run()
+    data = serialise(run)
+    assert data["tasks"]["transform"]["error"]["type"] == "PermissionError"
+    assert data["tasks"]["transform"]["notebook_file"] == f"{run.run_id}/transform.html"
+```
+
+Only the notebooks that `notebook_export` selects are exported, by default those of notebook tasks that ran and did not succeed; pass `Lakeflow(notebook_export="always")` to keep every notebook. A test without a run writes nothing, and without the flag nothing is written. A file that cannot be written logs a warning and never fails the test. The directory is not cleared first, so a rerun overwrites `report.json` and the files it names and leaves any others.

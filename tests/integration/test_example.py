@@ -9,6 +9,7 @@ Run them with:
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import warnings
 from datetime import timedelta
@@ -20,6 +21,7 @@ from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed
+from pytest_databricks_lakeflow.results import serialise
 
 from .conftest import lakeflow_for
 
@@ -77,6 +79,12 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
         assert notebook.failed_cell.index == 2
         assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
         assert run.task("extract").notebook is None
+        # --lakeflow-report-dir writes this as report.json, with the notebook saved as <run_id>/transform.html.
+        data = json.loads(json.dumps(serialise(run)))
+        transform = data["tasks"]["transform"]
+        assert transform["notebook_file"] == f"{run.run_id}/transform.html"
+        assert transform["error"]["type"] == "PermissionError"
+        assert data["tasks"]["load"]["result_state"] == "UPSTREAM_FAILED"
         with pytest.raises(LakeflowRunFailed) as excinfo:
             run.raise_for_failure()
         assert "forbidden" in str(excinfo.value)

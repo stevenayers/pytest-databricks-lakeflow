@@ -41,6 +41,7 @@ POLL_SECONDS = 2.0
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
 NOTEBOOKS = pytest.StashKey[list[str]]()
+RUNS = pytest.StashKey[list[tuple["EphemeralJob", JobRun]]]()
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.TERMINATED,
@@ -435,6 +436,9 @@ class RunHandle:
         )
         self._result = result
         job.runs.append(result)
+        # Held on the test only for --lakeflow-report-dir, because a run can carry megabytes of logs and notebooks.
+        if session.current().report_dir is not None:
+            self._item.stash.setdefault(RUNS, []).append((job, result))
         _record_outcome(self._item, result)
         log.info("Run %s finished %s in %s: %s", self.run_id, result.result_state, result.duration, result.run_url)
         _warn_on_failed_teardown(result)

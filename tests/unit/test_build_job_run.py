@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import timedelta
 from typing import Any, cast
 
@@ -11,7 +11,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run
+from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run, serialise, serialise_with_files
 
 from .fakes import DATA, HOST, FakeWorkspaceClient, make_run, recorded
 
@@ -887,3 +887,103 @@ class TestNotebookExport:
         assert f"{HOST}/jobs/runs/{run_id_of(raw, 'transform')}" in caplog.text
         unexported = build_from(FakeWorkspaceClient(), raw, notebook_export="never")
         assert (run.succeeded, repr(run)) == (unexported.succeeded, repr(unexported))
+
+
+def every_key(data: object) -> set[str]:
+    """Every key of every dict nested anywhere in `data`."""
+    keys: set[str] = set()
+    if isinstance(data, dict):
+        for key, value in data.items():
+            keys.add(key)
+            keys |= every_key(value)
+    elif isinstance(data, list):
+        for value in data:
+            keys |= every_key(value)
+    return keys
+
+
+class TestSerialise:
+    """serialise turns a JobRun into plain JSON and names its logs and exported notebooks as side files."""
+
+    def test_serialise_recorded_run(self) -> None:
+        run, _ = build("probe_failure", capture_task_values=CAPTURE)
+        data = json.loads(json.dumps(serialise(run)))
+        run_fields = {f.name for f in fields(JobRun)} - {"duration"}
+        assert set(data) == run_fields | {"duration_seconds", "succeeded"}
+        assert (data["run_id"], data["succeeded"], data["duration_seconds"]) == (run.run_id, False, 60.355)
+        assert sorted(data["tasks"]) == ["extract", "transform"]
+        assert sorted(data["injected_tasks"]) == ["__pytest_probe__transform"]
+        transform = data["tasks"]["transform"]
+        task_fields = {f.name for f in fields(TaskRun)} - {"duration", "logs", "notebook"}
+        assert set(transform) == task_fields | {
+            "duration_seconds",
+            "logs_file",
+            "notebook_file",
+            "missing_task_value_reasons",
+        }
+        error = run.task("transform").error
+        assert error is not None
+        assert transform["error"] == {
+            "type": error.type,
+            "message": "validation failed for explode",
+            "trace": error.trace,
+            "root_cause": error.root_cause,
+            "code": error.code,
+        }
+        assert transform["task_values"] == {"stage": "validation"}
+        assert transform["missing_task_values"] == ["rows_written"]
+        assert transform["missing_task_value_reasons"] == {
+            "rows_written": "Task 'transform' never set value 'rows_written'"
+        }
+        assert [attempt["attempt"] for attempt in transform["attempts"]] == [0, 1]
+        assert data["tasks"]["extract"]["error"] is None
+        assert data["tasks"]["extract"]["timing"] == {
+            "queue_seconds": 0.0,
+            "setup_seconds": run.task("extract").timing.setup.total_seconds(),
+            "execution_seconds": run.task("extract").timing.execution.total_seconds(),
+            "cleanup_seconds": run.task("extract").timing.cleanup.total_seconds(),
+        }
+        assert not {"logs", "notebook", "html"} & every_key(data)
+
+    def test_serialise_leaves_logs_out(self) -> None:
+        run, _ = build("wheel_logs")
+        data, files = serialise_with_files(run)
+        scr_a = data["tasks"]["scr_a"]
+        assert scr_a["logs_file"] == f"{run.run_id}/scr_a.log"
+        assert files[scr_a["logs_file"]] == run.task("scr_a").logs
+        assert data["tasks"]["extract"]["logs_file"] is None
+        assert "logs" not in every_key(data)
+        expected = set()
+        for task in run.tasks.values():
+            if task.logs:
+                expected.add(f"{run.run_id}/{task.task_key}.log")
+        assert set(files) == expected
+        assert serialise(run) == data
+
+    def test_serialise_names_the_exported_notebook(self) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"extract", "transform"})
+        ws.jobs.exports[run_id_of(raw, "transform")] = FAILED_EXPORT
+        data, files = serialise_with_files(build_from(ws, raw))
+        transform = data["tasks"]["transform"]
+        assert transform["notebook_file"] == "1/transform.html"
+        assert transform["attempts"][-1]["notebook_file"] == "1/transform.html"
+        assert data["tasks"]["extract"]["notebook_file"] is None
+        assert files == {"1/transform.html": FAILED_EXPORT}
+
+    def test_side_files_of_attempts_and_child_runs(self) -> None:
+        ws, _, child = parent_with_child()
+        raw = make_run(1, {"trigger_child": "SUCCESS"}, attempts={"flaky": ["FAILED", "SUCCESS"]})
+        triggers(ws, raw, "trigger_child", 777)
+        ws.jobs.outputs[run_id_of(raw, "flaky", 0)] = jobs.RunOutput(logs="first")
+        ws.jobs.outputs[run_id_of(raw, "flaky", 1)] = jobs.RunOutput(logs="second")
+        ws.jobs.outputs[run_id_of(child, "load")] = jobs.RunOutput(logs="child")
+        data, files = serialise_with_files(build_from(ws, raw, job_keys={123: "child"}))
+        flaky = data["tasks"]["flaky"]
+        assert flaky["logs_file"] == "1/flaky.log"
+        assert [attempt["logs_file"] for attempt in flaky["attempts"]] == ["1/flaky.attempt-0.log", "1/flaky.log"]
+        child_run = data["tasks"]["trigger_child"]["child_run"]
+        assert (child_run["job_key"], child_run["run_id"]) == ("child", 777)
+        assert child_run["tasks"]["load"]["logs_file"] == "777/load.log"
+        assert files == {"1/flaky.attempt-0.log": "first", "1/flaky.log": "second", "777/load.log": "child"}
+        assert json.loads(json.dumps(data)) == data

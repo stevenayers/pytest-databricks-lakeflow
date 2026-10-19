@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from datetime import timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow import ephemeral
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
+from pytest_databricks_lakeflow.report import directory_name
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
 from .fakes import (
@@ -1452,6 +1454,102 @@ class TestReportSection:
         result.stdout.fnmatch_lines(
             ["*LakeflowRunFailed: JobRun('my_job', FAILED*", "*extract: FAILED*/jobs/runs/7700*"]
         )
+
+
+REPORTED_JOB = """
+def test_job(lakeflow):
+    with lakeflow.job("my_job", params={"param1": "hi"}) as job:
+        job.run()
+
+def test_without_a_run():
+    pass
+"""
+
+
+def report_of(directory: Path, nodeid: str = "test_jobs.py::test_job") -> tuple[Path, dict[str, Any]]:
+    """The report directory of the test `nodeid` under `directory`, and its report.json."""
+    test_dir = directory / directory_name(nodeid)
+    return test_dir, json.loads((test_dir / "report.json").read_text())
+
+
+class TestReportDir:
+    """`--lakeflow-report-dir` writes a directory per test with a run: report.json, raw logs and exported notebooks."""
+
+    def test_report_dir_writes_one_json_per_test(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS", "load": "SUCCESS"}))
+        result = run_tests(pytester, REPORTED_JOB, "--lakeflow-report-dir=out")
+        result.assert_outcomes(passed=2)
+        out = pytester.path / "out"
+        test_dir, report = report_of(out)
+        assert [path.name for path in out.iterdir()] == [test_dir.name]
+        assert report["nodeid"] == "test_jobs.py::test_job"
+        assert report["outcome"] == {"setup": "passed", "call": "passed", "teardown": "passed"}
+        [entry] = report["runs"]
+        assert (entry["run_id"], entry["result_state"], entry["succeeded"]) == (77, "SUCCESS", True)
+        assert (entry["job_key"], entry["job_id"], entry["job_url"]) == ("my_job", 1001, f"{HOST}/jobs/1001")
+        assert entry["params"] == {"param1": "hi"}
+        [created] = fake_ws.jobs.created
+        assert entry["settings"]["name"] == created["name"]
+        assert [task["task_key"] for task in entry["settings"]["tasks"]] == [task.task_key for task in created["tasks"]]
+        assert sorted(entry["tasks"]) == ["extract", "load"]
+
+    def test_report_dir_writes_raw_logs(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        run = make_run(77, {"extract": "SUCCESS", "load": "SUCCESS"})
+        fake_ws.jobs.queue(run, outputs={7701: jobs.RunOutput(logs="hello")})
+        run_tests(pytester, REPORTED_JOB, "--lakeflow-report-dir=out").assert_outcomes(passed=2)
+        test_dir, report = report_of(pytester.path / "out")
+        assert (test_dir / "77" / "load.log").read_text() == "hello"
+        assert [path.name for path in (test_dir / "77").iterdir()] == ["load.log"]
+        tasks = report["runs"][0]["tasks"]
+        assert (tasks["load"]["logs_file"], tasks["extract"]["logs_file"]) == ("77/load.log", None)
+
+    def test_report_dir_writes_exported_notebooks(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        run = make_run(77, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"transform"})
+        fake_ws.jobs.queue(run, {7701: jobs.RunOutput(error="PermissionError: forbidden")})
+        html = (DATA / "notebook_export_failed.html").read_text()
+        fake_ws.jobs.exports[7701] = html
+        source = """
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.run()
+                assert False
+            """
+        run_tests(pytester, source, "--lakeflow-report-dir=out").assert_outcomes(failed=1)
+        test_dir, report = report_of(pytester.path / "out")
+        assert report["outcome"]["call"] == "failed"
+        assert (test_dir / "77" / "transform.html").read_text() == html
+        assert report["runs"][0]["tasks"]["transform"]["notebook_file"] == "77/transform.html"
+
+    def test_report_dir_is_relative_to_the_invocation_directory(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS"}))
+        pytester.makepyfile(test_jobs=REPORTED_JOB)
+        invoked_from = pytester.mkdir("sub")
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.chdir(invoked_from)
+            result = pytester.runpytest(str(pytester.path / "test_jobs.py"), "--lakeflow-report-dir=out")
+        result.assert_outcomes(passed=2)
+        report_of(invoked_from / "out")
+        assert not (pytester.path / "out").exists()
+
+    def test_no_report_dir_writes_nothing(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS", "load": "SUCCESS"}), {7701: jobs.RunOutput(logs="x")})
+        before = set(pytester.path.rglob("*"))
+        run_tests(pytester, REPORTED_JOB).assert_outcomes(passed=2)
+        written = set(pytester.path.rglob("*")) - before
+        assert not [path for path in written if path.name in ("report.json", "load.log")]
+
+    def test_report_errors_never_fail_the_test(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS"}))
+        (pytester.path / "out").write_text("a file, not a directory")
+        result = run_tests(
+            pytester, REPORTED_JOB, "--lakeflow-report-dir=out", "-o", "log_cli=true", "--log-cli-level=WARNING"
+        )
+        result.assert_outcomes(passed=2)
+        result.stdout.fnmatch_lines(["*Could not write the lakeflow report of test_jobs.py::test_job to *out*"])
 
 
 class TestProgress:
