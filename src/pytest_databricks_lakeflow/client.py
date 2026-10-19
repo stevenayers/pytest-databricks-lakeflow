@@ -16,7 +16,7 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import helpers, session
+from pytest_databricks_lakeflow import bundle, helpers, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, JobRun, NotebookExport
@@ -54,6 +54,7 @@ UNVERSIONED_ARTIFACTS = (
     "Artifacts {names} have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt wheel with "
     "the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
 )
+LOCAL_PREFIXES = ("./", "../")
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
@@ -133,8 +134,10 @@ class Lakeflow:
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
             `--no-lakeflow-keep-failed` override it.
         strict_artifacts: Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact
-            without `dynamic_version: true`, instead of the `UserWarning` emitted once per session. Serverless caches
-            wheels by file name, so a rebuilt wheel with an unchanged version may not be picked up.
+            without `dynamic_version: true`, or, with `sync="none"`, a local library built after the copy that the
+            last deploy uploaded, instead of the `UserWarning` emitted once per session for each. Serverless is
+            reported to cache wheels by file name (databricks/cli#1621 and #2958), so a rebuilt wheel with an
+            unchanged version may not be picked up.
         permissions: The `access_control_list` applied to every ephemeral job when it is created, so that people
             other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as
             `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`.
@@ -298,10 +301,13 @@ class Lakeflow:
                 on. Its outcome is `JobRun.setup`.
             teardown: Runs last, as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no
                 other task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning.
-            extra_dependencies: Test-only dependencies for the copy, as PyPI requirements or workspace or Volumes
-                paths of wheels. They are appended to every environment taken from the template and, as `pypi` or
-                `whl` libraries, to every notebook, Python script and Python wheel task on a cluster. The helper tasks
-                do not get them.
+            extra_dependencies: Test-only dependencies for the copy, as PyPI requirements, workspace or Volumes
+                paths of wheels, or local wheels as paths relative to the bundle root that start with `./` or `../`,
+                such as `./dist/*.whl[test]`. A local path is pointed at the copy of each matching file that the last
+                `bundle deploy` uploaded, its extras kept. They are appended to every environment taken from the
+                template and, as `pypi` or `whl` libraries, to every notebook, Python script and Python wheel task on
+                a cluster. A wheel with extras reaches only the environments, because `libraries[].whl` takes no
+                extras. The helper tasks do not get them.
             environments: Fields of the copy's serverless environment specs, by `environment_key`, such as
                 `{"default": {"environment_version": "5"}}`. A field replaces the template's field, after
                 `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
@@ -328,9 +334,11 @@ class Lakeflow:
             LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
                 that is not in the job, `task_overrides` sets a field it does not take, `force_conditions` names a
                 task that is not a condition task, is disabled, or has an outcome that is not a bool, a parameter
-                name is reserved, an entry of `extra_dependencies` is a local path, `children` is `"refuse"` and the
-                copy has a Run Job task that is not disabled nor inside a disabled `for_each_task`, `environments`
-                names a key starting with `__pytest_`, holds an entry that is not a mapping or a field that a
+                name is reserved, an entry of `extra_dependencies` is a local path that does not start with `./` or
+                `../`, matches no file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras
+                while the copy has a Python task on a cluster, `children` is `"refuse"` and the copy has a Run Job task
+                that is not disabled nor inside a disabled `for_each_task`, `environments` names a key starting with
+                `__pytest_`, holds an entry that is not a mapping or a field that a
                 serverless environment does not take, sets both `environment_version` and `base_environment` on one
                 environment, or brings the job past 10 environments, or `setup` or `teardown` is not a plain function
                 with its source in a file, uses variables of an enclosing function, takes a parameter other than
@@ -350,7 +358,7 @@ class Lakeflow:
         apply_task_params(key, settings, task_params or {})
         disable_tasks(settings, disable or [])
         force_condition_outcomes(settings, force_conditions or {})
-        add_dependencies(settings, extra_dependencies or [])
+        add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
@@ -419,8 +427,8 @@ class Lakeflow:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
                 task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
-                upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` is a
-                local path, `children` is `"refuse"` and the task is a Run Job task, or `task_params` or
+                upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` cannot
+                be used as for `job()`, `children` is `"refuse"` and the task is a Run Job task, or `task_params` or
                 `task_overrides` names another task. Also in the cases where `job()` raises it because `task_params`,
                 `environments` or `task_overrides` cannot be applied or `setup` or `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
@@ -440,7 +448,7 @@ class Lakeflow:
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
-        add_dependencies(settings, extra_dependencies or [])
+        add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object]] = {}
         if upstream_from is not None:
@@ -528,15 +536,42 @@ class Lakeflow:
 
     def _check_artifacts(self, current: session.SessionState, key: session.BundleKey, state: dict[str, Any]) -> None:
         names = state.get("unversioned_artifacts") or []
-        if not names:
-            return
-        message = UNVERSIONED_ARTIFACTS.format(names=names)
+        if names:
+            self._warn_or_raise(UNVERSIONED_ARTIFACTS.format(names=names), key, current.warned_artifacts)
+        stale = state.get("stale_uploads") or []
+        if stale:
+            self._warn_or_raise(_stale_message(stale, key.target), key, current.warned_uploads)
+
+    def _warn_or_raise(self, message: str, key: session.BundleKey, warned: set[session.BundleKey]) -> None:
         if self.strict_artifacts:
             raise LakeflowError(message)
-        if key in current.warned_artifacts:
+        if key in warned:
             return
-        current.warned_artifacts.add(key)
-        warnings.warn(message, stacklevel=2)
+        warned.add(key)
+        warnings.warn(message, stacklevel=3)
+
+    def _resolve_local_wheels(self, dependencies: Sequence[str]) -> list[str]:
+        """Point each `./` and `../` entry of `extra_dependencies` at the uploaded copies of the files it matches."""
+        local = [dep for dep in dependencies if dep.startswith(LOCAL_PREFIXES)]
+        if not local:
+            return list(dependencies)
+        if self.sync == "sync":
+            raise LakeflowError(
+                f"extra_dependencies holds local paths ({', '.join(local)}), which `bundle sync` does not upload. "
+                'Use Lakeflow(sync="deploy").'
+            )
+        state = self._state()
+        root = Path(state["root"])
+        resolved: list[str] = []
+        for dep in dependencies:
+            if not dep.startswith(LOCAL_PREFIXES):
+                resolved.append(dep)
+                continue
+            try:
+                resolved.extend(bundle.uploaded(dep, root, state["artifact_path"], partial(session.exists, self.ws)))
+            except LakeflowBundleError as e:
+                raise LakeflowBundleError(f"extra_dependencies: {e}") from e
+        return resolved
 
     def _job_keys(self) -> dict[int, str]:
         return {job_id: key for key, job_id in self._state().get("job_ids", {}).items()}
@@ -648,6 +683,13 @@ def _lifecycle_notebooks(setup: Callable[..., object] | None, teardown: Callable
     if teardown is not None:
         notebooks["teardown"] = helpers.lifecycle_notebook(teardown, "teardown")
     return notebooks
+
+
+def _stale_message(stale: Sequence[str], target: str) -> str:
+    deploy = f"Run `databricks bundle deploy -t {target}`."
+    if len(stale) == 1:
+        return f"{stale[0]} was built after its uploaded copy. {deploy}"
+    return f"{', '.join(stale)} were built after their uploaded copies. {deploy}"
 
 
 def _check_children(children: str) -> None:

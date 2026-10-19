@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import posixpath
 import re
 import time
@@ -25,7 +26,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed, session
 from pytest_databricks_lakeflow.results import serialise
 
-from .conftest import lakeflow_for
+from .conftest import BUNDLES, lakeflow_for
 
 if TYPE_CHECKING:
     from databricks.sdk.dbutils import RemoteDbUtils
@@ -475,6 +476,38 @@ def test_extra_dependencies_are_importable(lakeflow: Lakeflow) -> None:
         wheel_task = run.task("my_wheel_task")
         assert run.succeeded, wheel_task.error
         assert "inflection 0.5.1" in wheel_task.logs
+
+
+def test_local_wheel_extras_are_installed(lakeflow: Lakeflow) -> None:
+    # The example wheel's `test` extra pulls in inflection, which serverless environment 4 does not ship.
+    with lakeflow.task(
+        "my_example_job.my_wheel_task",
+        params={"param1": "version inflection"},
+        extra_dependencies=["./dist/*.whl[test]"],
+    ) as task:
+        specs = {env.environment_key: env.spec for env in task.settings.environments or []}
+        default = specs["default"]
+        assert default is not None and default.dependencies
+        uploaded = default.dependencies[-1]
+        assert uploaded.endswith("/.internal/lakeflow_example-0.1.0-py3-none-any.whl[test]"), uploaded
+        run = task.run()
+        wheel_task = run.task("my_wheel_task")
+        assert run.succeeded, wheel_task.error
+        assert "inflection 0.5.1" in wheel_task.logs
+
+
+def test_none_warns_about_a_wheel_built_after_its_upload(lakeflow: Lakeflow) -> None:
+    lakeflow.template("my_example_job")  # The session's deploy has built and uploaded the wheel.
+    [wheel] = (BUNDLES / "example" / "dist").glob("*.whl")
+    built = wheel.stat()
+    later = time.time() + 600
+    os.utime(wheel, (later, later))
+    try:
+        stale = r"dist/lakeflow_example-0\.1\.0-py3-none-any\.whl was built after its uploaded copy\. Run `databricks"
+        with pytest.warns(UserWarning, match=stale):
+            dataclasses.replace(lakeflow, sync="none").template("my_example_job")
+    finally:
+        os.utime(wheel, (built.st_atime, built.st_mtime))
 
 
 def test_strict_artifacts_refuses_the_unversioned_example_wheel(lakeflow: Lakeflow) -> None:

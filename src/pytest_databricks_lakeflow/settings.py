@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 
 from databricks.sdk.service import compute, jobs
 
+from pytest_databricks_lakeflow.bundle import split_extras
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.helpers import KEYS_WIDGET, PARAMS_WIDGET, TASK_KEY_WIDGET, VALUES_WIDGET
 from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX, SETUP_KEY, TEARDOWN_KEY, JobRun
@@ -310,38 +311,42 @@ def add_dependencies(settings: jobs.JobSettings, dependencies: Sequence[str]) ->
     Each environment's `spec.dependencies` gains every dependency. Each notebook, Python script and Python wheel
     task that runs on a job cluster, a new cluster or an existing cluster, tasks nested in a `for_each_task`
     included, gains a `whl` library for a wheel path ending in `.whl` and a `pypi` library for any other requirement,
-    a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Serverless tasks without an
+    a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. A wheel path with extras, such
+    as `/Workspace/.../pkg-0.1-py3-none-any.whl[test]`, reaches the environments as it is. Serverless tasks without an
     `environment_key` cannot take dependencies from the job settings, so they are left alone. Call it before the
     helper environment is added, so that helper tasks do not install them.
 
     Args:
         settings: The job's settings. They are changed in place.
-        dependencies: PyPI requirements, or workspace or Volumes paths of wheels.
+        dependencies: PyPI requirements, or workspace or Volumes paths of wheels, with or without extras.
 
     Returns:
         `settings`.
 
     Raises:
-        LakeflowError: If a dependency is a local path, such as `./dist/*.whl[test]`. Nothing is changed then.
+        LakeflowError: If a dependency is a local path, or a wheel path with extras would reach a task on a cluster,
+            whose `libraries[].whl` takes no extras. Nothing is changed then.
     """
     if not dependencies:
         return settings
-    local = [dep for dep in dependencies if _is_local_path(dep)]
+    local = [dep for dep in dependencies if _is_local_path(split_extras(dep)[0])]
     if local:
         raise LakeflowError(
-            f"Local paths are not yet supported in extra_dependencies: {', '.join(map(repr, local))}. Pass a PyPI "
-            "requirement or a /Workspace or /Volumes path, or declare the wheel in the bundle job, whose local "
-            'libraries Lakeflow(sync="deploy") maps to the uploaded files. Local wheels are tracked in '
-            "https://github.com/stevenayers/pytest-databricks-lakeflow/issues/55."
+            f"Local paths in extra_dependencies must start with ./ or ../, relative to the bundle root: "
+            f"{', '.join(map(repr, local))}. Otherwise pass a PyPI requirement or a /Workspace or /Volumes path."
         )
+    cluster_tasks = []
+    for task in _with_nested(settings.tasks):
+        runs_python = task.notebook_task or task.spark_python_task or task.python_wheel_task
+        if runs_python and _on_cluster(task):
+            cluster_tasks.append(task)
+    _check_cluster_extras(cluster_tasks, dependencies)
     for env in settings.environments or []:
         if env.spec is None:
             env.spec = compute.Environment.from_dict({})
         env.spec.dependencies = [*(env.spec.dependencies or []), *dependencies]
-    for task in _with_nested(settings.tasks):
-        runs_python = task.notebook_task or task.spark_python_task or task.python_wheel_task
-        if runs_python and _on_cluster(task):
-            task.libraries = [*(task.libraries or []), *(_library(dep) for dep in dependencies)]
+    for task in cluster_tasks:
+        task.libraries = [*(task.libraries or []), *(_library(dep) for dep in dependencies)]
     return settings
 
 
@@ -349,6 +354,18 @@ def _is_local_path(dependency: str) -> bool:
     if dependency.startswith(("./", "../")):
         return True
     return dependency.endswith(".whl") and not dependency.startswith("/") and ":" not in dependency
+
+
+def _check_cluster_extras(cluster_tasks: Sequence[jobs.Task], dependencies: Sequence[str]) -> None:
+    with_extras = [dep for dep in dependencies if split_extras(dep)[1]]
+    if not cluster_tasks or not with_extras:
+        return
+    keys = sorted(task.task_key for task in cluster_tasks)
+    raise LakeflowError(
+        f"Tasks {keys} run on a cluster, whose libraries take a wheel without extras, so "
+        f"{', '.join(map(repr, with_extras))} cannot be installed there with them. Pass the packages the extras "
+        "add as PyPI requirements instead."
+    )
 
 
 # A PEP 508 direct reference starts with a project name, optional extras and "@", with or without spaces. A wheel path
