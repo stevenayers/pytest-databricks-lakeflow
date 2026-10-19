@@ -806,6 +806,11 @@ class JobRun:
         return self.result_state == "TIMEDOUT" or any(task.timed_out for task in self.tasks.values())
 
     @property
+    def cancelled(self) -> bool:
+        """Whether the parent run ended `CANCELED`, as a run stopped by `stop_after` does. Such a run also `failed`."""
+        return self.result_state == "CANCELED"
+
+    @property
     def executed_tasks(self) -> list[str]:
         """The sorted keys of the tasks in `tasks` whose `ran` is true."""
         return sorted(key for key, task in self.tasks.items() if task.ran)
