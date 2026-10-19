@@ -40,6 +40,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).
 - `disable` lists task keys to disable in the copy, see [below](#disable-a-task).
 - `force_conditions` maps if/else condition task keys to the outcome every run of the copy takes, see [below](#force-a-branch).
+- `task_overrides` sets the timeout and retry fields of the copy's tasks, see [below](#retries-and-timeouts).
 - `extra_dependencies` adds test-only packages to the copy, see [below](#test-only-dependencies).
 - `environments` changes the copy's serverless environments, see [below](#change-the-settings-before-the-job-is-created).
 
@@ -78,6 +79,23 @@ def test_without_load(lakeflow: Lakeflow) -> None:
 ```
 
 A disabled task ends `DISABLED` and lands in `run.disabled_tasks`, and `run.task("load")` raises a `KeyError` that says `Disabled in the job: ['load']`. Tasks the bundle already disables land there too. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
+
+### Retries and timeouts
+
+To test how a task behaves when it is retried or runs out of time, set its retry and timeout fields on the copy with `task_overrides`, without changing the bundle:
+
+```python
+def test_transform_is_retried_once(lakeflow: Lakeflow) -> None:
+    overrides = {"transform": {"max_retries": 1, "min_retry_interval_millis": 0}}
+    with lakeflow.job("my_example_job", params={"param1": "forbidden"}, task_overrides=overrides) as job:
+        run = job.run()
+        assert run.failed
+        assert len(run.task("transform").attempts) == 2
+```
+
+`task_overrides` maps task keys to values for `timeout_seconds`, `max_retries`, `min_retry_interval_millis` and `retry_on_timeout`, which replace the template's. A task's `timeout_seconds` applies to each attempt, and `retry_on_timeout` decides whether an attempt it stopped is retried. Every attempt is in the task's [`attempts`](#assert-on-the-result). A key the job does not have raises `LakeflowError` listing the available tasks, and so does a stub, probe, setup or teardown task, because the overrides are applied before those are added; a field other than those four raises `LakeflowError` listing them. Either way no job is created. `lakeflow.task()` takes the same argument, naming the task under test only.
+
+`disable_auto_optimization`, on by default, stops serverless from retrying failed tasks on its own. It does not touch the `max_retries` policy, which still applies.
 
 ### Test-only dependencies
 
@@ -123,7 +141,7 @@ def lakeflow() -> Lakeflow:
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
-- `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. A `timeout` longer than that raises `LakeflowError` before the run starts; pass a longer `Lakeflow(timeout=...)` instead.
+- `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. When `timeout` plus 60 seconds is longer than the job's `timeout_seconds`, `run()` first lengthens it to that with `jobs.update` and logs the change, as a warning when the shorter value came from the template or `modify_settings`. Later runs with the same or a shorter timeout make no update.
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
 - `full_refresh`, `full_refresh_selection` and `refresh_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
@@ -150,7 +168,7 @@ When the timeout expires, the `LakeflowTimeout` message names the run and its pa
 `job.start(params=None, only=None, *, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run()` is `start()` followed by `wait()`.
 
 - `handle.run_id` is the run's id, `handle.job` the `EphemeralJob`, and `handle.url` the run's page, known as soon as `start()` returns. The page is recorded in the test's report even if the test never waits.
-- `handle.wait(timeout=None)` waits for the run to finish and returns its `JobRun`, which is also appended to `job.runs`. `timeout` counts from the call to `wait()` and follows the same rules as `run()`'s. Waiting again returns the same `JobRun`, and `run_finished` is called once. Waiting after the job was closed raises `LakeflowError`, because closing the job cancelled the run.
+- `handle.wait(timeout=None)` waits for the run to finish and returns its `JobRun`, which is also appended to `job.runs`. `timeout` counts from the call to `wait()`. The run has already started, so a `timeout` longer than the job's `timeout_seconds` raises `LakeflowError`; pass a longer timeout to `run()`, which lengthens the job's `timeout_seconds` before the run starts. Waiting again returns the same `JobRun`, and `run_finished` is called once. Waiting after the job was closed raises `LakeflowError`, because closing the job cancelled the run.
 - `handle.cancel()` cancels the run. A later `wait()` returns it as a `JobRun` that ended `CANCELED`.
 
 Each copy allows one run at a time, so start runs of different copies to run them side by side:

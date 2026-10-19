@@ -92,6 +92,18 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
         assert "forbidden" in str(excinfo.value)
 
 
+def test_task_overrides_retry_a_failing_task(lakeflow: Lakeflow) -> None:
+    overrides = {"transform": {"max_retries": 1, "min_retry_interval_millis": 0}}
+    params = {"param1": "forbidden", "param2": "world"}
+    with lakeflow.job("my_example_job", params=params, task_overrides=overrides) as job:
+        run = job.run()
+        assert run.failed
+        transform = run.task("transform")
+        assert [a.attempt for a in transform.attempts] == [0, 1]
+        assert all(a.raised(PermissionError) for a in transform.attempts)
+        assert run.task("load").result_state == "UPSTREAM_FAILED"
+
+
 def test_raise_for_failure_names_the_permission_error(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", params={"param1": "forbidden", "param2": "world"}) as job:
         run = job.run()
