@@ -379,8 +379,10 @@ class TestSideEffects:
 
     @pytest.mark.parametrize("side_effects", ["neutralise", "keep"])
     def test_sanitise_leaves_alert_and_power_bi_tasks_alone(self, side_effects: str) -> None:
-        before, after = reporting_settings(), sanitised(reporting_settings(), side_effects=side_effects)
-        alert, power_bi = task(after, "check").alert_task, task(after, "refresh_powerbi").power_bi_task
+        before = reporting_settings()
+        after = sanitised(reporting_settings(), side_effects=side_effects)
+        alert = task(after, "check").alert_task
+        power_bi = task(after, "refresh_powerbi").power_bi_task
         assert alert is not None and power_bi is not None
         assert alert == task(before, "check").alert_task
         assert alert.subscribers == [jobs.AlertTaskSubscriber(user_name="someone@example.com")]
@@ -776,6 +778,19 @@ class TestForceConditions:
             f"Forcing condition task 'check' to {expected}; it compared '{{{{tasks.check_input.values.rows}}}}' "
             "GREATER_THAN '0'"
         ) in caplog.messages
+
+    def test_force_conditions_accepts_an_op_the_sdk_does_not_know(self, caplog: pytest.LogCaptureFixture) -> None:
+        settings = branching_settings()
+        check = task(settings, "check")
+        assert check.condition_task is not None
+        # The SDK reads an operator it does not know as None.
+        check.condition_task = jobs.ConditionTask.from_dict({"op": "SOME_NEW_OP", "left": "a", "right": "b"})
+        with caplog.at_level(logging.INFO, logger="pytest_databricks_lakeflow"):
+            forced = force_conditions(settings, {"check": True})
+        assert task(forced, "check").condition_task == jobs.ConditionTask(
+            op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right="true"
+        )
+        assert "Forcing condition task 'check' to true; it compared 'a' None 'b'" in caplog.messages
 
     @pytest.mark.parametrize(
         ("disable", "outcomes", "match"),
