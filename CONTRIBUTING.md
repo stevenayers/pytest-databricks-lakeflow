@@ -33,10 +33,10 @@ The unit tests use pytest's `pytester` and an in-memory fake of the parts of `Wo
 
 ```bash
 LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-    LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 4 --lakeflow-sweep
+    LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 4 --dist loadgroup --lakeflow-sweep
 ```
 
-`LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, passed as the bundle variable `warehouse_id`; `test_sql.py` skips when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
+`--dist loadgroup` sends the tests of each `xdist_group` to one worker, so a run that a module-scoped fixture shares between them happens once rather than once per worker. `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, passed as the bundle variable `warehouse_id`; `test_sql.py` skips when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
 
 `tests/integration/test_classic.py` is skipped unless `LAKEFLOW_CLASSIC=1` is set as well. Its bundle runs on a classic job cluster (`Standard_D4s_v5`, `SINGLE_USER` access mode, no cluster policy), which takes five to ten minutes to start, and it checks `single_node=True` against the Jobs API and the cluster's reported `spark.master`. Run it on its own when you change the compute overrides:
 
@@ -100,7 +100,7 @@ tests/integration/
         return lakeflow_for("<name>")
     ```
 
-3. Write the tests as plain pytest functions in the style of `test_example.py`, run the module against a workspace and watch it fail for the right reason before writing the bundle.
+3. Write the tests as plain pytest functions in the style of `test_example.py`, run the module against a workspace and watch it fail for the right reason before writing the bundle. When several tests only read the same run, make it once in a module-scoped fixture that runs the job inside `with lakeflow.job(...)` and yields the `JobRun`, and mark each of those tests `@pytest.mark.xdist_group("<fixture name>")`. Keep one test function per behaviour. A test keeps a run of its own when it checks an error the plugin raises, a timeout, a cancellation, keep or sweep behaviour, a warning from creating the job, its own node id or its number of runs.
 
 Names that reach the workspace (bundle names, job names, task keys, notebooks, schemas, tags, parameters) must be neutral and specific to the use case.
 

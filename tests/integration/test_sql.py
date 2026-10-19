@@ -1,20 +1,24 @@
 r"""Integration tests for the ``sql`` bundle (tests/integration/bundles/sql), run in a real workspace.
 
 The bundle's ``sql_job`` runs SQL files on the warehouse named by the ``warehouse_id`` bundle variable, which
-these tests read from ``LAKEFLOW_WAREHOUSE_ID``. Run them with:
+these tests read from ``LAKEFLOW_WAREHOUSE_ID``. The tests that only read a task's result share one run of the
+tasks they read, marked with the ``xdist_group`` ``sql_run`` so that ``--dist loadgroup`` sends them to one worker.
+Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration/test_sql.py -n 4 --lakeflow-sweep
+        LAKEFLOW_WAREHOUSE_ID=<warehouse id> \
+        uv run pytest tests/integration/test_sql.py -n 4 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations
 
 import dataclasses
 import os
+from collections.abc import Iterator
 
 import pytest
 
-from pytest_databricks_lakeflow import Lakeflow
+from pytest_databricks_lakeflow import JobRun, Lakeflow
 
 from .conftest import lakeflow_for
 
@@ -31,43 +35,46 @@ def lakeflow() -> Lakeflow:
     return dataclasses.replace(lakeflow_for("sql"), variables={"warehouse_id": WAREHOUSE_ID})
 
 
-def test_sql_file_task_runs_on_the_warehouse(lakeflow: Lakeflow) -> None:
+@pytest.fixture(scope="module")
+def sql_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     with lakeflow.job("sql_job") as job:
-        run = job.run(only=["query"])
-        assert run.succeeded, run
-        task = run.task("query")
-        # The query declares no parameters, but the platform adds every job parameter to each SQL file task.
-        assert task.parameters == {"n": "3"}
-        assert task.sql_output is not None
-        result = task.sql_result
-        assert result is not None
-        assert result.warehouse_id == WAREHOUSE_ID
-        assert result.query_text is not None and result.query_text.strip() == "SELECT 1 AS n"
-        assert (result.columns, result.types) == (["n"], ["int"])
-        assert result.rows == [{"n": "1"}]
-        assert result.first_row["n"] == "1"
-        assert result.truncated is False
+        yield job.run(only=["query", "types", "wide"])
 
 
-def test_sql_result_values_are_strings_and_null_is_none(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("sql_job") as job:
-        run = job.run(only=["types"])
-        assert run.succeeded, run
-        result = run.task("types").sql_result
-        assert result is not None
-        assert result.types == ["int", "null", "decimal", "date", "boolean"]
-        assert result.first_row == {"n": "1", "m": None, "d": "1.5", "day": "2026-01-01", "b": "true"}
+@pytest.mark.xdist_group("sql_run")
+def test_sql_file_task_runs_on_the_warehouse(sql_run: JobRun) -> None:
+    assert sql_run.succeeded, sql_run
+    task = sql_run.task("query")
+    # The query declares no parameters, but the platform adds every job parameter to each SQL file task.
+    assert task.parameters == {"n": "3"}
+    assert task.sql_output is not None
+    result = task.sql_result
+    assert result is not None
+    assert result.warehouse_id == WAREHOUSE_ID
+    assert result.query_text is not None and result.query_text.strip() == "SELECT 1 AS n"
+    assert (result.columns, result.types) == (["n"], ["int"])
+    assert result.rows == [{"n": "1"}]
+    assert result.first_row["n"] == "1"
+    assert result.truncated is False
 
 
-def test_sql_result_is_cut_at_1000_rows(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("sql_job") as job:
-        run = job.run(only=["wide"])
-        assert run.succeeded, run
-        result = run.task("wide").sql_result
-        assert result is not None
-        assert result.truncated is True
-        assert len(result.rows) == 1000
-        assert (result.rows[0], result.rows[-1]) == ({"id": "0"}, {"id": "999"})
+@pytest.mark.xdist_group("sql_run")
+def test_sql_result_values_are_strings_and_null_is_none(sql_run: JobRun) -> None:
+    assert sql_run.succeeded, sql_run
+    result = sql_run.task("types").sql_result
+    assert result is not None
+    assert result.types == ["int", "null", "decimal", "date", "boolean"]
+    assert result.first_row == {"n": "1", "m": None, "d": "1.5", "day": "2026-01-01", "b": "true"}
+
+
+@pytest.mark.xdist_group("sql_run")
+def test_sql_result_is_cut_at_1000_rows(sql_run: JobRun) -> None:
+    assert sql_run.succeeded, sql_run
+    result = sql_run.task("wide").sql_result
+    assert result is not None
+    assert result.truncated is True
+    assert len(result.rows) == 1000
+    assert (result.rows[0], result.rows[-1]) == ({"id": "0"}, {"id": "999"})
 
 
 def test_sql_result_keeps_parameter_markers(lakeflow: Lakeflow) -> None:
