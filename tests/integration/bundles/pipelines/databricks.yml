@@ -1,0 +1,20 @@
+bundle:
+  name: lakeflow_pipelines
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: The catalog the numbers pipeline publishes to. Passed by the tests from LAKEFLOW_CATALOG.
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest
