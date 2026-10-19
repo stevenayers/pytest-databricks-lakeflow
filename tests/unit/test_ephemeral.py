@@ -48,6 +48,8 @@ PROGRESS_LINES = [
     "transform: RUNNING -> FAILED in 0:00:02 ValueError: no rows",
     "__pytest_probe__transform: SUCCESS in 0:00:02",
 ]
+ARTIFACT_PATH = "/Workspace/b/artifacts"
+UPLOADED_WHEEL = f"{ARTIFACT_PATH}/.internal/pkg-0.1-py3-none-any.whl"
 CHILD_WARNING = (
     "*Task 'trigger_child' of job 'parent' runs the deployed job 123, not a copy. Its run keeps that job's run_as "
     'and notifications and is not cancelled or deleted with the ephemeral job. Pass children="refuse" to '
@@ -86,6 +88,17 @@ def record_finished_runs(pytester: pytest.Pytester) -> None:
     """Configure a `run_finished` callback that appends each run id to `conftest.finished`."""
     extra = "\nfinished = []\n\n\ndef record(run, item):\n    finished.append(run.run_id)\n"
     configure_lakeflow(pytester, "run_finished=record", extra=extra)
+
+
+def serverless_template(ws: FakeWorkspaceClient, cli: FakeCli) -> None:
+    """Make `my_job` serverless only, deployed and validated, with its artifacts under `ARTIFACT_PATH`."""
+    settings = example_settings()
+    settings.tasks = [task for task in settings.tasks or [] if task.task_key != "classic"]
+    settings.job_clusters = None
+    ws.jobs.settings[cli.deployed["my_job"]] = settings
+    workspace = {"artifact_path": ARTIFACT_PATH}
+    cli.summary = {"workspace": workspace}
+    cli.validate = {"workspace": workspace, "resources": {"jobs": {"my_job": settings.as_dict()}}}
 
 
 class TestLifecycle:
@@ -648,10 +661,6 @@ class TestCreateSettings:
         result = run_tests(
             pytester,
             """
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
             def test_job(lakeflow):
                 with lakeflow.job("my_job", extra_dependencies=["pytest>=8"], capture_task_values={"load": ["k"]}):
                     pass
@@ -659,13 +668,9 @@ class TestCreateSettings:
             def test_task(lakeflow):
                 with lakeflow.task("my_job.classic", extra_dependencies=["/Volumes/c/s/v/helpers.whl"]):
                     pass
-
-            def test_local_path(lakeflow):
-                with pytest.raises(LakeflowError, match="Local paths are not yet supported"):
-                    lakeflow.job("my_job", extra_dependencies=["./dist/*.whl[test]"])
             """,
         )
-        result.assert_outcomes(passed=3)
+        result.assert_outcomes(passed=2)
         job, single = fake_ws.jobs.created
         default, helper = job["environments"]
         assert default.spec.dependencies == ["pytest>=8"]
@@ -676,6 +681,68 @@ class TestCreateSettings:
         assert not libraries["__pytest_probe__load"]
         [classic] = single["tasks"]
         assert classic.libraries == [compute.Library(whl="/Volumes/c/s/v/helpers.whl")]
+
+    @pytest.mark.parametrize("sync", ["deploy", "none"])
+    def test_local_wheel_extras_reach_the_environment(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, sync: str
+    ) -> None:
+        serverless_template(fake_ws, fake_cli)
+        (pytester.path / "dist").mkdir()
+        (pytester.path / "dist" / "pkg-0.1-py3-none-any.whl").write_text("")
+        fake_ws.workspace.objects.add(UPLOADED_WHEEL)
+        configure_lakeflow(pytester, f"sync={sync!r}")
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                dependencies = ["./dist/*.whl[test]"]
+                with lakeflow.job("my_job", extra_dependencies=dependencies, capture_task_values={"load": ["k"]}):
+                    pass
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        default, helper = created["environments"]
+        assert default.spec.dependencies[-1] == f"{UPLOADED_WHEEL}[test]"
+        assert (helper.environment_key, helper.spec.dependencies) == ("__pytest_serverless", None)
+
+    @pytest.mark.parametrize(
+        ("sync", "uploaded", "error"),
+        [
+            ("sync", True, r'which `bundle sync` does not upload. Use Lakeflow\(sync="deploy"\)'),
+            ("none", False, r"pkg-0.1-py3-none-any.whl not found. Run `databricks bundle deploy` first"),
+        ],
+        ids=["sync", "not uploaded"],
+    )
+    def test_local_wheels_need_an_uploaded_copy(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        sync: str,
+        uploaded: bool,
+        error: str,
+    ) -> None:
+        serverless_template(fake_ws, fake_cli)
+        (pytester.path / "dist").mkdir()
+        (pytester.path / "dist" / "pkg-0.1-py3-none-any.whl").write_text("")
+        if uploaded:
+            fake_ws.workspace.objects.add(UPLOADED_WHEEL)
+        configure_lakeflow(pytester, f"sync={sync!r}")
+        result = run_tests(
+            pytester,
+            f"""
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with pytest.raises(LakeflowError, match={error!r}):
+                    lakeflow.job("my_job", extra_dependencies=["./dist/*.whl[test]"])
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
 
     def test_per_job_environments_reach_jobs_create(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient

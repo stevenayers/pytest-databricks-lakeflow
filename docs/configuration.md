@@ -34,7 +34,7 @@ All arguments are keyword-only.
 | `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
 | `keep` | `False` | Keep every ephemeral job and temporary schema. |
 | `keep_failed` | `True` | Keep the ephemeral job when its test fails. |
-| `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, instead of the `UserWarning` the plugin emits once per session. Later lookups fail with the same message. See [Limitations](limitations.md). |
+| `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, or, with `sync="none"`, a local wheel built after its uploaded copy, instead of the `UserWarning` the plugin emits once per session for each. Later lookups fail with the same message. See [Limitations](limitations.md). |
 | `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. See [Permissions](#permissions). |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
 | `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes, once per run however often `RunHandle.wait()` is called. |
@@ -149,7 +149,7 @@ databricks bundle run -t test -- uv run pytest
 
 - `deploy`, the default, runs `databricks bundle deploy -t <target> --auto-approve`, followed by any `deploy_flags`, once per session and reads the templates from the deployed jobs with the Jobs API. This is the only strategy that builds and uploads wheels, and the only one in which every path is already a resolved workspace path.
 - `sync` runs `databricks bundle sync -t <target>` and reads the templates from `databricks bundle validate -o json`. Jobs that use local wheels or JARs are refused, because `sync` does not upload them.
-- `none` runs no CLI command apart from `validate`. Local wheel and JAR paths are pointed at the copies that an earlier `deploy` uploaded under the target's artifact path, after checking that they exist.
+- `none` runs no CLI command apart from `validate`. Local wheel and JAR paths are pointed at the copies that an earlier `deploy` uploaded under the target's artifact path, after checking that they exist. When a local file is newer than its uploaded copy by more than 60 seconds, so it was most likely built after the last deploy, the first template lookup emits one `UserWarning` per session naming it, such as `` dist/pkg-0.1-py3-none-any.whl was built after its uploaded copy. Run `databricks bundle deploy -t test`. ``, and `strict_artifacts=True` raises `LakeflowError` instead. See [Limitations](limitations.md) for what the comparison cannot detect.
 
 With `sync` and `none`, a job that still contains `${...}` references after `validate`, such as `${resources.jobs.other.id}`, is refused, because `validate` does not resolve them. Use these strategies when you deploy the target yourself, for example once per CI pipeline, and want test sessions to start without a deploy.
 

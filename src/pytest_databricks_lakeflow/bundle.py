@@ -4,6 +4,7 @@ import copy
 import glob
 import json
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +22,10 @@ MIN_CLI_VERSION = (1, 7, 0)
 UNRESOLVED = re.compile(r"\$\{[^}]+\}")
 VERSION = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 CLI_DOCS = "https://docs.databricks.com/dev-tools/cli/install"
+WHEEL_EXTRAS = re.compile(r"(.*\.whl)(\[[^\]]*\])")
+# The build machine's clock and the workspace's can disagree, so a wheel counts as built after its upload only when
+# its modification time is later by more than this.
+CLOCK_SKEW_MS = 60_000
 
 
 def find_root(start: Path) -> Path:
@@ -179,7 +184,7 @@ def templates_from_validate(
     Returns:
         The templates by resource key, and an error for each job that cannot be used.
     """
-    artifact_path = (config.get("workspace") or {}).get("artifact_path", "")
+    artifact_path = artifact_path_of(config)
     templates: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     for key, job in config.get("resources", {}).get("jobs", {}).items():
@@ -200,7 +205,7 @@ def templates_from_validate(
         patched = job
         if local:
             try:
-                patched = _map_libraries(job, lambda path: _uploaded(path, root, artifact_path, exists))
+                patched = _map_libraries(job, lambda path: uploaded(path, root, artifact_path, exists))
             except LakeflowBundleError as e:
                 errors[key] = f"Job {key!r}: {e}"
                 continue
@@ -208,15 +213,89 @@ def templates_from_validate(
     return templates, errors
 
 
-def _uploaded(pattern: str, root: Path, artifact_path: str, exists: Callable[[str], bool]) -> list[str]:
-    matches = sorted(glob.glob(str(root / pattern)))
+def artifact_path_of(config: Mapping[str, Any]) -> str:
+    """Read `workspace.artifact_path` from `bundle summary` or `bundle validate` output, or `""` if it is not set."""
+    return (config.get("workspace") or {}).get("artifact_path") or ""
+
+
+def split_extras(dependency: str) -> tuple[str, str]:
+    """Split the extras off a wheel path, such as `("./dist/*.whl", "[test]")` for `"./dist/*.whl[test]"`.
+
+    Args:
+        dependency: A wheel path or a requirement.
+
+    Returns:
+        The path and its extras, brackets included, or the dependency unchanged and `""` when it is not a wheel path
+            followed by extras.
+    """
+    match = WHEEL_EXTRAS.fullmatch(dependency)
+    if match is None:
+        return dependency, ""
+    return match.group(1), match.group(2)
+
+
+def stale_uploads(config: Mapping[str, Any], root: Path, modified_at: Callable[[str], int | None]) -> list[str]:
+    """Find the local libraries of the bundle's jobs that were built after the copies an earlier deploy uploaded.
+
+    Args:
+        config: The parsed output of `databricks bundle validate -o json`.
+        root: The bundle root, against which local library paths are resolved.
+        modified_at: The time a workspace or Volumes path was last modified, in epoch milliseconds, or `None` if it
+            does not exist.
+
+    Returns:
+        The sorted paths, relative to `root`, of the local files more than `CLOCK_SKEW_MS` newer than their uploaded
+            copies. A file without an uploaded copy is left out, because `templates_from_validate` reports it.
+    """
+    artifact_path = artifact_path_of(config)
+    remote_of: dict[str, str] = {}
+    for job in config.get("resources", {}).get("jobs", {}).values():
+        for pattern in _local_libraries(job):
+            for match in _matches(pattern, root):
+                remote_of[match] = _remote(artifact_path, match)
+    stale: list[str] = []
+    for match, remote in remote_of.items():
+        uploaded = modified_at(remote)
+        if uploaded is None:
+            continue
+        if Path(match).stat().st_mtime * 1000 - uploaded > CLOCK_SKEW_MS:
+            stale.append(os.path.relpath(match, root))
+    return sorted(stale)
+
+
+def uploaded(pattern: str, root: Path, artifact_path: str, exists: Callable[[str], bool]) -> list[str]:
+    """Map a local library pattern to the copy of each matching file that `bundle deploy` uploaded.
+
+    Args:
+        pattern: A path or glob relative to `root`, such as `./dist/*.whl`. A wheel's extras, as in
+            `./dist/*.whl[test]`, are split off before globbing and added back to each uploaded path.
+        root: The bundle root.
+        artifact_path: The target's `workspace.artifact_path`, under whose `.internal` folder deploys upload.
+        exists: Checks whether a workspace or Volumes path exists. It is given the paths without extras.
+
+    Returns:
+        The uploaded paths, with the extras.
+
+    Raises:
+        LakeflowBundleError: If no file matches, or a match has no uploaded copy.
+    """
+    local, extras = split_extras(pattern)
+    matches = _matches(local, root)
     if not matches:
-        raise LakeflowBundleError(f"no file under {root} matches {pattern!r}. Build and deploy the bundle first.")
-    remote = [f"{artifact_path}/.internal/{Path(match).name}" for match in matches]
+        raise LakeflowBundleError(f"no file under {root} matches {local!r}. Build and deploy the bundle first.")
+    remote = [_remote(artifact_path, match) for match in matches]
     missing = [path for path in remote if not exists(path)]
     if missing:
         raise LakeflowBundleError(f"{', '.join(missing)} not found. Run `databricks bundle deploy` first.")
-    return remote
+    return [f"{path}{extras}" for path in remote]
+
+
+def _matches(pattern: str, root: Path) -> list[str]:
+    return sorted(glob.glob(str(root / pattern)))
+
+
+def _remote(artifact_path: str, match: str) -> str:
+    return f"{artifact_path}/.internal/{Path(match).name}"
 
 
 def _local_libraries(job: Mapping[str, Any]) -> list[str]:
