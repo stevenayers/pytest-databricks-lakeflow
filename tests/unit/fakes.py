@@ -453,7 +453,7 @@ def pipeline_settings() -> jobs.JobSettings:
 
 
 def reporting_settings() -> jobs.JobSettings:
-    """Build a reporting job: a dashboard with a subscription, a SQL alert with subscriptions, and a notify task."""
+    """Build a reporting job: subscribed dashboard and SQL alert tasks, alert and Power BI tasks, and a notify task."""
     return jobs.JobSettings.from_dict(
         {
             "name": "[dev someone] reporting",
@@ -477,8 +477,37 @@ def reporting_settings() -> jobs.JobSettings:
                     },
                 },
                 {
+                    "task_key": "check",
+                    "alert_task": {
+                        "alert_id": "a2",
+                        "warehouse_id": "w1",
+                        "subscribers": [{"user_name": "someone@example.com"}],
+                    },
+                },
+                {
+                    "task_key": "refresh_powerbi",
+                    "power_bi_task": {
+                        "connection_resource_name": "pbi",
+                        "warehouse_id": "w1",
+                        "refresh_after_update": True,
+                        "power_bi_model": {
+                            "workspace_name": "Reports",
+                            "model_name": "Sales",
+                            "storage_mode": "IMPORT",
+                            "authentication_method": "OAUTH",
+                            "overwrite_existing": False,
+                        },
+                        "tables": [{"catalog": "main", "schema": "gold", "name": "sales", "storage_mode": "IMPORT"}],
+                    },
+                },
+                {
                     "task_key": "notify",
-                    "depends_on": [{"task_key": "dashboard"}, {"task_key": "alert"}],
+                    "depends_on": [
+                        {"task_key": "dashboard"},
+                        {"task_key": "alert"},
+                        {"task_key": "check"},
+                        {"task_key": "refresh_powerbi"},
+                    ],
                     "notebook_task": {"notebook_path": "/Workspace/src/notify"},
                 },
             ],
