@@ -17,6 +17,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
+    PREFIX,
     JobRun,
     build_job_run,
     describe_failing,
@@ -33,10 +34,15 @@ from pytest_databricks_lakeflow.settings import (
     TIMEOUT_GRACE_SECONDS,
     check_compute,
     check_params,
+    check_references,
     create_kwargs,
     job_timeout_seconds,
     pipeline_params,
+    require_task,
     select,
+    selected_tasks,
+    stub_upstream,
+    upstream_values_from,
 )
 
 if TYPE_CHECKING:
@@ -166,6 +172,7 @@ class EphemeralJob:
         full_refresh: bool | None = None,
         full_refresh_selection: Sequence[str] | None = None,
         refresh_selection: Sequence[str] | None = None,
+        replay: JobRun | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
 
@@ -192,15 +199,23 @@ class EphemeralJob:
                 databricks-sdk 0.110.0 or later.
             refresh_selection: Tables that the job's pipeline tasks refresh in this run. It applies to every
                 pipeline task in the run. Needs databricks-sdk 0.110.0 or later.
+            replay: A run of the same job whose captured task values stub the tasks that `only` leaves out and a
+                selected task depends on, as `upstream_task_values` on `job()` does. The platform returns no task
+                values with a run, so that run must have captured them, with
+                `capture_task_values={"<upstream key>": [...]}` on `job()`. The stubs are part of the job's settings,
+                so `replay` needs `only` and a job that has not been created yet: pass it to the first run of a new
+                `lakeflow.job(...)`.
 
         Returns:
             The run's outcome.
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a pipeline refresh option is set and the job has no pipeline task, a selection is set and
-                the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`. Each is raised
-                before the run starts.
+                task, a selected task refers to the task values of a task that `only` leaves out and no stub
+                replaces, a pipeline refresh option is set and the job has no pipeline task, a selection is set and
+                the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`. Also if
+                `replay` is passed without `only` or to a job that has been created, is a run of another job, or
+                lacks the captured values of a task it would stub. Each is raised before the run starts.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -209,6 +224,8 @@ class EphemeralJob:
             if limit is None:
                 limit = self.lakeflow.timeout
             _check_stop_after(self.job_key, stop_after, limit)
+        if replay is not None:
+            self._replay(replay, only)
         handle = self.start(
             params,
             only,
@@ -257,8 +274,9 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a pipeline refresh option is set and the job has no pipeline task, or a selection is set and
-                the installed databricks-sdk cannot send it.
+                task, a selected task refers to the task values of a task that `only` leaves out and no stub
+                replaces, a pipeline refresh option is set and the job has no pipeline task, or a selection is set
+                and the installed databricks-sdk cannot send it.
             ValueError: If `performance_target` is not a known performance target.
         """
         target = _performance_target(performance_target)
@@ -275,7 +293,10 @@ class EphemeralJob:
             refresh_selection=refresh_selection,
         )
         merged = {**self.params, **run_params}
-        selected = select(self.settings, only, self.stubs) if only else None
+        selected = None
+        if only:
+            check_references(self.settings, selected_tasks(self.settings, only, self.stubs), self.stubs)
+            selected = select(self.settings, only, self.stubs)
         if timeout is not None:
             self._raise_timeout(timeout)
         ws = self.lakeflow.ws
@@ -298,6 +319,45 @@ class EphemeralJob:
         first = ws.jobs.get_run(run_id)
         self._record_url(run_id, first, item)
         return RunHandle(self, run_id, item, first, timeout)
+
+    def _replay(self, run: JobRun, only: Sequence[str] | None) -> None:
+        """Stub the tasks that `only` leaves out and a selected task depends on, with their values in `run`."""
+        if self.job_id is not None:
+            raise LakeflowError(
+                "replay stubs tasks in the job's settings, so it must be passed before the job is created, and job "
+                f"{self.job_id} of {self.job_key!r} already exists. Pass replay to the first run of a new "
+                "lakeflow.job(...)."
+            )
+        if not only:
+            raise LakeflowError("replay stubs the tasks that only leaves out, so it needs only")
+        selected = selected_tasks(self.settings, only, self.stubs)
+        explicit = selected | self.stubs
+        for task in self.settings.tasks or []:
+            if task.task_key.startswith(PREFIX):
+                explicit.add(task.task_key)
+        upstream: dict[str, dict[str, object]] = {}
+        for task_key in sorted(selected - self.stubs):
+            # `key+` selects the teardown task, which depends on every leaf; injected tasks read no task values.
+            if task_key.startswith(PREFIX):
+                continue
+            values = upstream_values_from(self.job_key, self.settings, task_key, run, explicit, argument="replay")
+            upstream.update(values)
+        if not upstream:
+            return
+        helpers = self.lakeflow._helpers()
+        if helpers.job_cluster_key and self.lakeflow.existing_cluster_id:
+            # sanitise has already moved the job clusters to the existing cluster, so the helper cluster is gone.
+            raise LakeflowError(
+                "replay cannot add stubs when helpers_compute and existing_cluster_id are both set. Pass the "
+                "values in upstream_task_values on job() instead."
+            )
+        stub_upstream(self.settings, upstream, helpers)
+        for key in upstream:
+            stub = require_task(self.settings, key)
+            # sanitise has already run, so the stubs get what it gives serverless helper tasks.
+            if self.lakeflow.disable_auto_optimization and not stub.job_cluster_key:
+                stub.disable_auto_optimization = True
+        self.stubs = self.stubs | upstream.keys()
 
     def _raise_timeout(self, timeout: timedelta) -> None:
         """Raise the job's `timeout_seconds` to `timeout` plus the grace period when it is shorter."""
