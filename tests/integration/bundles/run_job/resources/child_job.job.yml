@@ -1,0 +1,12 @@
+resources:
+  jobs:
+    child_job:
+      name: child_job
+      description: Child job triggered by parent_job's run_job task in the pytest-databricks-lakeflow integration tests.
+      parameters:
+        - name: greeting
+          default: hi
+      tasks:
+        - task_key: work
+          notebook_task:
+            notebook_path: ../src/notebooks/work.py
