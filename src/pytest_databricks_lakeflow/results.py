@@ -251,8 +251,8 @@ class TaskRun:
         parameters: The task's parameters after job parameters and `{{...}}` references were resolved. A dict for
             notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named
             parameters; a list for Python wheel tasks with positional parameters, Python script, JAR and
-            spark-submit tasks, and dbt tasks (`commands`); `None` for other task types or when the platform
-            reported no resolved values.
+            spark-submit tasks, and dbt tasks (`commands`); `None` for other task types, for a task that did not
+            run, and when the task run could not be read.
         attempts: One `TaskRun` per attempt, in attempt order, each with empty `attempts`. The last equals this
             task apart from `attempts`.
         timing: The queue, setup, execution and cleanup durations of the task run. Zero where the platform reported
@@ -594,7 +594,7 @@ def build_job_run(
     outputs: Mapping[int, jobs.RunOutput] | None = None,
     job_keys: Mapping[int, str] | None = None,
 ) -> JobRun:
-    """Build a `JobRun` from a terminated run, reading each task's output.
+    """Build a `JobRun` from a terminated run, reading each task's output and resolved parameters.
 
     When the platform retried a task, the `TaskRun` describes its last attempt and its `attempts` hold every
     attempt. Probe outputs become the `values` of the tasks they watched.
@@ -622,12 +622,19 @@ def build_job_run(
             if has_output(task_run) and (task_run.run_id or 0) not in known_outputs:
                 unread.append(task_run)
     known_outputs.update(fetch_outputs(ws, unread))
+    ran: list[jobs.RunTask] = []
+    for task_runs in task_runs_by_key.values():
+        for task_run in task_runs:
+            if _result_state(task_run) not in NOT_RUN:
+                ran.append(task_run)
+    resolved = fetch_resolved_values(ws, ran)
 
     attempts: dict[str, list[TaskRun]] = {}
     for key, task_runs in task_runs_by_key.items():
         attempts[key] = []
         for task_run in task_runs:
-            attempt = _task_run(task_run, known_outputs.get(task_run.run_id or 0))
+            run_id = task_run.run_id or 0
+            attempt = _task_run(task_run, known_outputs.get(run_id), resolved.get(run_id))
             attempts[key].append(_with_child_run(ws, attempt, job_keys or {}))
 
     injected: dict[str, TaskRun] = {}
@@ -689,7 +696,7 @@ def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, s
     if task.child_run_id is None or not task.ran:
         return task
     try:
-        child = ws.jobs.get_run(task.child_run_id, include_resolved_values=True)
+        child = ws.jobs.get_run(task.child_run_id)
     except DatabricksError as e:
         log.warning("Could not read run %s triggered by task %s: %s", task.child_run_id, task.task_key, e)
         return task
@@ -738,6 +745,32 @@ def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[in
         return {task.run_id or 0: output for task, output in zip(tasks, pool.map(fetch, tasks), strict=True)}
 
 
+def fetch_resolved_values(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.ResolvedValues]:
+    """Read the resolved parameters of each task run in parallel, by task run id.
+
+    The Jobs API fills `resolved_values` only when a task run is fetched by its own run id with
+    `include_resolved_values`; on the job run every task's `resolved_values` is null, whatever the compute or the API
+    version. A task run that cannot be read, or that reports no resolved values, is left out.
+    """
+    if not tasks:
+        return {}
+
+    def fetch(task: jobs.RunTask) -> jobs.ResolvedValues | None:
+        try:
+            run = ws.jobs.get_run(task.run_id or 0, include_resolved_values=True)
+        except DatabricksError as e:
+            log.warning("Could not read the parameters of task %s (run %s): %s", task.task_key, task.run_id, e)
+            return None
+        return run.tasks[0].resolved_values if run.tasks else None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved: dict[int, jobs.ResolvedValues] = {}
+        for task, values in zip(tasks, pool.map(fetch, tasks), strict=True):
+            if values is not None:
+                resolved[task.run_id or 0] = values
+        return resolved
+
+
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
     if output is None or _result_state(task) in NOT_RUN:
@@ -748,7 +781,7 @@ def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     return _first_line(str(error))
 
 
-def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
+def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None, resolved: jobs.ResolvedValues | None) -> TaskRun:
     out = out or jobs.RunOutput()
     key = task.task_key or ""
     state = _result_state(task)
@@ -774,7 +807,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         logs_truncated=logs_truncated,
         error=error,
         attempt=task.attempt_number or 0,
-        parameters=_parameters(task.resolved_values),
+        parameters=_parameters(resolved),
         timing=Timing.from_run(task),
         effective_performance_target=_enum(task.effective_performance_target),
         condition_outcome=_condition_outcome(task.condition_task),

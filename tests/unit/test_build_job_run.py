@@ -24,6 +24,8 @@ NEW_ALERT_TASK = pytest.mark.skipif(
 
 
 def build_from(ws: FakeWorkspaceClient, run: jobs.Run, **kwargs: Any) -> JobRun:
+    # Register the run so that the fake serves its task runs by their own ids, as the Jobs API does.
+    ws.jobs.add_run(run)
     return build_job_run(cast(WorkspaceClient, ws), run, job_key="my_job", job_id=1, **kwargs)
 
 
@@ -351,18 +353,30 @@ class TestParameters:
         assert parameters == {"date": "2026-01-01"}
         assert not any(key.startswith("__pytest_") for key in parameters)
 
-    def test_task_parameters_from_resolved_values(self) -> None:
+    def test_task_parameters_are_read_from_each_task_run(self) -> None:
+        # The API fills resolved_values only on a task run fetched by its own id, never on the job run.
         ws = FakeWorkspaceClient()
-        run = make_run(1, {"transform": "SUCCESS", "jar": "SUCCESS", "plain": "SUCCESS"})
-        assert run.tasks is not None
+        run = make_run(1, {"transform": "SUCCESS", "jar": "SUCCESS", "plain": "SUCCESS", "load": "UPSTREAM_FAILED"})
         notebook = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
-        run.tasks[0].resolved_values = jobs.ResolvedValues(notebook_task=notebook)
+        ws.jobs.resolved[100] = jobs.ResolvedValues(notebook_task=notebook)
         jar = jobs.ResolvedStringParamsValues(parameters=["--date", "2026-10-01"])
-        run.tasks[1].resolved_values = jobs.ResolvedValues(spark_jar_task=jar)
+        ws.jobs.resolved[101] = jobs.ResolvedValues(spark_jar_task=jar)
         result = build_from(ws, run)
         assert result.task("transform").parameters == {"row_count": "7"}
         assert result.task("jar").parameters == ["--date", "2026-10-01"]
         assert result.task("plain").parameters is None
+        fetched = [call["run_id"] for call in ws.jobs.get_run_calls if call.get("include_resolved_values")]
+        assert sorted(fetched) == [100, 101, 102], "one fetch per task run that ran, none for load"
+
+    def test_task_parameters_survive_an_unreadable_task_run(self) -> None:
+        ws = FakeWorkspaceClient()
+        run = make_run(1, {"a": "SUCCESS", "b": "SUCCESS"})
+        ws.jobs.resolved[100] = NotFound("gone")
+        ws.jobs.resolved[101] = jobs.ResolvedValues(sql_task=jobs.ResolvedParamPairValues(parameters={"k": "v"}))
+        result = build_from(ws, run)
+        assert result.succeeded
+        assert result.task("a").parameters is None
+        assert result.task("b").parameters == {"k": "v"}
 
     @pytest.mark.parametrize(
         ("resolved", "expected"),
@@ -383,10 +397,8 @@ class TestParameters:
     )
     def test_task_parameters_of_each_task_type(self, resolved: jobs.ResolvedValues, expected: object) -> None:
         ws = FakeWorkspaceClient()
-        run = make_run(1, {"t": "SUCCESS"})
-        assert run.tasks is not None
-        run.tasks[0].resolved_values = resolved
-        assert build_from(ws, run).task("t").parameters == expected
+        ws.jobs.resolved[100] = resolved
+        assert build_from(ws, make_run(1, {"t": "SUCCESS"})).task("t").parameters == expected
 
 
 class TestAttempts:
@@ -621,7 +633,8 @@ class TestChildRuns:
         assert sorted(child.tasks) == ["load"]
         assert child.task("load").succeeded
         assert child.succeeded
-        assert [call["run_id"] for call in ws.jobs.get_run_calls] == [777]
+        # The child run is read once; the other calls read each task run's resolved parameters.
+        assert [call["run_id"] for call in ws.jobs.get_run_calls if not call.get("include_resolved_values")] == [777]
 
     def test_child_run_key_falls_back_to_the_job_id(self) -> None:
         ws, run, _ = parent_with_child()
@@ -659,7 +672,7 @@ class TestChildRuns:
         assert all(task.child_run_id is None for task in run.tasks.values())
         assert all(task.child_run is None for task in run.tasks.values())
         assert all(task.child_run is None for task in run.injected_tasks.values())
-        assert ws.jobs.get_run_calls == []
+        assert not [call for call in ws.jobs.get_run_calls if not call.get("include_resolved_values")]
 
     def test_child_run_of_a_child_is_nested(self) -> None:
         ws = FakeWorkspaceClient()
