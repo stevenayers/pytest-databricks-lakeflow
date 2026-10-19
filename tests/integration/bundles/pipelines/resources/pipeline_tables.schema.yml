@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    pipeline_tables:
+      catalog_name: ${var.catalog}
+      name: lakeflow_pipelines
+      comment: Tables of the numbers pipeline for the pytest-databricks-lakeflow integration tests.

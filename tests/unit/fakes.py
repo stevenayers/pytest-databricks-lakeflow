@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import re
 import time
 import urllib.parse
 from collections.abc import Collection, Iterator, Mapping, Sequence
@@ -15,13 +16,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from databricks.sdk.errors import NotFound
-from databricks.sdk.service import catalog, iam, jobs, workspace
+from databricks.sdk.errors import InvalidParameterValue, NotFound
+from databricks.sdk.service import catalog, iam, jobs, pipelines, workspace
 
 DATA = Path(__file__).parent / "data"
 HOST = "https://example.cloud.databricks.com"
 HOUR_MS = 3_600_000
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
+# The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
+# "Invalid filter expression"; the value must be in single quotes.
+LEVEL_FILTER = re.compile(r"^level='(?P<level>[A-Z]+)'$")
 
 
 class FakeJobs:
@@ -320,6 +324,49 @@ class FakeSchemas:
         return iter([info for info in self.listed if info.catalog_name == catalog_name])
 
 
+class FakePipelines:
+    """Stands in for `WorkspaceClient.pipelines`, serving updates and events by pipeline id and recording each call.
+
+    `updates` holds the updates `list_updates` returns, or an error it raises. `events` holds the events
+    `list_pipeline_events` yields, newest first as the platform returns them, applying a `level='...'` filter.
+    `read_events` lists the id of every event yielded, so a test can tell how far a caller paged.
+    """
+
+    def __init__(self) -> None:
+        self.updates: dict[str, list[pipelines.UpdateInfo] | Exception] = {}
+        self.events: dict[str, list[pipelines.PipelineEvent]] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.read_events: list[str | None] = []
+
+    def list_updates(self, pipeline_id: str, **kwargs: Any) -> pipelines.ListUpdatesResponse:
+        self.calls.append({"method": "list_updates", "pipeline_id": pipeline_id, **kwargs})
+        updates = self.updates.get(pipeline_id, [])
+        if isinstance(updates, Exception):
+            raise updates
+        return pipelines.ListUpdatesResponse(updates=list(updates))
+
+    def list_pipeline_events(
+        self, pipeline_id: str, *, filter: str | None = None, **kwargs: Any
+    ) -> Iterator[pipelines.PipelineEvent]:
+        self.calls.append({"method": "list_pipeline_events", "pipeline_id": pipeline_id, "filter": filter, **kwargs})
+        level = None
+        if filter is not None:
+            match = LEVEL_FILTER.match(filter)
+            if match is None:
+                raise InvalidParameterValue(f"Invalid filter expression: {filter}")
+            level = pipelines.EventLevel(match["level"])
+        return self._yield_events(self.events.get(pipeline_id, []), level)
+
+    def _yield_events(
+        self, events: Sequence[pipelines.PipelineEvent], level: pipelines.EventLevel | None
+    ) -> Iterator[pipelines.PipelineEvent]:
+        for event in events:
+            if level is not None and event.level != level:
+                continue
+            self.read_events.append(event.id)
+            yield event
+
+
 class FakeCurrentUser:
     def __init__(self) -> None:
         self.me_calls = 0
@@ -336,6 +383,7 @@ class FakeWorkspaceClient:
         self.workspace = FakeWorkspace()
         self.files = FakeFiles(self.workspace)
         self.schemas = FakeSchemas()
+        self.pipelines = FakePipelines()
         self.current_user = FakeCurrentUser()
         self.config = SimpleNamespace(host=HOST, profile=None)
         self.profiles: list[str | None] = []
@@ -443,6 +491,7 @@ def make_run(
     condition_outcomes: Mapping[str, str] | None = None,
     notebooks: Collection[str] = (),
     sql_files: Mapping[str, str] | None = None,
+    pipeline_tasks: Mapping[str, str] | None = None,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -458,6 +507,9 @@ def make_run(
 
     `sql_files` makes the tasks it names SQL file tasks on warehouse `w1`, running the file at the given path, which
     the run reports with their `sql_task`.
+
+    `pipeline_tasks` makes the tasks it names pipeline tasks that update the pipeline with the given id. Every task run
+    starts at 1,000 ms and ends at 3,000 ms, so an update created in between is the one the task started.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -479,6 +531,7 @@ def make_run(
                     condition_task=_condition(condition_outcomes, key),
                     notebook_task=_notebook(notebooks, key),
                     sql_task=_sql_file(sql_files, key),
+                    pipeline_task=_pipeline(pipeline_tasks, key),
                 )
             )
     return jobs.Run(
@@ -539,6 +592,12 @@ def _sql_file(sql_files: Mapping[str, str] | None, key: str) -> jobs.SqlTask | N
     if sql_files is None or key not in sql_files:
         return None
     return jobs.SqlTask(warehouse_id="w1", file=jobs.SqlTaskFile(path=sql_files[key]))
+
+
+def _pipeline(pipeline_ids: Mapping[str, str] | None, key: str) -> jobs.PipelineTask | None:
+    if pipeline_ids is None or key not in pipeline_ids:
+        return None
+    return jobs.PipelineTask(pipeline_id=pipeline_ids[key])
 
 
 def _details(state: str) -> jobs.TerminationDetails:

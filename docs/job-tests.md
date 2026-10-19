@@ -152,7 +152,7 @@ def lakeflow() -> Lakeflow:
 
 ## Run it
 
-`job.run(params=None, only=None, timeout=None, *, stop_after=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None, replay=None)` starts a run, waits for it to finish, and returns a `JobRun`.
+`job.run(params=None, only=None, timeout=None, *, stop_after=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None, refresh_flow_selection=None, reset_checkpoint_selection=None, replay=None)` starts a run, waits for it to finish, and returns a `JobRun`.
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
@@ -160,7 +160,7 @@ def lakeflow() -> Lakeflow:
 - `stop_after`, keyword only, is a `timedelta` for a job that does not end on its own, such as a streaming job. That long after the run started, the run is cancelled, polled until it has ended, and returned as a `JobRun` whose `cancelled` is true, instead of raising. `timeout` still applies: a run that has not ended by then raises `LakeflowTimeout`, and a `stop_after` longer than `timeout` raises `LakeflowError` before the run starts. See [Stop a run that does not end](#stop-a-run-that-does-not-end).
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
-- `full_refresh`, `full_refresh_selection` and `refresh_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
+- `full_refresh`, `full_refresh_selection`, `refresh_selection`, `refresh_flow_selection` and `reset_checkpoint_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
 - `replay`, keyword only, stubs the tasks that `only` leaves out with the task values a previous run captured. See [replay a run's task values](#replay-a-runs-task-values).
 
 Each call to `run()` sends a fresh idempotency token with the run request, so a request that the SDK retries cannot start a second run.
@@ -197,7 +197,7 @@ def test_streaming_job_stops_after(lakeflow: Lakeflow) -> None:
 
 ### Start a run without waiting
 
-`job.start(params=None, only=None, *, timeout=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run(params, only, timeout, stop_after=..., ...)` is `start(params, only, timeout=timeout, ...)` followed by `wait(stop_after=...)`.
+`job.start(params=None, only=None, *, timeout=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None, refresh_flow_selection=None, reset_checkpoint_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run(params, only, timeout, stop_after=..., ...)` is `start(params, only, timeout=timeout, ...)` followed by `wait(stop_after=...)`.
 
 - `timeout`, keyword only, is the default timeout of `handle.wait()`. As for `run()`, when it plus 60 seconds is longer than the job's `timeout_seconds`, `start()` first lengthens the job's `timeout_seconds` with `jobs.update`, before the run starts.
 
@@ -242,6 +242,7 @@ Each `TaskRun` has:
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
 - The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows; databricks-sdk does not model the `file_output` of a SQL file task, so its `sql_output` is empty), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
 - `sql_result`, the rows a SQL file task returned, as a `SqlResult` with `columns`, `types`, `rows`, `first_row`, `truncated`, `warehouse_id` and `query_text`, or `None` for any other task, including a saved query task. See [SQL file task rows](#sql-file-task-rows).
+- `pipeline_update`, the update a pipeline task started, as a `PipelineUpdate` with `pipeline_id`, `update_id`, `state`, `cause`, `full_refresh` and `events()`, or `None` for any other task. See [pipeline tasks](#pipeline-tasks).
 - `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs; what a notebook printed is in `notebook`, see [Read what a notebook printed](#read-what-a-notebook-printed).
@@ -461,18 +462,40 @@ The Jobs API does not return task values, so the first run must capture them wit
 
 ## Pipeline tasks
 
-A pipeline task runs the pipeline that the bundle deployed, with the refresh mode its `pipeline_task` sets. To choose the refresh for one run, pass `full_refresh`, `full_refresh_selection` or `refresh_selection`:
+A pipeline task runs the pipeline that the bundle deployed, with the refresh mode its `pipeline_task` sets. To choose the refresh for one run, pass `full_refresh`, `full_refresh_selection`, `refresh_selection`, `refresh_flow_selection` or `reset_checkpoint_selection`:
 
 ```python
 def test_full_refresh(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_pipeline_job") as job:
         assert job.run(full_refresh=True).succeeded
         assert job.run(refresh_selection=["bronze_orders"]).succeeded
+        assert job.run(reset_checkpoint_selection=["bronze_orders"]).succeeded
 ```
 
-They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, and need databricks-sdk 0.110.0 or later. A bare string in place of the list raises `LakeflowError`. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
+They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, `refresh_flow_selection` lists flows to refresh and `reset_checkpoint_selection` lists streaming flows whose checkpoints are reset, so that they read their source again from the start. The four selections need databricks-sdk 0.110.0 or later. A bare string in place of a list raises `LakeflowError`. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
 
 The pipeline is the deployed one, not a copy: every test that runs it updates the same pipeline and its tables, and the options apply to every pipeline task in the run.
+
+### The pipeline update
+
+A pipeline task's `TaskRun.pipeline_update` is the update the task started, as a `PipelineUpdate`, so a failed refresh can be read from the test rather than from the pipeline's page. In the `pipelines` integration bundle, `pipeline_job` has one pipeline task, `refresh`:
+
+```python
+def test_pipeline_full_refresh(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("pipeline_job") as job:
+        run = job.run(full_refresh=True)
+    update = run.task("refresh").pipeline_update
+    assert update is not None
+    assert update.state == "COMPLETED"
+    assert update.full_refresh
+    for event in update.events(level="ERROR"):
+        print(event.message, event.error)
+    assert update.events(level="ERROR") == []
+```
+
+`pipeline_id` and `update_id` name the update, `state` is its state as a string, such as `COMPLETED`, `FAILED` or `CANCELED`, `cause` is what started it, `JOB_TASK` for a pipeline task, and `full_refresh` says whether it refreshed every table. `events(level=None)` reads the events the update logged, newest first, as `databricks.sdk.service.pipelines.PipelineEvent`s with `level`, `event_type`, `message` and, for an error, `error`; `level` keeps one level, such as `"ERROR"`, `"WARN"` or `"INFO"`. Each call to `events()` reads them again with `pipelines.list_pipeline_events`.
+
+The Jobs API does not say which update a pipeline task started, so once the run has finished the plugin lists the pipeline's updates with `pipelines.list_updates` and takes the one created between the task's start and end, preferring one whose `cause` is `JOB_TASK`. When none was created in that time, or the updates cannot be read, `pipeline_update` is `None` and a warning naming the task and the pipeline is logged; the run is built as usual. A pipeline task that did not run has no update.
 
 ## Capture task values
 

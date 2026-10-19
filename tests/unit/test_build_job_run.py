@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound, PermissionDenied
-from databricks.sdk.service import jobs
+from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run, serialise, serialise_with_files
 
@@ -35,6 +35,7 @@ SQL_FILE_OUTPUT = {
     }
 }
 FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
+JOB_TASK = pipelines.UpdateInfoCause.JOB_TASK
 
 
 def build_from(ws: FakeWorkspaceClient, run: jobs.Run, **kwargs: Any) -> JobRun:
@@ -733,6 +734,93 @@ class TestSqlResults:
     def test_recorded_runs_never_read_raw_outputs(self, name: str) -> None:
         _, ws = build(name)
         assert ws.api_client.calls == []
+
+
+def pipeline_update(
+    update_id: str, created: int, cause: pipelines.UpdateInfoCause = JOB_TASK, *, full_refresh: bool = False
+) -> pipelines.UpdateInfo:
+    """An update of pipeline `abc` created at `created` ms, as `list_updates` reports it."""
+    return pipelines.UpdateInfo(
+        pipeline_id="abc",
+        update_id=update_id,
+        creation_time=created,
+        cause=cause,
+        state=pipelines.UpdateInfoState.COMPLETED,
+        full_refresh=full_refresh,
+    )
+
+
+class TestPipelineUpdates:
+    """A pipeline task carries the update it started, found by its creation time in the task run's window."""
+
+    def test_pipeline_task_gets_its_update(self) -> None:
+        ws = FakeWorkspaceClient()
+        # Newest first, as the platform lists them. Every task run of make_run lasts from 1,000 to 3,000 ms.
+        ws.pipelines.updates["abc"] = [
+            pipeline_update("later", 5_000),
+            pipeline_update("by_hand", 2_500, pipelines.UpdateInfoCause.API_CALL),
+            pipeline_update("mine", 1_500, full_refresh=True),
+            pipeline_update("earlier", 500),
+        ]
+        raw = make_run(1, {"refresh": "SUCCESS", "check": "SUCCESS"}, pipeline_tasks={"refresh": "abc"})
+        run = build_from(ws, raw)
+        update = run.task("refresh").pipeline_update
+        assert update is not None
+        assert (update.pipeline_id, update.update_id, update.state) == ("abc", "mine", "COMPLETED")
+        assert (update.cause, update.full_refresh) == ("JOB_TASK", True)
+        assert run.task("check").pipeline_update is None
+        assert ws.pipelines.calls == [{"method": "list_updates", "pipeline_id": "abc"}]
+        assert serialise(run)["tasks"]["refresh"]["pipeline_update"] == {
+            "pipeline_id": "abc",
+            "update_id": "mine",
+            "state": "COMPLETED",
+            "cause": "JOB_TASK",
+            "full_refresh": True,
+        }
+
+    def test_an_update_in_the_window_is_used_whatever_its_cause(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.pipelines.updates["abc"] = [pipeline_update("by_hand", 2_000, pipelines.UpdateInfoCause.API_CALL)]
+        run = build_from(ws, make_run(1, {"refresh": "SUCCESS"}, pipeline_tasks={"refresh": "abc"}))
+        update = run.task("refresh").pipeline_update
+        assert update is not None
+        assert (update.update_id, update.cause) == ("by_hand", "API_CALL")
+
+    @pytest.mark.parametrize(
+        ("updates", "message"),
+        [
+            (
+                [pipeline_update("later", 5_000), pipeline_update("earlier", 500)],
+                "Found no update of pipeline abc started in the time window of task refresh (run 100)",
+            ),
+            (
+                PermissionDenied("no access"),
+                "Could not read the updates of pipeline abc for task refresh (run 100): no access",
+            ),
+        ],
+    )
+    def test_pipeline_update_missing_logs_a_warning(
+        self, caplog: pytest.LogCaptureFixture, updates: list[pipelines.UpdateInfo] | Exception, message: str
+    ) -> None:
+        ws = FakeWorkspaceClient()
+        ws.pipelines.updates["abc"] = updates
+        run = build_from(ws, make_run(1, {"refresh": "SUCCESS"}, pipeline_tasks={"refresh": "abc"}))
+        assert run.succeeded
+        assert run.task("refresh").pipeline_update is None
+        assert message in caplog.text
+
+    def test_pipeline_task_that_did_not_run_has_no_update(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.pipelines.updates["abc"] = [pipeline_update("mine", 1_500)]
+        states = {"extract": "FAILED", "refresh": "UPSTREAM_FAILED"}
+        run = build_from(ws, make_run(1, states, "FAILED", pipeline_tasks={"refresh": "abc"}))
+        assert run.task("refresh").pipeline_update is None
+        assert ws.pipelines.calls == []
+
+    @pytest.mark.parametrize("name", RECORDED_RUNS)
+    def test_recorded_runs_never_call_the_pipelines_api(self, name: str) -> None:
+        _, ws = build(name)
+        assert ws.pipelines.calls == []
 
 
 class TestChildRuns:

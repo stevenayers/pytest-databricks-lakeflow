@@ -175,6 +175,8 @@ class EphemeralJob:
         full_refresh: bool | None = None,
         full_refresh_selection: Sequence[str] | None = None,
         refresh_selection: Sequence[str] | None = None,
+        refresh_flow_selection: Sequence[str] | None = None,
+        reset_checkpoint_selection: Sequence[str] | None = None,
         replay: JobRun | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
@@ -202,6 +204,10 @@ class EphemeralJob:
                 databricks-sdk 0.110.0 or later.
             refresh_selection: Tables that the job's pipeline tasks refresh in this run. It applies to every
                 pipeline task in the run. Needs databricks-sdk 0.110.0 or later.
+            refresh_flow_selection: Flows that the job's pipeline tasks refresh in this run, by flow name. Needs
+                databricks-sdk 0.110.0 or later.
+            reset_checkpoint_selection: Streaming flows whose checkpoints the job's pipeline tasks reset in this run,
+                so that they process their source again from the start. Needs databricks-sdk 0.110.0 or later.
             replay: A run of the same job whose captured task values stub the tasks that `only` leaves out and a
                 selected task depends on, as `upstream_task_values` on `job()` does. The platform returns no task
                 values with a run, so that run must have captured them, with
@@ -238,6 +244,8 @@ class EphemeralJob:
             full_refresh=full_refresh,
             full_refresh_selection=full_refresh_selection,
             refresh_selection=refresh_selection,
+            refresh_flow_selection=refresh_flow_selection,
+            reset_checkpoint_selection=reset_checkpoint_selection,
         )
         return handle.wait(stop_after=stop_after)
 
@@ -252,6 +260,8 @@ class EphemeralJob:
         full_refresh: bool | None = None,
         full_refresh_selection: Sequence[str] | None = None,
         refresh_selection: Sequence[str] | None = None,
+        refresh_flow_selection: Sequence[str] | None = None,
+        reset_checkpoint_selection: Sequence[str] | None = None,
     ) -> RunHandle:
         """Start a run of the job without waiting for it, creating the job first if needed.
 
@@ -271,6 +281,9 @@ class EphemeralJob:
             full_refresh: Whether the job's pipeline tasks run a full refresh in this run, as for `run()`.
             full_refresh_selection: Tables that the job's pipeline tasks fully refresh in this run, as for `run()`.
             refresh_selection: Tables that the job's pipeline tasks refresh in this run, as for `run()`.
+            refresh_flow_selection: Flows that the job's pipeline tasks refresh in this run, as for `run()`.
+            reset_checkpoint_selection: Streaming flows whose checkpoints the job's pipeline tasks reset in this run,
+                as for `run()`.
 
         Returns:
             A handle to wait for the run or cancel it.
@@ -294,6 +307,8 @@ class EphemeralJob:
             full_refresh=full_refresh,
             full_refresh_selection=full_refresh_selection,
             refresh_selection=refresh_selection,
+            refresh_flow_selection=refresh_flow_selection,
+            reset_checkpoint_selection=reset_checkpoint_selection,
         )
         merged = {**self.params, **run_params}
         selected = None
