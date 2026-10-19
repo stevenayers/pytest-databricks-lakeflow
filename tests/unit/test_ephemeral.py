@@ -30,6 +30,7 @@ from .fakes import (
     pipeline_settings,
     reporting_settings,
     running_run,
+    sp_rule_set,
 )
 from .test_build_job_run import QUERY_FILE, SQL_FILE_OUTPUT
 
@@ -53,6 +54,19 @@ PROGRESS_LINES = [
 ]
 ARTIFACT_PATH = "/Workspace/b/artifacts"
 UPLOADED_WHEEL = f"{ARTIFACT_PATH}/.internal/pkg-0.1-py3-none-any.whl"
+SP_USER = "roles/servicePrincipal.user"
+DENIED = "Cannot bind the service principal provided in 'run_as' field to the job."
+ROLE_FIX = (
+    "Ask a manager of that service principal to grant you the role, or leave run_as out to run the copy as yourself."
+)
+MAPPED_RUN_AS = (
+    f"Creating the copy of 'my_job' with run_as 0000-app-id was refused: {DENIED} To create a job that runs as a "
+    f"service principal, someone@example.com needs the Service Principal User role on it. {ROLE_FIX}"
+)
+MISSING_ROLE = (
+    "someone@example.com does not have the Service Principal User role on 0000-app-id, so the copy of 'my_job' "
+    f"cannot run as it. {ROLE_FIX}"
+)
 CHILD_WARNING = (
     "*Task 'trigger_child' of job 'parent' runs the deployed job 123, not a copy. Its run keeps that job's run_as "
     'and notifications and is not cancelled or deleted with the ephemeral job. Pass children="refuse" to '
@@ -63,6 +77,10 @@ CHILD_WARNING = (
 def run_tests(pytester: pytest.Pytester, source: str, *args: str) -> pytest.RunResult:
     pytester.makepyfile(test_jobs=source)
     return pytester.runpytest(*args)
+
+
+def deny_create(**kwargs: object) -> jobs.CreateResponse:
+    raise PermissionDenied(DENIED)
 
 
 def queue_transform_failure(ws: FakeWorkspaceClient) -> None:
@@ -229,20 +247,79 @@ class TestLifecycle:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def denied(**kwargs: object) -> jobs.CreateResponse:
-            raise PermissionDenied("User is not authorised to set run_as to 0000-app-id")
+            raise PermissionDenied("User is not authorised to create jobs")
 
         monkeypatch.setattr(fake_ws.jobs, "create", denied)
         result = run_tests(
             pytester,
             """
             def test_job(lakeflow):
-                with lakeflow.job("my_job", run_as="0000-app-id") as job:
+                with lakeflow.job("my_job") as job:
                     job.run()
             """,
         )
         result.assert_outcomes(failed=1)
-        result.stdout.fnmatch_lines(["*PermissionDenied: User is not authorised to set run_as to 0000-app-id*"])
+        result.stdout.fnmatch_lines(["*PermissionDenied: User is not authorised to create jobs*"])
         assert fake_ws.jobs.run_now_calls == []
+
+
+class TestRunAsRole:
+    """A copy that runs as a service principal needs the Service Principal User role, checked and explained."""
+
+    def test_permission_denied_with_run_as_is_explained(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
+        result = run_tests(
+            pytester,
+            f"""
+            import pytest
+            from databricks.sdk.errors import PermissionDenied
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.job("my_job", run_as="0000-app-id").create()
+                assert str(excinfo.value) == {MAPPED_RUN_AS!r}
+                assert isinstance(excinfo.value.__cause__, PermissionDenied)
+                assert str(excinfo.value.__cause__) == {DENIED!r}
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    @pytest.mark.parametrize("run_as", ["", ', run_as="someone@example.com"'], ids=["no-run-as", "user"])
+    def test_permission_denied_without_run_as_passes_through(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch, run_as: str
+    ) -> None:
+        monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
+        configure_lakeflow(pytester, 'permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}]')
+        result = run_tests(pytester, f'def test_job(lakeflow):\n    lakeflow.job("my_job"{run_as}).create()\n')
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines([f"*PermissionDenied: {DENIED}"])
+
+    def test_missing_role_is_refused_before_create(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.account_access_control_proxy.grant("0000-app-id", SP_USER, "users/other@example.com")
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.task("my_job.extract", run_as="0000-app-id").create()
+            """,
+        )
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines([f"*LakeflowError: {MISSING_ROLE}"])
+        assert fake_ws.jobs.created == []
+
+    def test_granted_role_creates_the_copy(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.account_access_control_proxy.grant("0000-app-id", SP_USER, "users/someone@example.com")
+        source = 'def test_job(lakeflow):\n    lakeflow.job("my_job", run_as="0000-app-id").create()\n'
+        result = run_tests(pytester, source)
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created[0]["run_as"] == jobs.JobRunAs(service_principal_name="0000-app-id")
+        assert fake_ws.account_access_control_proxy.names == [sp_rule_set("0000-app-id")]
 
 
 class TestRunHandle:
