@@ -391,7 +391,7 @@ def force_conditions(settings: jobs.JobSettings, outcomes: Mapping[str, bool]) -
                 f"Task {key!r} in force_conditions has no condition_task. Condition tasks: {conditions}"
             )
         if tasks[key].disabled:
-            # The platform fails a condition task whose upstream is disabled, and never evaluates a disabled one.
+            # A disabled condition task is never evaluated, so forcing its outcome would do nothing.
             raise LakeflowError(f"Task {key!r} in force_conditions is disabled, so its condition is never evaluated")
         if not isinstance(outcome, bool):
             # bool("false") is True, so a string would silently force the true branch.
@@ -405,12 +405,14 @@ def _force_condition(task: jobs.Task, outcome: bool) -> None:
     condition = task.condition_task
     assert condition is not None
     expected = str(outcome).lower()
+    # The SDK reads an operator it does not know as None, although `op` is typed as always set.
+    op = getattr(condition.op, "value", None)
     log.info(
         "Forcing condition task %r to %s; it compared %r %s %r",
         task.task_key,
         expected,
         condition.left,
-        condition.op.value,
+        op,
         condition.right,
     )
     task.condition_task = jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right=expected)
