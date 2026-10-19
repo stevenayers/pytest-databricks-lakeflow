@@ -29,14 +29,51 @@ The unit tests use pytest's `pytester` and an in-memory fake of the parts of `Wo
 
 ## Integration tests
 
-`tests/integration` holds the acceptance tests. They run against [`examples/bundle`](examples/bundle) in a real workspace, which needs serverless jobs, a catalog you can create schemas in, and credentials that both the CLI and the SDK can use:
+`tests/integration` holds the acceptance tests. They run against the bundles under [`tests/integration/bundles`](tests/integration/bundles) in a real workspace, which needs serverless jobs, a catalog you can create schemas in, and credentials that both the CLI and the SDK can use:
 
 ```bash
 LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
     uv run pytest tests/integration -n 4 --lakeflow-sweep
 ```
 
-The first test deploys the example bundle to its `test` target, which builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployment at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
+Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
+
+### Bundles
+
+Each use case gets its own bundle, so a bundle only holds the jobs and tasks its tests need:
+
+```text
+tests/integration/
+    conftest.py                  # BUNDLES, lakeflow_for(name), the session fixture, the skip hook
+    bundles/
+        example/                 # name: lakeflow_example, the bundle the docs snippets use
+            databricks.yml
+            resources/*.job.yml
+            src/notebooks/*.py
+    test_example.py              # one module per bundle, named after it
+```
+
+`conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
+
+1. Create `tests/integration/bundles/<name>/` with a `databricks.yml` (a unique `bundle.name`, a `test` target with `mode: development` and `presets: trigger_pause_status: PAUSED`, like the example), the job YAML under `resources/` and the notebooks under `src/`. Prefer notebook-only, serverless bundles so deploys stay fast, and keep the jobs and tasks to what the tests need. Check the YAML with `databricks bundle validate -t test` from the bundle directory before deploying.
+2. Create `tests/integration/test_<name>.py` and override the `lakeflow` fixture at module scope so the plugin's automatic `lakeflow` marker still applies:
+
+    ```python
+    import pytest
+
+    from pytest_databricks_lakeflow import Lakeflow
+
+    from .conftest import lakeflow_for
+
+
+    @pytest.fixture(scope="module")
+    def lakeflow() -> Lakeflow:
+        return lakeflow_for("<name>")
+    ```
+
+3. Write the tests as plain pytest functions in the style of `test_example.py`, run the module against a workspace and watch it fail for the right reason before writing the bundle.
+
+Names that reach the workspace (bundle names, job names, task keys, notebooks, schemas, tags, parameters) must be neutral and specific to the use case.
 
 In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped.
 

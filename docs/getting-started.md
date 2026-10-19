@@ -55,7 +55,7 @@ resources:
 schema = dbutils.widgets.get("schema")
 ```
 
-[`examples/bundle`](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/examples/bundle) is a complete bundle written this way. The plugin's own integration tests run against it.
+[The example bundle](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/tests/integration/bundles/example) is a complete bundle written this way. The plugin's own integration tests run against it.
 
 ## Configure the fixture
 

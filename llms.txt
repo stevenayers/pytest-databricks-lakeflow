@@ -20,7 +20,7 @@ Install with `uv add --dev pytest-databricks-lakeflow` or `pip install pytest-da
 
 - [Repository](https://github.com/stevenayers/pytest-databricks-lakeflow)
 - [PyPI](https://pypi.org/project/pytest-databricks-lakeflow/)
-- [Example bundle](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/examples/bundle): the bundle the integration tests and the docs examples run against
+- [Example bundle](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/tests/integration/bundles/example): the bundle the integration tests and the docs examples run against
 - [SKILL.md](https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/SKILL.md): instructions for coding agents writing tests with the plugin
 
 ## Optional
