@@ -98,6 +98,12 @@ def make_xdist_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
 class TestSharedSetup:
     """One setup per bundle target, shared between xdist workers through a file in the state directory."""
 
+    def test_session_state_defaults(self, tmp_path: Path) -> None:
+        state = session.SessionState(rootpath=tmp_path, run_id="r")
+        assert state.kept_jobs == []
+        assert state.kept_schemas == []
+        assert state.cancelled_runs == 0
+
     def test_bundle_keys_name_distinct_state_files(self, tmp_path: Path) -> None:
         names = {bundle_key(tmp_path).file_name(), bundle_key(tmp_path, target="ci").file_name()}
         assert len(names) == 2
@@ -513,16 +519,24 @@ class TestSetup:
 class TestHostCheck:
     """Setup refuses a bundle target that deploys to a different workspace from the client's."""
 
-    @pytest.mark.parametrize("sync", ["deploy", "none"])
+    @pytest.mark.parametrize(
+        ("sync", "bundle_host"),
+        [
+            ("deploy", OTHER_HOST),
+            ("none", OTHER_HOST),
+            ("none", OTHER_HOST.removeprefix("https://")),
+        ],
+        ids=["deploy", "none", "none-schemeless"],
+    )
     def test_setup_fails_on_host_mismatch(
-        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str, bundle_host: str
     ) -> None:
-        fake_cli.summary = {"workspace": {"host": OTHER_HOST}}
-        fake_cli.validate = {"workspace": {"host": OTHER_HOST}}
+        fake_cli.summary = {"workspace": {"host": bundle_host}}
+        fake_cli.validate = {"workspace": {"host": bundle_host}}
         with pytest.raises(LakeflowError) as excinfo:
             session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
         message = str(excinfo.value)
-        assert f"'test' deploys to {OTHER_HOST} but the workspace client is for {HOST}" in message
+        assert f"'test' deploys to {bundle_host} but the workspace client is for {HOST}" in message
         assert "Pass profile= to Lakeflow" in message
         assert fake_ws.jobs.gets == []
         assert fake_ws.workspace.uploads == {}
@@ -680,6 +694,14 @@ class TestLazySetup:
             [*DEPLOY, "--var", "catalog=a"],
             [*DEPLOY, "--var", "catalog=b"],
         ]
+
+    def test_deploy_flags_from_the_fixture(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        configure_lakeflow(pytester, 'deploy_flags=["--fail-on-active-runs"]')
+        pytester.makepyfile("def test_one(lakeflow):\n    assert lakeflow.template('my_job').tasks\n")
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert fake_cli.calls[1] == [*DEPLOY, "--fail-on-active-runs"]
 
     def test_lakeflows_with_different_deploy_flags_deploy_separately(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
