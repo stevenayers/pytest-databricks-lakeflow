@@ -2680,6 +2680,7 @@ class TestPublicApi:
             "RunHandle",
             "PipelineUpdate",
             "DebugNotebook",
+            "Stub",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__

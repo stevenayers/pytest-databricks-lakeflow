@@ -13,6 +13,7 @@ from pytest_databricks_lakeflow.results import JobRun, TaskRun, TaskValues
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
     Helpers,
+    Stub,
     add_dependencies,
     check_values,
     escape,
@@ -94,6 +95,28 @@ def queue_capturing_run(fake_ws: FakeWorkspaceClient, values: Mapping[str, objec
     fake_ws.jobs.queue(run, {504: jobs.RunOutput(notebook_output=probe_output)})
 
 
+def with_target(target: Mapping[str, object]) -> jobs.JobSettings:
+    """Build a job of `extract` and a task `target`, made of the fields in `target`, that depends on it."""
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "my_job",
+            "tasks": [
+                {"task_key": "extract", "notebook_task": {"notebook_path": "/src/extract"}},
+                {"task_key": "target", "depends_on": [{"task_key": "extract"}], **target},
+            ],
+        }
+    )
+
+
+def transform_reading(parameters: Mapping[str, str]) -> jobs.JobSettings:
+    """Build `example_settings()` with `parameters` added to the `transform` task's `base_parameters`."""
+    settings = example_settings()
+    transform = (settings.tasks or [])[1]
+    assert transform.notebook_task is not None and transform.notebook_task.base_parameters is not None
+    transform.notebook_task.base_parameters.update(parameters)
+    return settings
+
+
 def stub_values(created: Mapping[str, Any], key: str) -> str:
     tasks: list[jobs.Task] = created["tasks"]
     stub = next(t for t in tasks if t.task_key == key)
@@ -157,6 +180,143 @@ class TestWrapTask:
         transform.notebook_task.base_parameters = {"upstream": "{{tasks.extract.result_state}}"}
         with pytest.raises(LakeflowError, match=r"refers to task values of \['extract'\]"):
             wrap_task(settings, "transform", {}, [], HELPERS)
+
+
+FIRST_ROW = "{{tasks.extract.output.first_row.n}}"
+
+
+class TestStubOutputs:
+    """A `Stub` answers the target's `{{tasks.<key>.output.<path>}}` references with literals."""
+
+    def test_rewrites_output_references(self) -> None:
+        settings = transform_reading(
+            {
+                "n": FIRST_ROW,
+                "msg": 'got {{ tasks.extract.output.alert_state }} "ok"',
+                "rows": "{{tasks.extract.output.rows}}",
+            }
+        )
+        outputs = {"first_row.n": 3, "alert_state": "OK", "rows": [{"n": 3, "s": "a\\b"}]}
+        wrap_task(settings, "transform", {"extract": Stub(outputs=outputs)}, [], HELPERS)
+        assert keys(settings) == ["extract", "transform"]
+        stub, target = settings.tasks or []
+        assert target.notebook_task is not None
+        assert target.notebook_task.base_parameters == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "n": "3",
+            "msg": 'got OK "ok"',
+            "rows": '[{"n":3,"s":"a\\\\b"}]',
+        }
+        assert target.depends_on == [jobs.TaskDependency(task_key="extract")]
+        assert stub.notebook_task is not None and stub.notebook_task.base_parameters is not None
+        assert stub.notebook_task.base_parameters["__pytest_values"] == json.dumps({})
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            pytest.param({"condition_task": {"op": "EQUAL_TO", "left": FIRST_ROW, "right": "3"}}, id="condition"),
+            pytest.param(
+                {"sql_task": {"warehouse_id": "w1", "file": {"path": "/q.sql"}, "parameters": {"n": FIRST_ROW}}},
+                id="sql",
+            ),
+            pytest.param({"run_job_task": {"job_id": 1, "job_parameters": {"n": FIRST_ROW}}}, id="run_job"),
+            pytest.param(
+                {"python_wheel_task": {"package_name": "pkg", "entry_point": "main", "parameters": ["--n", FIRST_ROW]}},
+                id="wheel_list",
+            ),
+            pytest.param(
+                {
+                    "for_each_task": {
+                        "inputs": f"[{FIRST_ROW}]",
+                        "task": {"task_key": "inner", "notebook_task": {"notebook_path": "/src/inner"}},
+                    }
+                },
+                id="for_each",
+            ),
+        ],
+    )
+    def test_rewrites_every_field(self, target: dict[str, object]) -> None:
+        settings = wrap_task(
+            with_target(target), "target", {"extract": Stub(outputs={"first_row.n": "3"})}, [], HELPERS
+        )
+        literal = json.loads(json.dumps(target).replace(FIRST_ROW, "3"))
+        expected = wrap_task(with_target(literal), "target", {"extract": {}}, [], HELPERS)
+        assert settings.tasks == expected.tasks
+        assert FIRST_ROW not in json.dumps(settings.as_dict())
+
+    @pytest.mark.parametrize(
+        "stub",
+        [pytest.param({}, id="plain_mapping"), pytest.param(Stub(outputs={"alert_state": "OK"}), id="other_path")],
+    )
+    def test_rejects_unstubbed_output_paths(self, stub: Mapping[str, object] | Stub) -> None:
+        settings = transform_reading({"n": FIRST_ROW})
+        message = (
+            r"Task 'transform' refers to \{\{tasks.extract.output.first_row.n\}\}, but the stub for 'extract' has "
+            r"no output 'first_row.n'. Pass Stub\(outputs=\{'first_row.n': ...\}\) for 'extract' in "
+            r"upstream_task_values."
+        )
+        with pytest.raises(LakeflowError, match=message):
+            wrap_task(settings, "transform", {"extract": stub}, [], HELPERS)
+        assert settings == transform_reading({"n": FIRST_ROW}), "nothing is changed when a reference is rejected"
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            pytest.param(
+                "{{job.id}}",
+                r"Output 'first_row.n' of stub 'extract' contains '\{\{', which the platform would resolve as a "
+                r"reference: '\{\{job.id\}\}'. Stubbed outputs are literals.",
+                id="string",
+            ),
+            pytest.param(["{{x}}"], r"contains '\{\{'.*'\[\"\{\{x\}\}\"\]'", id="json"),
+            pytest.param(object(), r"Output 'first_row.n' of stub 'extract' is not JSON-serialisable", id="not_json"),
+        ],
+    )
+    def test_rejects_references_in_outputs(self, value: object, message: str) -> None:
+        settings = transform_reading({"n": FIRST_ROW})
+        with pytest.raises(LakeflowError, match=message):
+            wrap_task(settings, "transform", {"extract": Stub(outputs={"first_row.n": value})}, [], HELPERS)
+        with pytest.raises(LakeflowError, match=message):
+            stub_upstream(example_settings(), {"extract": Stub(outputs={"first_row.n": value})}, HELPERS)
+
+    def test_values_and_outputs_together(self) -> None:
+        stub = Stub(values={"row_count": 42}, outputs={"first_row.n": "3"})
+        settings = wrap_task(transform_reading({"n": FIRST_ROW}), "transform", {"extract": stub}, [], HELPERS)
+        plain = wrap_task(example_settings(), "transform", {"extract": {"row_count": 42}}, [], HELPERS)
+        stub_task, target = settings.tasks or []
+        assert stub_task == (plain.tasks or [])[0], "a Stub sets its values exactly as a plain mapping does"
+        assert stub_task.notebook_task is not None and stub_task.notebook_task.base_parameters is not None
+        assert stub_task.notebook_task.base_parameters["__pytest_values"] == json.dumps({"row_count": 42})
+        assert target.notebook_task is not None and target.notebook_task.base_parameters is not None
+        assert target.notebook_task.base_parameters["n"] == "3"
+
+    def test_leaves_a_target_without_output_references_alone(self) -> None:
+        settings = example_settings()
+        target = (settings.tasks or [])[1]
+        wrap_task(
+            settings, "transform", {"extract": Stub(values={"row_count": 1}, outputs={"rows": "[]"})}, [], HELPERS
+        )
+        assert (settings.tasks or [])[1] is target
+
+    def test_stub_upstream_rewrites_the_tasks_downstream(self) -> None:
+        settings = transform_reading({"n": FIRST_ROW, "state": "{{tasks.load.output.alert_state}}"})
+        stub_upstream(settings, {"extract": Stub(values={"row_count": 1}, outputs={"first_row.n": "3"})}, HELPERS)
+        stub, transform = (settings.tasks or [])[:2]
+        assert stub.notebook_task is not None and stub.notebook_task.base_parameters is not None
+        assert stub.notebook_task.base_parameters["__pytest_values"] == escape({"row_count": 1})
+        assert transform.notebook_task is not None
+        assert transform.notebook_task.base_parameters == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "n": "3",
+            "state": "{{tasks.load.output.alert_state}}",
+        }, "a reference to a task that is not stubbed is left alone"
+        assert transform.depends_on == [jobs.TaskDependency(task_key="extract")]
+
+    def test_stub_upstream_rejects_unstubbed_output_paths(self) -> None:
+        settings = transform_reading({"n": FIRST_ROW})
+        with pytest.raises(LakeflowError, match=r"Task 'transform' refers to .*has no output 'first_row.n'"):
+            stub_upstream(settings, {"extract": {"row_count": 1}}, HELPERS)
+        assert settings == transform_reading({"n": FIRST_ROW}), "nothing is changed when a reference is rejected"
 
 
 class TestStubUpstream:
@@ -362,6 +522,32 @@ class TestEndToEnd:
         assert [t.task_key for t in created["tasks"]] == ["extract", "transform", "__pytest_probe__transform"]
         assert all(t.disable_auto_optimization for t in created["tasks"])
         assert created["environments"][-1].environment_key == ENV_KEY
+
+    def test_stubbed_outputs_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(79, {"extract": "SUCCESS", "transform": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            from pytest_databricks_lakeflow import Stub
+
+            def test_task(lakeflow):
+                with lakeflow.task(
+                    "my_job.transform",
+                    task_params={"transform": {"n": "{{tasks.extract.output.first_row.n}}"}},
+                    upstream_task_values={"extract": Stub(values={"row_count": 42}, outputs={"first_row.n": "7"})},
+                ) as task:
+                    run = task.run()
+                assert run.succeeded
+                assert sorted(run.injected_tasks) == ["extract"]
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        assert [t.task_key for t in created["tasks"]] == ["extract", "transform"]
+        assert created["tasks"][1].notebook_task.base_parameters == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "n": "7",
+        }
+        assert stub_values(created, "extract") == escape({"row_count": 42})
 
     def test_job_capture_task_values_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(*recorded("probe_failure"))
