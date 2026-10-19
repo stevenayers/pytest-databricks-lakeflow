@@ -30,7 +30,7 @@ SQL_FILE_OUTPUT = {
             },
             "query_text": "SELECT 1 AS n\n",
             "sql_statements": [{"lookup_key": "CiQwMWYx"}],
-            "warehouse_id": "a499e0fb0a3d1730",
+            "warehouse_id": "0123456789abcdef",
         }
     }
 }
@@ -674,7 +674,7 @@ class TestSqlResults:
         assert result.rows == [{"n": "1"}]
         assert result.first_row == {"n": "1"}
         assert result.truncated is False
-        assert result.warehouse_id == "a499e0fb0a3d1730"
+        assert result.warehouse_id == "0123456789abcdef"
         assert result.query_text == "SELECT 1 AS n\n"
         assert ws.api_client.calls == [
             {"method": "GET", "path": "/api/2.2/jobs/runs/get-output", "query": {"run_id": 100}}
