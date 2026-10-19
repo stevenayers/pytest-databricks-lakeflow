@@ -701,10 +701,16 @@ def drop_environment(settings, item):
 class TestRunOptions:
     """What `run()` sends to `run_now`."""
 
-    def test_run_requests_resolved_values(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    def test_run_reads_resolved_values_from_each_task_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        run = make_run(77, {"extract": "SUCCESS", "transform": "SUCCESS"})
+        fake_ws.jobs.queue(run)
         run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n').assert_outcomes(passed=1)
-        assert fake_ws.jobs.get_run_calls
-        assert all(call.get("include_resolved_values") is True for call in fake_ws.jobs.get_run_calls)
+        with_flag = [call["run_id"] for call in fake_ws.jobs.get_run_calls if call.get("include_resolved_values")]
+        assert sorted(with_flag) == [7700, 7701], "each task run is fetched once by its own id"
+        polls = [call for call in fake_ws.jobs.get_run_calls if call["run_id"] == 77]
+        assert polls and not any(call.get("include_resolved_values") for call in polls)
 
     def test_only_adds_probes(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(
@@ -995,8 +1001,7 @@ class TestReportSection:
     def test_failed_run_reports_parameters(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         run = make_run(77, {"extract": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR")
         run.job_parameters = [jobs.JobParameter(name="param1", default="hello", value="hi")]
-        assert run.tasks
-        run.tasks[0].resolved_values = jobs.ResolvedValues(
+        fake_ws.jobs.resolved[7700] = jobs.ResolvedValues(
             notebook_task=jobs.ResolvedNotebookTaskValues(
                 base_parameters={"param1": "hi", "limit": "10", "__pytest_task_key": "extract"}
             )

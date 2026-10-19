@@ -27,7 +27,7 @@ The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. 
 
 Both `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")` in the task's code and `{{tasks.extract.values.row_count}}` in its settings resolve by the producer's task key. A stub with the key `extract` satisfies both.
 
-`run.task(key).parameters` shows the value a `{{tasks.x.values.y}}` reference in the task's parameters resolved to, for example `run.task("transform").parameters["row_count"] == "7"`. Job parameters are pushed to notebook tasks too, so the dict may hold more keys than the task declares. The platform does not always return resolved values, and then `parameters` is `None`; see [Limitations](limitations.md).
+`run.task(key).parameters` shows the value a `{{tasks.x.values.y}}` reference in the task's parameters resolved to, for example `run.task("transform").parameters["row_count"] == "7"`. Job parameters are pushed to notebook tasks too, so the dict may hold more keys than the task declares, and a job parameter with the same name as a task parameter replaces it.
 
 If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is not in `upstream_task_values`, the plugin raises `LakeflowError` before anything is created, because the reference would otherwise fail at run time.
 

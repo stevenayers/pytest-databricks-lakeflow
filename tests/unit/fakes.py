@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,7 @@ class FakeJobs:
         self.polls: dict[int, list[jobs.Run]] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
         self.output_calls: list[int] = []
+        self.resolved: dict[int, jobs.ResolvedValues | Exception] = {}
         self.get_run_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.list_calls = 0
@@ -114,10 +116,25 @@ class FakeJobs:
 
     def get_run(self, run_id: int, **kwargs: Any) -> jobs.Run:
         self.get_run_calls.append({"run_id": run_id, **kwargs})
-        if run_id not in self.polls:
+        if run_id in self.polls:
+            polls = self.polls[run_id]
+            return polls.pop(0) if len(polls) > 1 else polls[0]
+        task = self._task_run(run_id)
+        if task is None:
             raise NotFound(f"Run {run_id} does not exist.")
-        polls = self.polls[run_id]
-        return polls.pop(0) if len(polls) > 1 else polls[0]
+        # Like the Jobs API, a task run fetched by its own id is a run with that one task, and `resolved_values`
+        # is filled only then and only with `include_resolved_values`. On a job run it is always null.
+        resolved = self.resolved.get(run_id) if kwargs.get("include_resolved_values") else None
+        if isinstance(resolved, Exception):
+            raise resolved
+        return jobs.Run(run_id=run_id, tasks=[replace(task, resolved_values=resolved)])
+
+    def _task_run(self, run_id: int) -> jobs.RunTask | None:
+        for polls in self.polls.values():
+            for task in polls[-1].tasks or []:
+                if task.run_id == run_id:
+                    return task
+        return None
 
     def get_run_output(self, run_id: int) -> jobs.RunOutput:
         self.output_calls.append(run_id)

@@ -34,13 +34,10 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         assert run.task("transform").output == "hello world"
         assert "Success! hello" in run.task("my_wheel_task").logs
         assert run.parameters["param1"] == "hello"
-        # Some workspaces return no resolved values even with include_resolved_values.
         transform = run.task("transform").parameters
-        if transform is not None:
-            assert isinstance(transform, dict)
-            assert transform["row_count"] == "7"
-        else:
-            warnings.warn("The workspace returned no resolved values for transform", stacklevel=1)
+        assert isinstance(transform, dict)
+        assert transform["row_count"] == "7"
+        assert transform["param1"] == "hello", "job parameters reach notebook tasks too"
         # A run with several tasks reports its durations on the tasks and usually zero on the run itself.
         assert run.timing.execution >= timedelta(0)
         assert run.task("transform").timing.execution > timedelta(0)

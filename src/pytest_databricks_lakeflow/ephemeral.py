@@ -244,7 +244,7 @@ class EphemeralJob:
         outputs: dict[int, jobs.RunOutput] = {}
         progress = item.stash.setdefault(PROGRESS, [])
         while True:
-            run = ws.jobs.get_run(run_id, include_resolved_values=True)
+            run = ws.jobs.get_run(run_id)
             if run_id not in self._run_urls and run.run_page_url:
                 self._run_urls[run_id] = run.run_page_url
                 item.user_properties.append(("lakeflow_run_url", run.run_page_url))
