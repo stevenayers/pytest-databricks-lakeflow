@@ -158,16 +158,7 @@ class Lakeflow:
             raise ValueError(f"sync must be one of {', '.join(SYNC_STRATEGIES)}, got {self.sync!r}")
         if self.side_effects not in SIDE_EFFECTS:
             raise ValueError(f"side_effects must be one of {', '.join(SIDE_EFFECTS)}, got {self.side_effects!r}")
-        if isinstance(self.deploy_flags, str):
-            raise ValueError(f"deploy_flags must be a list of flags, not a string: [{self.deploy_flags!r}]")
-        for flag in self.deploy_flags:
-            if not isinstance(flag, str):
-                raise ValueError(f"deploy_flags must contain only strings, got {flag!r}")
-            name = flag.split("=", 1)[0]
-            if not name.startswith("--") and len(name) > 2:
-                name = name[:2]
-            if name in PLUGIN_DEPLOY_FLAGS:
-                raise ValueError(f"deploy_flags cannot contain {name}. {PLUGIN_DEPLOY_FLAGS[name]}.")
+        _check_deploy_flags(self.deploy_flags)
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -182,12 +173,13 @@ class Lakeflow:
         """Get `permissions` as the `access_control_list` that `jobs.create` takes, or `None` if there are none."""
         if self.permissions is None:
             return None
-        return [
-            entry
-            if isinstance(entry, jobs.JobAccessControlRequest)
-            else jobs.JobAccessControlRequest.from_dict(dict(entry))
-            for entry in self.permissions
-        ]
+        requests = []
+        for entry in self.permissions:
+            if isinstance(entry, jobs.JobAccessControlRequest):
+                requests.append(entry)
+            else:
+                requests.append(jobs.JobAccessControlRequest.from_dict(dict(entry)))
+        return requests
 
     @property
     def run_id(self) -> str:
@@ -262,7 +254,18 @@ class Lakeflow:
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        return self._ephemeral(item, key, settings, params, capture_task_values, (), name, run_as, children, "job")
+        return self._ephemeral(
+            item,
+            key,
+            settings,
+            params=params,
+            capture_task_values=capture_task_values,
+            stubs=(),
+            name=name,
+            run_as=run_as,
+            children=children,
+            method="job",
+        )
 
     def task(
         self,
@@ -306,8 +309,21 @@ class Lakeflow:
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
-        capture = {task_key: list(capture_task_values)} if capture_task_values else {}
-        return self._ephemeral(item, job_key, settings, params, capture, upstream, None, run_as, children, "task")
+        capture = {}
+        if capture_task_values:
+            capture = {task_key: list(capture_task_values)}
+        return self._ephemeral(
+            item,
+            job_key,
+            settings,
+            params=params,
+            capture_task_values=capture,
+            stubs=upstream,
+            name=None,
+            run_as=run_as,
+            children=children,
+            method="task",
+        )
 
     @contextmanager
     def schema(self, catalog: str | None = None) -> Generator[str, None, None]:
@@ -348,14 +364,20 @@ class Lakeflow:
         current = session.current()
         if self._state_cache is not None and self._state_cache[0] is current:
             return self._state_cache[1]
+        profile = self.profile or None
+        if profile is None and self.workspace_client is not None:
+            profile = self.workspace_client.config.profile
+        deploy_flags: tuple[str, ...] = ()
+        if self.sync == "deploy":
+            deploy_flags = tuple(self.deploy_flags)
         key = session.BundleKey(
             root=session.resolve_root(self.bundle_root, current.rootpath),
             target=self.target,
-            profile=self.profile or (self.workspace_client.config.profile if self.workspace_client else None),
+            profile=profile,
             sync=self.sync,
             helpers_path=self.helpers_path,
             variables=tuple(sorted((self.variables or {}).items())),
-            deploy_flags=tuple(self.deploy_flags) if self.sync == "deploy" else (),
+            deploy_flags=deploy_flags,
         )
         state = current.bundle_state(key, self.ws, self.sweep_hours)
         current.lakeflows.append(self)
@@ -379,6 +401,7 @@ class Lakeflow:
         item: pytest.Item,
         key: str,
         settings: jobs.JobSettings,
+        *,
         params: Mapping[str, str] | None,
         capture_task_values: Mapping[str, Sequence[str]] | None,
         stubs: Collection[str],
@@ -399,8 +422,10 @@ class Lakeflow:
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
         attribution = dict(session.current().attribution)
-        if "pytest_user" not in attribution and (user := self._state().get("user")):
-            attribution["pytest_user"] = user
+        if "pytest_user" not in attribution:
+            user = self._state().get("user")
+            if user:
+                attribution["pytest_user"] = user
         sanitise(
             settings,
             name=name or item.nodeid,
@@ -421,6 +446,25 @@ class Lakeflow:
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
         item.addfinalizer(partial(job._teardown, item))
         return job
+
+
+def _check_deploy_flags(deploy_flags: Sequence[str]) -> None:
+    if isinstance(deploy_flags, str):
+        raise ValueError(f"deploy_flags must be a list of flags, not a string: [{deploy_flags!r}]")
+    for flag in deploy_flags:
+        if not isinstance(flag, str):
+            raise ValueError(f"deploy_flags must contain only strings, got {flag!r}")
+        name = _flag_name(flag)
+        if name in PLUGIN_DEPLOY_FLAGS:
+            raise ValueError(f"deploy_flags cannot contain {name}. {PLUGIN_DEPLOY_FLAGS[name]}.")
+
+
+def _flag_name(flag: str) -> str:
+    """Get the option a CLI flag sets: `--target` for `--target=x`, `-t` for `-t` and for the joined form `-tx`."""
+    name = flag.split("=", 1)[0]
+    if name.startswith("--"):
+        return name
+    return name[:2]
 
 
 def _check_children(children: str) -> None:
