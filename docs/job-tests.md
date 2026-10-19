@@ -377,6 +377,8 @@ def test_missing_task_values_explain_themselves(lakeflow: Lakeflow) -> None:
         run.task("load").task_values["anything"]
 ```
 
+A run that captured a task's upstream values can stub them for a task test of it, see [Replay a task from a previous run](task-tests.md#replay-a-task-from-a-previous-run).
+
 Each probe is a serverless notebook task and costs 7 to 30 seconds, even when its task did not run. [Writing task tests](task-tests.md) explains the probe and stub mechanics.
 
 ## Temporary schemas
