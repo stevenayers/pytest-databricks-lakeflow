@@ -57,6 +57,8 @@ AssertionError: JobRun('my_example_job', FAILED, https://<workspace>/#job/123/ru
 
 `run.raise_for_failure()` does the same in one call. It returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with that repr followed by one line per failing task: its full error, its root cause (the last `Caused by:` line, or the first exception of a Python chain) when the trace has one, and the task's run URL. The run's job parameters and each failing task's resolved parameters follow on `params:` lines.
 
+`pytest --lakeflow-report-dir=build/lakeflow` also writes each test's runs to a `report.json`, with every task's state, output, error and task values, next to the raw logs and exported notebooks, so a CI build can keep them as an artefact after the jobs are deleted.
+
 To change the target, set a catalog for temporary schemas or lengthen the timeout, override the `lakeflow` fixture in `conftest.py`:
 
 ```python
