@@ -17,7 +17,7 @@ from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.plugin import parse_duration
 
 from .conftest import FakeCli, configure_lakeflow
-from .fakes import HOST, HOUR_MS, FakeWorkspaceClient, listed_job, make_run, sweep_candidates
+from .fakes import HOST, HOUR_MS, FakeWorkspaceClient, listed_job, make_run, queue_failed_run, sweep_candidates
 from .test_session import STAGING_FIXTURE, SWEEP_LOGGING, make_xdist_conftest
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -77,12 +77,6 @@ def uses_lakeflow(*names: str) -> str:
 
 def leaves_runs_active(runs: str) -> str:
     return USES_LAKEFLOW.format("leak") + f"    lakeflow.active_runs.update({runs})\n"
-
-
-def queue_failed_transform(ws: FakeWorkspaceClient) -> None:
-    parameters = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
-    ws.jobs.resolved[7700] = jobs.ResolvedValues(notebook_task=parameters)
-    ws.jobs.queue(make_run(77, {"transform": "FAILED"}, "FAILED"))
 
 
 def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
@@ -231,7 +225,8 @@ class TestSweep:
 
     def test_xdist_sweep_error_names_the_sweep(self, tmp_path: Path) -> None:
         state = session.SessionState(rootpath=tmp_path, run_id="this-run", state_dir=tmp_path, sweep=True)
-        # What the worker that swept first writes when its sweep raises.
+        # A hand-written state file: the sweep never shares an error, because produce catches every exception, so
+        # this checks only that shared_state relays an error with the sweep's name.
         (tmp_path / session.SWEEP_STATE_FILE).write_text(json.dumps({"error": "PermissionDenied: not yours"}))
         message = r"^Lakeflow sweep failed in another xdist worker: PermissionDenied: not yours$"
         with pytest.raises(LakeflowError, match=message):
@@ -656,7 +651,7 @@ class TestTerminalSummary:
         assert len(set(urls)) == 2
 
     def test_lists_debug_notebooks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        queue_failed_transform(fake_ws)
+        queue_failed_run(fake_ws)
         pytester.makepyfile(FAILED_RUN.format("failed"))
         result = pytester.runpytest("--lakeflow-debug-notebook")
         result.assert_outcomes(failed=1)

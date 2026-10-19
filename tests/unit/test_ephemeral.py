@@ -28,6 +28,7 @@ from .fakes import (
     make_run,
     parent_settings,
     pipeline_settings,
+    queue_failed_run,
     reporting_settings,
     running_run,
     skipped_run,
@@ -314,12 +315,24 @@ class TestRunAsRole:
         result.stdout.fnmatch_lines([f"*LakeflowError: {MISSING_ROLE}"])
         assert fake_ws.jobs.created == []
 
-    def test_granted_role_creates_the_copy(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    def test_granted_role_creates_the_copies_reading_it_once(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
         fake_ws.account_access_control_proxy.grant("0000-app-id", SP_USER, "users/someone@example.com")
-        source = 'def test_job(lakeflow):\n    lakeflow.job("my_job", run_as="0000-app-id").create()\n'
-        result = run_tests(pytester, source)
-        result.assert_outcomes(passed=1)
-        assert fake_ws.jobs.created[0]["run_as"] == jobs.JobRunAs(service_principal_name="0000-app-id")
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("my_job", run_as="0000-app-id").create()
+
+            def test_task(lakeflow):
+                lakeflow.task("my_job.extract", run_as="0000-app-id").create()
+            """,
+        )
+        result.assert_outcomes(passed=2)
+        for created in fake_ws.jobs.created:
+            assert created["run_as"] == jobs.JobRunAs(service_principal_name="0000-app-id")
+        assert len(fake_ws.jobs.created) == 2
         assert fake_ws.account_access_control_proxy.names == [sp_rule_set("0000-app-id")]
 
 
@@ -1049,6 +1062,12 @@ class TestUnreachedDependencies:
         [
             pytest.param(None, 'lakeflow.job("my_job", {})', ["extract", "transform"], id="job"),
             pytest.param(None, 'lakeflow.task("my_job.extract", {})', ["extract"], id="task"),
+            pytest.param(
+                None,
+                'lakeflow.job("my_job", setup=["SELECT 1"], teardown=["SELECT 2"], {})',
+                ["extract", "transform"],
+                id="setup-and-teardown",
+            ),
             pytest.param(
                 None,
                 'lakeflow.task("my_job.transform", upstream_task_values={{"extract": {{"row_count": 3}}}}, {})',
@@ -2723,14 +2742,6 @@ def test_job(lakeflow):
 """
 
 
-def queue_failed_transform(ws: FakeWorkspaceClient, state: str = "FAILED") -> None:
-    """Queue run 77, whose transform task (task run 7700) ends `state` with resolved parameters."""
-    ws.jobs.resolved[7700] = jobs.ResolvedValues(
-        notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7", "param1": "hello"})
-    )
-    ws.jobs.queue(make_run(77, {"transform": state}, "FAILED", "RUN_EXECUTION_ERROR"))
-
-
 def debug_uploads(ws: FakeWorkspaceClient) -> dict[str, dict[str, Any]]:
     return {path: upload for path, upload in ws.workspace.uploads.items() if path.startswith(f"{DEBUG_FOLDER}/")}
 
@@ -2741,7 +2752,7 @@ class TestDebugNotebook:
     def test_debug_notebook_uploads_under_helpers_path(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
-        queue_failed_transform(fake_ws)
+        queue_failed_run(fake_ws)
         result = run_tests(
             pytester,
             """
@@ -2816,7 +2827,7 @@ class TestDebugNotebook:
     def test_debug_notebook_needs_resolved_parameters(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
-        queue_failed_transform(fake_ws, "UPSTREAM_FAILED")
+        queue_failed_run(fake_ws, {"transform": "UPSTREAM_FAILED"})
         result = run_tests(
             pytester,
             """
@@ -2861,7 +2872,7 @@ class TestDebugNotebook:
     def test_debug_notebook_flag_writes_for_failed_tests(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
-        queue_failed_transform(fake_ws)
+        queue_failed_run(fake_ws)
         result = run_tests(pytester, FAILS_IN_WITH, "--lakeflow-debug-notebook", "--junitxml=report.xml")
         result.assert_outcomes(failed=1)
         path = f"{DEBUG_FOLDER}/my_job__transform__77"
@@ -2892,25 +2903,27 @@ class TestDebugNotebook:
         states: dict[str, str],
         flags: list[str],
     ) -> None:
-        fake_ws.jobs.resolved[7700] = jobs.ResolvedValues(
-            notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
-        )
-        fake_ws.jobs.queue(make_run(77, states, "FAILED", "RUN_EXECUTION_ERROR"))
+        queue_failed_run(fake_ws, states)
         result = run_tests(pytester, source, *flags)
         result.stdout.no_fnmatch_line("*lakeflow_debug_notebook*")
         result.stdout.no_fnmatch_line("*debug notebook*")
         assert fake_ws.workspace.upload_calls == HELPER_UPLOADS
 
+    @pytest.mark.parametrize(
+        ("key", "message"),
+        [
+            pytest.param("transform", "no write access", id="upload_fails"),
+            pytest.param("ghost", "No task 'ghost' in the job. Available: *", id="task_not_in_the_settings"),
+        ],
+    )
     def test_debug_notebook_flag_does_not_fail_teardown(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, key: str, message: str
     ) -> None:
-        queue_failed_transform(fake_ws)
+        queue_failed_run(fake_ws, {key: "FAILED"})
         fake_ws.workspace.upload_errors[f"{DEBUG_FOLDER}/my_job__transform__77"] = PermissionDenied("no write access")
         result = run_tests(pytester, FAILS_IN_WITH, "--lakeflow-debug-notebook")
         result.assert_outcomes(failed=1)
-        result.stdout.fnmatch_lines(
-            ["*Could not write a debug notebook for task 'transform' of run 77: no write access"]
-        )
+        result.stdout.fnmatch_lines([f"*Could not write a debug notebook for task {key!r} of run 77: {message}"])
         result.stdout.fnmatch_lines(["*Keeping job 1001 from my_job*"])
         assert "AssertionError: boom" in result.stdout.str()
 

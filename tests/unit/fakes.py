@@ -348,23 +348,37 @@ class FakeSchemas:
 class FakePipelines:
     """Stands in for `WorkspaceClient.pipelines`, serving updates and events by pipeline id and recording each call.
 
-    `updates` holds the updates `list_updates` returns, or an error it raises. `events` holds the events
-    `list_pipeline_events` yields, newest first as the platform returns them, applying a `level='...'` filter.
-    `read_events` lists the id of every event yielded, so a test can tell how far a caller paged.
+    `updates` holds the updates `list_updates` returns, or an error it raises, in pages of `page_size` when it is
+    set; a `page_token` is the position of the page's first update. `events` holds the events `list_pipeline_events`
+    yields, newest first as the platform returns them, applying a `level='...'` filter. `read_events` lists the id of
+    every event yielded, so a test can tell how far a caller paged.
     """
 
     def __init__(self) -> None:
         self.updates: dict[str, list[pipelines.UpdateInfo] | Exception] = {}
+        self.page_size: int | None = None
         self.events: dict[str, list[pipelines.PipelineEvent]] = {}
         self.calls: list[dict[str, Any]] = []
         self.read_events: list[str | None] = []
 
-    def list_updates(self, pipeline_id: str, **kwargs: Any) -> pipelines.ListUpdatesResponse:
-        self.calls.append({"method": "list_updates", "pipeline_id": pipeline_id, **kwargs})
+    def list_updates(
+        self, pipeline_id: str, *, page_token: str | None = None, **kwargs: Any
+    ) -> pipelines.ListUpdatesResponse:
+        call = {"method": "list_updates", "pipeline_id": pipeline_id, **kwargs}
+        if page_token is not None:
+            call["page_token"] = page_token
+        self.calls.append(call)
         updates = self.updates.get(pipeline_id, [])
         if isinstance(updates, Exception):
             raise updates
-        return pipelines.ListUpdatesResponse(updates=list(updates))
+        if self.page_size is None:
+            return pipelines.ListUpdatesResponse(updates=list(updates))
+        first = int(page_token or 0)
+        last = first + self.page_size
+        next_page_token = None
+        if last < len(updates):
+            next_page_token = str(last)
+        return pipelines.ListUpdatesResponse(updates=updates[first:last], next_page_token=next_page_token)
 
     def list_pipeline_events(
         self, pipeline_id: str, *, filter: str | None = None, **kwargs: Any
@@ -646,6 +660,19 @@ def skipped_run(run_id: int, keys: Sequence[str], notebooks: Collection[str] = (
     state = jobs.RunState(life_cycle_state=SKIPPED, state_message=ALL_DISABLED)
     tasks = [replace(task, state=state, status=status) for task in run.tasks or []]
     return replace(run, state=state, status=status, tasks=tasks, end_time=run.start_time)
+
+
+def queue_failed_run(ws: FakeWorkspaceClient, states: Mapping[str, str | None] | None = None) -> None:
+    """Queue failed run 77, whose tasks end in `states`, by default transform `FAILED`.
+
+    Its first task run, 7700, reports resolved notebook parameters, so a debug notebook can replay them.
+    """
+    ws.jobs.resolved[7700] = jobs.ResolvedValues(
+        notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7", "param1": "hello"})
+    )
+    if states is None:
+        states = {"transform": "FAILED"}
+    ws.jobs.queue(make_run(77, states, "FAILED", "RUN_EXECUTION_ERROR"))
 
 
 def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:

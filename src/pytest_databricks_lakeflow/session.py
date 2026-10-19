@@ -55,6 +55,7 @@ EXPIRES_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 LIFECYCLE_NOTEBOOK = re.compile(rf"(setup|teardown)_[0-9a-f]{{{helpers.NOTEBOOK_DIGEST_CHARS}}}")
 SCHEMA_SUFFIX = "[0-9a-f]{8}"
 SP_USER_ROLE = "roles/servicePrincipal.user"
+GRANT_ROLE = "Ask a manager of that service principal to grant you the role"
 RUN_AS_FIX = (
     "Deploy as that principal, set run_as to ${workspace.current_user.userName}, or deploy the bundle yourself and "
     'use Lakeflow(sync="none").'
@@ -179,6 +180,8 @@ class SessionState:
             directory, or `None` when the flag is not set.
         debug_notebook: Whether `--lakeflow-debug-notebook` is set.
         debug_notebooks: The URL of each debug notebook written, for the terminal summary.
+        sp_user_roles: Whether an identity has the Service Principal User role on a service principal, as
+            `check_sp_user_role` found it, by workspace host, identity and application id.
     """
 
     rootpath: Path
@@ -207,6 +210,7 @@ class SessionState:
     report_dir: Path | None = None
     debug_notebook: bool = False
     debug_notebooks: list[str] = field(default_factory=list)
+    sp_user_roles: dict[tuple[str, str, str], bool | None] = field(default_factory=dict)
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.
@@ -279,7 +283,7 @@ class SessionState:
             # The sweep only tidies up, so its failure fails no test. It is not shared as an error, so the other
             # xdist workers carry on without it.
             except Exception as e:
-                warnings.warn(f"Lakeflow sweep failed: {type(e).__name__}: {e}", stacklevel=2)
+                warnings.warn(f"Lakeflow sweep failed: {type(e).__name__}: {e}", stacklevel=1)
                 return {"failed": True}
             return report.as_dict()
 
@@ -564,8 +568,7 @@ def check_run_as(ws: WorkspaceClient, config: Mapping[str, Any], target: str) ->
         if application_id and check_sp_user_role(ws, application_id) is False:
             raise LakeflowBundleError(
                 f"{source} sets run_as {application_id}, but this session deploys as {identity}, which does not have "
-                f"the Service Principal User role on it. Ask a manager of that service principal to grant you the "
-                f"role. {RUN_AS_FIX}"
+                f"the Service Principal User role on it. {GRANT_ROLE}. {RUN_AS_FIX}"
             )
 
 
@@ -613,8 +616,11 @@ def check_sp_user_role(ws: WorkspaceClient, application_id: str) -> bool | None:
         return None
     principals = _principals_of(me)
     for rule in rule_set.grant_rules or []:
-        if rule.role == SP_USER_ROLE and principals & set(rule.principals or []):
-            return True
+        if rule.role != SP_USER_ROLE:
+            continue
+        for principal in rule.principals or []:
+            if _principal_key(principal) in principals:
+                return True
     return False
 
 
@@ -623,7 +629,7 @@ def _principals_of(me: iam.User) -> set[str]:
     user_name = me.user_name or ""
     principals: set[str] = set()
     if "@" in user_name:
-        principals.add(f"users/{user_name}")
+        principals.add(_principal_key(f"users/{user_name}"))
     else:
         # A service principal's user name is its application id.
         principals.add(f"servicePrincipals/{user_name}")
@@ -631,6 +637,13 @@ def _principals_of(me: iam.User) -> set[str]:
         if group.display:
             principals.add(f"groups/{group.display}")
     return principals
+
+
+def _principal_key(principal: str) -> str:
+    """The principal as `_principals_of` compares it: a user's name without case, as `check_run_as` compares it."""
+    if principal.startswith("users/"):
+        return principal.casefold()
+    return principal
 
 
 def _workspace_host(config: Mapping[str, Any]) -> str | None:

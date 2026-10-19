@@ -60,9 +60,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 
 POLL_SECONDS = 2.0
-ROLE_FIX = (
-    "Ask a manager of that service principal to grant you the role, or leave run_as out to run the copy as yourself."
-)
+ROLE_FIX = f"{session.GRANT_ROLE}, or leave run_as out to run the copy as yourself."
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
 NOTEBOOKS = pytest.StashKey[list[str]]()
@@ -201,7 +199,7 @@ class EphemeralJob:
         application_id = None
         if self.settings.run_as is not None:
             application_id = self.settings.run_as.service_principal_name
-        if application_id and session.check_sp_user_role(ws, application_id) is False:
+        if application_id and self._has_sp_user_role(application_id) is False:
             raise LakeflowError(
                 f"{self._creator()} does not have the Service Principal User role on {application_id}, so the copy "
                 f"of {self.job_key!r} cannot run as it. {ROLE_FIX}"
@@ -216,6 +214,15 @@ class EphemeralJob:
                 f"job that runs as a service principal, {self._creator()} needs the Service Principal User role on "
                 f"it. {ROLE_FIX}"
             ) from e
+
+    def _has_sp_user_role(self, application_id: str) -> bool | None:
+        """`session.check_sp_user_role` for the creator, read once per session for each service principal."""
+        ws = self.lakeflow.ws
+        roles = session.current().sp_user_roles
+        key = (str(ws.config.host), self._creator(), application_id)
+        if key not in roles:
+            roles[key] = session.check_sp_user_role(ws, application_id)
+        return roles[key]
 
     def _creator(self) -> str:
         return self.lakeflow._state()["user"]
@@ -554,7 +561,7 @@ class EphemeralJob:
         return POLL_SECONDS
 
     def _report_cancelled(self, polling: _Polling) -> None:
-        """List a run the plugin cancelled in the report.json of the test that started it, with `--lakeflow-report-dir`.
+        """List a run the plugin cancelled in the report.json of the running test, with `--lakeflow-report-dir`.
 
         The run is neither appended to `runs` nor passed to `run_finished`.
         """
@@ -750,10 +757,10 @@ class EphemeralJob:
         for key, task in run.tasks.items():
             if task.succeeded or not task.ran:
                 continue
-            if require_task(self.settings, key).notebook_task is None:
-                continue
             # Teardown never fails because of a debugging aid.
             try:
+                if require_task(self.settings, key).notebook_task is None:
+                    continue
                 self.debug_notebook(key, run)
             except (LakeflowError, DatabricksError) as e:
                 log.warning("Could not write a debug notebook for task %r of run %s: %s", key, run.run_id, e)

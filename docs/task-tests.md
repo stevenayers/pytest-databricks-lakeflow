@@ -47,11 +47,11 @@ Both `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")` in the 
 
 `run.task(key).parameters` shows the value a `{{tasks.x.values.y}}` reference in the task's parameters resolved to, for example `run.task("transform").parameters["row_count"] == "7"`. Job parameters are pushed to notebook tasks too, so the dict may hold more keys than the task declares, and a job parameter with the same name as a task parameter replaces it.
 
-If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is not in `upstream_task_values`, the plugin raises `LakeflowError` before anything is created, because the reference would otherwise fail at run time. The same goes for any other `{{tasks.<key>.` reference, such as `result_state`, which the Jobs API refuses when the job has no task `<key>`.
+If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is not in `upstream_task_values`, the plugin raises `LakeflowError` (`refers to task values of [...]`) before anything is created, because the reference would otherwise fail at run time. Any other `{{tasks.<key>.` reference to such a task, such as `result_state`, raises `LakeflowError` too, with a message saying that `task()` leaves the task out of the job. Unlike `run(only=...)`, which keeps a left-out task in the job so that these references resolve against its `DISABLED` run, `task()` drops the task, and the Jobs API refuses a reference to a task the job does not have.
 
 Stub values arrive as JSON through a widget. `{{` inside a value is escaped so that the platform does not treat it as a reference, and the value reaches the task verbatim.
 
-Other references to a stubbed task resolve against the stub's own run: `{{tasks.<key>.run_id}}` to its run id, `result_state` to `success`, `error_code` to an empty string. `{{tasks.<key>.notebook_path}}` resolves to the helper notebook's path, not the real task's.
+Other references to a stubbed task resolve against the stub's own run: `{{tasks.<key>.run_id}}` to its run id, and `result_state` and `error_code` to the stub's, which are expected to be `success` and an empty string. `{{tasks.<key>.notebook_path}}` resolves to the helper notebook's path, not the real task's.
 
 ### Output references
 

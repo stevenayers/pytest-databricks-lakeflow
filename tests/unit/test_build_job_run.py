@@ -157,8 +157,7 @@ class TestRecordedRuns:
         assert run.task("extract").logs == ""
 
     def test_alert_task_states(self) -> None:
-        # Recorded from the alerts bundle: the platform reports an alert task's state in runs/get-output
-        # `alert_output.alert_state`, which databricks-sdk models, and marks the task SUCCESS whether or not it fired.
+        # Recorded from the alerts bundle.
         run, _ = build("alert_states")
         assert run.succeeded
         fires, quiet = run.task("fires"), run.task("quiet")
@@ -806,6 +805,40 @@ class TestPipelineUpdates:
             "cause": "JOB_TASK",
             "full_refresh": True,
         }
+
+    def test_pages_until_an_update_older_than_the_task(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.pipelines.page_size = 1
+        ws.pipelines.updates["abc"] = [
+            pipeline_update("later", 5_000),
+            pipeline_update("mine", 1_500),
+            pipeline_update("earlier", 500),
+            pipeline_update("oldest", 100),
+        ]
+        run = build_from(ws, make_run(1, {"refresh": "SUCCESS"}, pipeline_tasks={"refresh": "abc"}))
+        update = run.task("refresh").pipeline_update
+        assert update is not None
+        assert update.update_id == "mine"
+        assert ws.pipelines.calls == [
+            {"method": "list_updates", "pipeline_id": "abc"},
+            {"method": "list_updates", "pipeline_id": "abc", "page_token": "1"},
+            {"method": "list_updates", "pipeline_id": "abc", "page_token": "2"},
+        ]
+
+    def test_a_retried_pipeline_task_gets_one_update_per_attempt(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.pipelines.updates["abc"] = [pipeline_update("second", 4_500), pipeline_update("first", 1_500)]
+        raw = make_run(1, {}, "SUCCESS", attempts={"refresh": ["FAILED", "SUCCESS"]}, pipeline_tasks={"refresh": "abc"})
+        # make_run starts every attempt at 1,000 ms; the retry runs later.
+        retry = (raw.tasks or [])[1]
+        retry.start_time, retry.end_time = 4_000, 6_000
+        refresh = build_from(ws, raw).task("refresh")
+        updates = []
+        for attempt in refresh.attempts:
+            assert attempt.pipeline_update is not None
+            updates.append(attempt.pipeline_update.update_id)
+        assert updates == ["first", "second"]
+        assert refresh.pipeline_update == refresh.attempts[-1].pipeline_update
 
     def test_an_update_in_the_window_is_used_whatever_its_cause(self) -> None:
         ws = FakeWorkspaceClient()

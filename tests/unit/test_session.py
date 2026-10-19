@@ -730,7 +730,9 @@ class TestRunAsCheck:
         assert DEPLOY not in fake_cli.calls
 
     @pytest.mark.parametrize(
-        "principal", ["users/someone@example.com", "groups/data-eng"], ids=["user", "group-of-the-user"]
+        "principal",
+        ["users/someone@example.com", "users/Someone@Example.com", "groups/data-eng"],
+        ids=["user", "user-other-case", "group-of-the-user"],
     )
     def test_setup_accepts_run_as_with_the_user_role(
         self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, principal: str

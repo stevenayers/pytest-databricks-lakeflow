@@ -1537,22 +1537,32 @@ def fetch_pipeline_updates(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -
     The Jobs API does not report it: a task run's `pipeline_task` is the task's settings, and `runs/get-output` of a
     pipeline task holds only metadata and the error "Please refer to the logs for this pipeline in the pipelines
     page.", even when the task succeeded. So the pipeline's updates are listed, and the one created between the task
-    run's start and end is taken, one whose `cause` is `JOB_TASK` first. A task run whose update is not found is left
-    out, with a warning.
+    run's start and end is taken, one whose `cause` is `JOB_TASK` first. The task runs are read in parallel. A task
+    run whose update is not found is left out, with a warning.
     """
-    updates: dict[int, PipelineUpdate] = {}
+    pipeline_tasks: list[tuple[jobs.RunTask, str]] = []
     for task in tasks:
-        if task.pipeline_task is None or not task.pipeline_task.pipeline_id:
-            continue
-        update = _pipeline_update(ws, task, task.pipeline_task.pipeline_id)
-        if update is not None:
-            updates[task.run_id or 0] = update
-    return updates
+        if task.pipeline_task is not None and task.pipeline_task.pipeline_id:
+            pipeline_tasks.append((task, task.pipeline_task.pipeline_id))
+    if not pipeline_tasks:
+        return {}
+
+    def fetch(pair: tuple[jobs.RunTask, str]) -> PipelineUpdate | None:
+        return _pipeline_update(ws, *pair)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        updates: dict[int, PipelineUpdate] = {}
+        for (task, _), update in zip(pipeline_tasks, pool.map(fetch, pipeline_tasks), strict=True):
+            if update is not None:
+                updates[task.run_id or 0] = update
+        return updates
 
 
 def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) -> PipelineUpdate | None:
+    start = task.start_time or 0
+    end = task.end_time or 0
     try:
-        listed = ws.pipelines.list_updates(pipeline_id)
+        listed = _updates_since(ws, pipeline_id, start)
     except DatabricksError as e:
         log.warning(
             "Could not read the updates of pipeline %s for task %s (run %s): %s",
@@ -1562,10 +1572,8 @@ def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) 
             e,
         )
         return None
-    start = task.start_time or 0
-    end = task.end_time or 0
     in_window: list[pipelines.UpdateInfo] = []
-    for info in listed.updates or []:
+    for info in listed:
         if info.creation_time is not None and start <= info.creation_time <= end:
             in_window.append(info)
     if not in_window:
@@ -1590,6 +1598,22 @@ def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) 
         _ws=ws,
         _since=start,
     )
+
+
+def _updates_since(ws: WorkspaceClient, pipeline_id: str, start: int) -> list[pipelines.UpdateInfo]:
+    """List the pipeline's updates, newest first as the platform pages them, up to the first created before `start`."""
+    updates: list[pipelines.UpdateInfo] = []
+    page_token = None
+    while True:
+        response = ws.pipelines.list_updates(pipeline_id, page_token=page_token)
+        page = response.updates or []
+        updates.extend(page)
+        page_token = response.next_page_token
+        if not page_token:
+            return updates
+        for info in page:
+            if info.creation_time is not None and info.creation_time < start:
+                return updates
 
 
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:

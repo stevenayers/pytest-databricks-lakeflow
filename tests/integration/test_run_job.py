@@ -4,7 +4,7 @@ The bundle has a ``parent_job`` whose ``trigger_child`` task runs the deployed `
 warning and refusal for Run Job tasks and the ``child_run`` built from the triggered run. Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_run_job.py -n 4 --dist loadgroup --lakeflow-sweep
+        uv run pytest tests/integration/test_run_job.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations

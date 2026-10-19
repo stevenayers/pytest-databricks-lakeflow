@@ -33,7 +33,7 @@ The unit tests use pytest's `pytester` and an in-memory fake of the parts of `Wo
 
 ```bash
 LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-    LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 4 --dist loadgroup --lakeflow-sweep
+    LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 8 --dist loadgroup --lakeflow-sweep
 ```
 
 `--dist loadgroup` sends the tests of each `xdist_group` to one worker, so a run that a module-scoped fixture shares between them happens once rather than once per worker. `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on and the `alerts` bundle evaluates its alerts on, passed as the bundle variable `warehouse_id`; `test_sql.py` and `test_alerts.py` skip when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.

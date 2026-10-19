@@ -4,7 +4,7 @@ Tests that only read the same run share it through a module-scoped fixture, and 
 named after that fixture, so that ``--dist loadgroup`` sends them to one worker and the run happens once. Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_example.py -n 4 --dist loadgroup --lakeflow-sweep
+        uv run pytest tests/integration/test_example.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations
