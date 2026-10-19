@@ -91,6 +91,8 @@ class SessionState:
         warned_artifacts: The bundle targets whose wheel artifacts without `dynamic_version` have been warned about.
         worker_dir: On the xdist controller, the directory that it shares with the workers.
         uploaded_notebooks: The workspace paths of the setup and teardown notebooks this process uploaded.
+        report_dir: Where `--lakeflow-report-dir` writes each test's runs, resolved against the invocation
+            directory, or `None` when the flag is not set.
     """
 
     rootpath: Path
@@ -112,6 +114,7 @@ class SessionState:
     warned_artifacts: set[BundleKey] = field(default_factory=set)
     worker_dir: Path | None = None
     uploaded_notebooks: set[str] = field(default_factory=set)
+    report_dir: Path | None = None
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.
