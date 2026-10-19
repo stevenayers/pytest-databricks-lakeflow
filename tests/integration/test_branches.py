@@ -71,3 +71,27 @@ def test_condition_task_on_its_own(lakeflow: Lakeflow, rows: int, expected: bool
     assert run.injected_tasks["check_input"].ran
     with pytest.raises(KeyError, match="No task 'on_true' in run"):
         run.task("on_true")
+
+
+def keep_one_task_enabled():
+    return None
+
+
+def test_disabling_the_upstream_of_a_forced_condition_disables_its_branches(lakeflow: Lakeflow) -> None:
+    # The platform disables every task downstream of a disabled one ("This task was disabled because it is downstream
+    # of a disabled task"), the forced condition task and both branches included. The setup task keeps one task
+    # enabled: without it the platform skips the whole run with "Skipped because every task is disabled".
+    job = lakeflow.job(
+        "branching_job", disable=["check_input"], force_conditions={"check": True}, setup=keep_one_task_enabled
+    )
+    with job:
+        run = job.run()
+        assert run.result_state == "SUCCESS"
+        assert run.setup is not None
+        assert run.setup.succeeded
+        assert sorted(run.disabled_tasks) == ["check_input"]
+        downstream = {**run.tasks, **run.skipped_tasks}
+        assert sorted(downstream) == ["check", "on_false", "on_true"]
+        assert all(task.disabled for task in downstream.values()), downstream
+        assert downstream["check"].condition_outcome is None
+        assert run.executed_tasks == []
