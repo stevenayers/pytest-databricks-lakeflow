@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.4.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.3.0...v0.4.0) (2026-10-19)
+
+
+### Features
+
+* add extra_dependencies and a warning for unversioned wheel artifacts ([#120](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/120)) ([70b3084](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/70b30846a9b0c8384a092dc2d1cc47e7c3df14bb))
+* add setup and teardown functions that run on the job's compute ([#122](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/122)) ([f3cca22](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/f3cca22b84237d1a0175d04275432a291a007ddd))
+* expose notebook cell outputs and printed text through runs/export ([#121](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/121)) ([522c6d5](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/522c6d5854d6a6f325253d2af2905c6c35d514d5))
+* force an if/else branch in a job copy with force_conditions= ([#119](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/119)) ([328476d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/328476d7665f3178eee165e555d6b78b49dc625f))
+
+
+### Bug Fixes
+
+* keep only the stdout stream in notebook stdout and tidy wave 1 review notes ([#123](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/123)) ([af2aa78](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/af2aa780da15000fb6b36d20a00b944497353d20))
+* raise the databricks-sdk floor to 0.100 so alert tasks survive the copy ([#118](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/118)) ([7f78c5c](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/7f78c5cf60fcee3866befb233aca3314b5d4186e))
+
 ## [0.3.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.2.1...v0.3.0) (2026-10-19)
 
 
