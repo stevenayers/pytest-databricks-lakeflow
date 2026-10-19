@@ -174,16 +174,16 @@ def test_failure_detail(lakeflow: Lakeflow) -> None:
 
 ### Branches
 
-An if/else condition task records its outcome, and the tasks on the branch that was not taken end `EXCLUDED`. `run.branch_taken(key)` returns the condition task's `condition_outcome` and raises `LakeflowError` when the task is not a condition task or has no outcome, so check its `result_state` then. Excluded tasks do not fail the run:
+An if/else condition task records its outcome, and the tasks on the branch that was not taken end `EXCLUDED`. `run.branch_taken(key)` returns the condition task's `condition_outcome` and raises `LakeflowError` when the task is not a condition task or has no outcome, so check its `result_state` then. Excluded tasks do not fail the run. In the `branches` integration bundle, `check_input` sets the task value `rows` from the `rows` job parameter, `check` compares it with `> 0`, and `on_true` and `on_false` depend on the two outcomes:
 
 ```python
-def test_empty_extract_skips_the_load(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_branching_job", params={"source": "empty"}) as job:
+def test_no_rows_takes_the_false_branch(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("branching_job", params={"rows": "0"}) as job:
         run = job.run()
         assert run.succeeded, run
-        assert run.branch_taken("has_rows") is False
-        assert run.task("load").excluded
-        assert run.executed_tasks == ["extract", "has_rows", "report_empty"]
+        assert run.branch_taken("check") is False
+        assert run.task("on_true").excluded
+        assert run.executed_tasks == ["check", "check_input", "on_false"]
 ```
 
 The `==` and `!=` operators of a condition task compare their operands as strings, so a task value of `0` and a right operand of `0.0` are not equal. `<`, `>`, `<=` and `>=` compare them as numbers. To test the condition on its own, drive it with stub values in a [task test](task-tests.md#test-an-ifelse-condition).

@@ -54,8 +54,10 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/queries/*.sql
+        branches/                # name: lakeflow_branches, an if/else condition job
     test_example.py              # one module per bundle, named after it
     test_sql.py
+    test_branches.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:

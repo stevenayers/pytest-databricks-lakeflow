@@ -1,0 +1,16 @@
+bundle:
+  name: lakeflow_branches
+
+include:
+  - resources/*.yml
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest

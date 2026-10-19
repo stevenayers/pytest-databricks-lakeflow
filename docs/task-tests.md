@@ -68,15 +68,19 @@ def test_stage_is_recorded_before_the_failure(lakeflow: Lakeflow) -> None:
 
 ## Test an if/else condition
 
-A condition task that compares an upstream task value can be tested on its own, with the value set by a stub. Only the condition task and its stubs are in a task job, so the branches downstream of it are not part of the run; assert on its outcome instead:
+A condition task that compares an upstream task value can be tested on its own, with the value set by a stub. Only the condition task and its stubs are in a task job, so the branches downstream of it are not part of the run; assert on its outcome instead. In the `branches` integration bundle, `check` compares `{{tasks.check_input.values.rows}}` with `> 0`:
 
 ```python
 @pytest.mark.parametrize(("rows", "expected"), [(0, False), (5, True)])
-def test_has_rows_condition(lakeflow: Lakeflow, rows: int, expected: bool) -> None:
-    run = lakeflow.task("my_branching_job.has_rows", upstream_task_values={"extract": {"rows": rows}}).run()
-    assert run.task("has_rows").condition_outcome is expected
-    assert run.branch_taken("has_rows") is expected
+def test_condition_task_on_its_own(lakeflow: Lakeflow, rows: int, expected: bool) -> None:
+    run = lakeflow.task("branching_job.check", upstream_task_values={"check_input": {"rows": rows}}).run()
+    assert run.succeeded, run
+    assert run.task("check").condition_outcome is expected
+    assert run.branch_taken("check") is expected
+    assert run.executed_tasks == ["check"]
 ```
+
+The stub is in `run.injected_tasks`, not `run.tasks`, so `executed_tasks` lists only the condition task.
 
 `branch_taken` raises `LakeflowError` if the task is not a condition task. To check which downstream tasks ran or were `EXCLUDED`, use a [job test](job-tests.md#branches).
 
