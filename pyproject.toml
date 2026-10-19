@@ -81,11 +81,12 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/integration/bundles/*/src/notebooks/*.py" = ["F821"]
+"tests/integration/notebooks/*.py" = ["F821"]
 
 [tool.ty.src]
 include = ["src", "tests"]
 # Notebooks use platform globals such as dbutils and spark.
-exclude = ["tests/integration/bundles"]
+exclude = ["tests/integration/bundles", "tests/integration/notebooks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
