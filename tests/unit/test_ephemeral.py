@@ -722,6 +722,54 @@ class TestCreateSettings:
         assert stub.task_key == "extract"
         assert transform.notebook_task.base_parameters["schema"] == "s"
 
+    def test_task_overrides_reach_the_created_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            LOAD ={"timeout_seconds": 60, "max_retries": 1, "retry_on_timeout": True}
+            STUBS = {"transform": {"k": 1}}
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job", task_overrides={"load": LOAD}, capture_task_values={"load": ["k"]}):
+                    pass
+
+            def test_task(lakeflow):
+                overrides = {"load": {"max_retries": 2}}
+                with lakeflow.task("my_job.load", upstream_task_values=STUBS, task_overrides=overrides):
+                    pass
+
+            def test_probe_key(lakeflow):
+                overrides = {"__pytest_probe__load": {"max_retries": 1}}
+                with pytest.raises(LakeflowError, match=r"Unknown task '__pytest_probe__load'.*Available"):
+                    lakeflow.job("my_job", task_overrides=overrides, capture_task_values={"load": ["k"]})
+
+            def test_unknown_field(lakeflow):
+                with pytest.raises(LakeflowError, match="notebook_task.*timeout_seconds"):
+                    lakeflow.job("my_job", task_overrides={"load": {"notebook_task": {}}})
+
+            def test_stub_key(lakeflow):
+                with pytest.raises(LakeflowError, match=r"name 'load', the task under test, not \\['transform'\\]"):
+                    lakeflow.task("my_job.load", upstream_task_values=STUBS, task_overrides={"transform": {}})
+            """,
+        )
+        result.assert_outcomes(passed=5)
+        job, single = fake_ws.jobs.created
+        retries = {t.task_key: (t.timeout_seconds, t.max_retries, t.retry_on_timeout) for t in job["tasks"]}
+        assert retries == {
+            "extract": (None, None, None),
+            "transform": (None, None, None),
+            "load": (60, 1, True),
+            "classic": (None, None, None),
+            "__pytest_probe__load": (None, None, None),
+        }
+        assert {t.task_key: t.max_retries for t in single["tasks"]} == {"transform": None, "load": 2}
+
 
 class TestDisabledTasks:
     """Disabling tasks on the copy, and telling disabled tasks from those `only` left out."""
@@ -1253,17 +1301,96 @@ class TestTimeouts:
         result.assert_outcomes(passed=1)
 
     @pytest.mark.parametrize(
-        ("arguments", "job_timeout"),
-        [pytest.param(None, 1860, id="default"), pytest.param("timeout=timedelta(minutes=1)", 120, id="one-minute")],
+        ("call", "tasks"),
+        [
+            pytest.param('lakeflow.job("my_job")', 4, id="job"),
+            pytest.param('lakeflow.task("my_job.load")', 1, id="task"),
+        ],
     )
-    def test_run_timeout_longer_than_the_job_fails_clearly(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str | None, job_timeout: int
+    def test_longer_run_timeout_raises_the_job_timeout(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str, tasks: int
     ) -> None:
-        if arguments is not None:
-            configure_lakeflow(pytester, arguments)
+        configure_lakeflow(pytester, "timeout=timedelta(minutes=1)")
         result = run_tests(
             pytester,
             f"""
+            import logging
+            from datetime import timedelta
+
+            def test_job(lakeflow, caplog):
+                caplog.set_level(logging.INFO, logger="pytest_databricks_lakeflow")
+                with {call} as job:
+                    job.run(timeout=timedelta(hours=1))
+                    job.run(timeout=timedelta(hours=1))
+                    settings = lakeflow.ws.jobs.get(job.job_id).settings
+                assert settings.timeout_seconds == 3660
+                assert [t.timeout_seconds for t in settings.tasks] == [None] * {tasks}
+                [record] = [r for r in caplog.records if "timeout_seconds" in r.getMessage()]
+                assert record.levelname == "INFO"
+                assert record.getMessage() == (
+                    "Raised timeout_seconds of job 1001 from 120 to 3660 for a run timeout of 1:00:00"
+                )
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        created = fake_ws.jobs.created[0]
+        assert created["timeout_seconds"] == 120
+        assert fake_ws.jobs.updated == [(1001, jobs.JobSettings(timeout_seconds=3660, tasks=created["tasks"]))]
+        assert fake_ws.jobs.run_timeouts == [3660, 3660]
+
+    def test_a_shorter_template_timeout_is_raised_with_a_warning(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.settings[1000].timeout_seconds = 600
+        result = run_tests(
+            pytester,
+            """
+            import logging
+            from datetime import timedelta
+
+            def test_job(lakeflow, caplog):
+                with lakeflow.job("my_job") as job:
+                    job.run(timeout=timedelta(minutes=20))
+                    job.run(timeout=timedelta(minutes=25))
+                warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+                assert warnings == [
+                    "Raised timeout_seconds of job 1001 from 600, which the template or modify_settings set, to 1260 "
+                    "for a run timeout of 0:20:00"
+                ]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created[0]["timeout_seconds"] == 600
+        assert [settings.timeout_seconds for _, settings in fake_ws.jobs.updated if settings] == [1260, 1560]
+        assert fake_ws.jobs.run_timeouts == [1260, 1560]
+
+    def test_run_timeout_within_the_job_timeout_makes_no_update(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(pytester, "timeout=timedelta(minutes=1)")
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    assert job.run(timeout=timedelta(seconds=10)).succeeded
+                    assert job.run().succeeded
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created[0]["timeout_seconds"] == 120
+        assert fake_ws.jobs.updated == []
+        assert fake_ws.jobs.run_timeouts == [120, 120]
+
+    def test_wait_timeout_longer_than_the_job_fails_clearly(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(pytester, "timeout=timedelta(minutes=1)")
+        result = run_tests(
+            pytester,
+            """
             from datetime import timedelta
 
             import pytest
@@ -1272,31 +1399,15 @@ class TestTimeouts:
 
             def test_job(lakeflow):
                 with lakeflow.job("my_job") as job:
-                    with pytest.raises(LakeflowError, match=r"Lakeflow\\(timeout") as e:
-                        job.run(timeout=timedelta(hours=1))
-                assert "1:00:00" in str(e.value)
-                assert "{timedelta(seconds=job_timeout)}" in str(e.value)
+                    handle = job.start()
+                    with pytest.raises(LakeflowError, match=r"wait\\(timeout=1:00:00\\) of 'my_job'") as e:
+                        handle.wait(timeout=timedelta(hours=1))
+                assert "timeout_seconds of 120 (0:02:00)" in str(e.value)
+                assert "run(timeout=...)" in str(e.value)
             """,
         )
         result.assert_outcomes(passed=1)
-        assert fake_ws.jobs.run_now_calls == []
-        assert fake_ws.jobs.created[0]["timeout_seconds"] == job_timeout
-
-    def test_run_timeout_within_the_job_timeout_runs(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
-    ) -> None:
-        result = run_tests(
-            pytester,
-            """
-            from datetime import timedelta
-
-            def test_job(lakeflow):
-                with lakeflow.job("my_job") as job:
-                    assert job.run(timeout=timedelta(minutes=31)).succeeded
-            """,
-        )
-        result.assert_outcomes(passed=1)
-        assert fake_ws.jobs.created[0]["timeout_seconds"] == 1860
+        assert fake_ws.jobs.updated == []
 
 
 class TestReportSection:

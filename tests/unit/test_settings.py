@@ -13,6 +13,7 @@ from pytest_databricks_lakeflow import settings as settings_module
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
+    TASK_OVERRIDES,
     Helpers,
     add_dependencies,
     apply_task_params,
@@ -26,6 +27,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_probes,
     inject_test_marker,
     merge_environments,
+    override_tasks,
     pipeline_params,
     run_job_tasks,
     sanitise,
@@ -837,6 +839,49 @@ class TestDisableAndRunJobTasks:
         assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
         assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
         assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+
+
+class TestOverrideTasks:
+    """override_tasks sets the timeout and retry fields of named tasks, and refuses unknown tasks and fields."""
+
+    def test_override_tasks_sets_timeout_and_retry_fields(self) -> None:
+        overrides = {"timeout_seconds": 60, "max_retries": 1, "min_retry_interval_millis": 0, "retry_on_timeout": True}
+        settings = override_tasks(example_settings(), {"load": overrides})
+        load = task(settings, "load")
+        assert (load.timeout_seconds, load.max_retries, load.min_retry_interval_millis, load.retry_on_timeout) == (
+            60,
+            1,
+            0,
+            True,
+        )
+        assert task(settings, "load").python_wheel_task is not None
+        for key in ("extract", "transform", "classic"):
+            assert task(settings, key) == task(example_settings(), key)
+        assert set(overrides) == TASK_OVERRIDES
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            pytest.param(
+                {"nope": {"max_retries": 1}},
+                r"Unknown task 'nope' in task_overrides. Available: \['classic', 'extract', 'load', 'transform'\]",
+                id="task",
+            ),
+            pytest.param(
+                {"load": {"max_retries": 1, "notebook_task": {}}},
+                r"Unknown field 'notebook_task' in task_overrides\['load'\]. Allowed: \['max_retries', "
+                r"'min_retry_interval_millis', 'retry_on_timeout', 'timeout_seconds'\]",
+                id="field",
+            ),
+        ],
+    )
+    def test_override_tasks_rejects_unknown_task_or_field(
+        self, overrides: dict[str, dict[str, object]], match: str
+    ) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=match):
+            override_tasks(settings, overrides)
+        assert settings == example_settings(), "nothing is changed when an entry is refused"
 
 
 class TestAddDependencies:
