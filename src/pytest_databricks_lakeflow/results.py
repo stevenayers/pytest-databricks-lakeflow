@@ -23,6 +23,8 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 
 PREFIX = "__pytest_"
 PROBE_PREFIX = f"{PREFIX}probe__"
+SETUP_KEY = f"{PREFIX}setup"
+TEARDOWN_KEY = f"{PREFIX}teardown"
 NOT_RUN = frozenset({"UPSTREAM_FAILED", "UPSTREAM_CANCELED", "DISABLED", "EXCLUDED", "CANCELED"})
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -424,7 +426,7 @@ class JobRun:
         termination_message: The parent run's termination message.
         duration: The time from start to end of the parent run.
         tasks: The user's tasks that were part of the run, by task key.
-        injected_tasks: The stub and probe tasks added by the plugin, by task key.
+        injected_tasks: The stub, probe, setup and teardown tasks added by the plugin, by task key.
         skipped_tasks: Tasks left out by `only`, by task key.
         disabled_tasks: Tasks disabled in the job, in the bundle or with `disable=`, by task key.
         parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
@@ -474,6 +476,24 @@ class JobRun:
     def executed_tasks(self) -> list[str]:
         """The sorted keys of the tasks in `tasks` whose `ran` is true."""
         return sorted(key for key, task in self.tasks.items() if task.ran)
+
+    @property
+    def setup(self) -> TaskRun | None:
+        """The task that ran the job's `setup=` function, or `None` when the job has none.
+
+        When it fails, the user's tasks end `UPSTREAM_FAILED`, so `succeeded` is false, and `repr()` names the setup
+        failure first.
+        """
+        return self.injected_tasks.get(SETUP_KEY)
+
+    @property
+    def teardown(self) -> TaskRun | None:
+        """The task that ran the job's `teardown=` function, or `None` when the job has none.
+
+        A failed teardown does not change `succeeded`; the plugin logs a warning instead. Assert
+        `run.teardown.succeeded` to fail the test on it.
+        """
+        return self.injected_tasks.get(TEARDOWN_KEY)
 
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.
@@ -562,14 +582,23 @@ class JobRun:
 
 
 def describe_failing(run: JobRun) -> list[str]:
-    """Describe each failing task of `run` as `key: error`, with the error's first line or the result state."""
+    """Describe each failing task of `run` as `key: error`, with the error's first line or the result state.
+
+    A failed setup task comes first, as `setup: error`, because it is why the tasks after it did not run.
+    """
     described: list[str] = []
+    if run.setup is not None and not run.setup.succeeded:
+        described.append(f"setup: {task_outcome(run.setup)}")
     for task in run._failing_tasks():
-        if task.error:
-            described.append(f"{task.task_key}: {_first_line(str(task.error))}")
-        else:
-            described.append(f"{task.task_key}: {task.result_state}")
+        described.append(f"{task.task_key}: {task_outcome(task)}")
     return described
+
+
+def task_outcome(task: TaskRun) -> str:
+    """The first line of the task's error, or its result state when it has none."""
+    if task.error:
+        return _first_line(str(task.error))
+    return str(task.result_state)
 
 
 def failing_parameters(run: JobRun) -> dict[str, str]:

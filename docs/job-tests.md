@@ -283,6 +283,49 @@ def test_writes_table(lakeflow: Lakeflow) -> None:
 
 `lakeflow.ws` is the `WorkspaceClient`, for whatever else the test needs to check.
 
+## Set up and tear down data
+
+`setup=` and `teardown=` take plain functions that run on the job's own compute, as tasks of the copy, so they get the real `spark` and `dbutils` without a seed task in the bundle or Databricks Connect in the test:
+
+```python
+def seed_orders(spark, dbutils, params):
+    schema = params["schema"]
+    spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {schema}.landing")
+    dbutils.fs.put(f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv", "id,sku\n1,a\n2,b\n", True)
+    return {"schema": schema, "param1": params["param1"]}
+
+
+def remove_landing_file(dbutils, params):
+    return dbutils.fs.rm(f"/Volumes/{params['schema'].replace('.', '/')}/landing/orders.csv")
+
+
+def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema, "mode": "incremental"},
+            setup=seed_orders,
+            teardown=remove_landing_file,
+        ) as job:
+            run = job.run(params={"param1": "seeded"})
+            assert run.succeeded, run
+            assert run.setup.output_json == {"schema": schema, "param1": "seeded"}
+            assert run.task("load").output == "loaded 2 seeded orders"
+            assert run.teardown.succeeded
+```
+
+- A function takes any of `spark`, `dbutils` and `params`, and the plugin passes only the ones it declares. `params` is a dict of the job parameters the job declares, with their values for the run (the job's `params` and then the run's `params` merged over the defaults), as strings, the way the job's own notebooks read them from their widgets. Only declared parameters reach it: the names are fixed when `job()` is called, so a parameter passed under `allow_undeclared_params=True`, or declared by `modify_settings`, is not in `params`.
+- The setup task, `__pytest_setup`, runs first: every task that has no `depends_on`, stubs included, comes to depend on it. The teardown task, `__pytest_teardown`, runs last, after every task that no other task depends on, probes included, with `run_if` set to `ALL_DONE`, so it runs whether the job passed or failed. Both run on every `run()`, and `run(only=...)` always includes them. A selected task still waits for the setup when the tasks between them are left out, because the platform marks a left-out task `DISABLED` only once the tasks before it have finished.
+- A value the function returns becomes the task's `output` as JSON, through `json.dumps(value, default=str)`, so `run.setup.output_json` gives it back.
+- `run.setup` and `run.teardown` are the two tasks' `TaskRun`s, or `None` when the job has none. They are in `run.injected_tasks` and do not count towards `run.succeeded`.
+- A failed setup leaves the job's tasks `UPSTREAM_FAILED`, so the run fails, and `repr(run)` names it first, as `setup: <error>`, so you do not chase a task that never ran.
+- A failed teardown does not fail the run. The plugin logs a warning with the task's error and run page. Assert `run.teardown.succeeded` to fail the test on it.
+
+The function runs on the cluster, not in the test process, so it must be self-contained. The plugin ships its source as a notebook, uploaded once per session to `helpers_path` as `setup_<hash>` or `teardown_<hash>`, and runs it on the [helper compute](task-tests.md#helper-compute). Put imports inside the function, and define any helper it calls inside it too, or install it on the compute: a `NameError` there comes back as `run.setup.error`. `lakeflow.job()` raises `LakeflowError` before creating anything when the function is a lambda or not a plain function defined with `def`, when its source cannot be read because it was defined in a REPL, when it uses variables of an enclosing function, which would not exist on the cluster, when it takes a parameter other than `spark`, `dbutils` and `params`, or when it has a decorator, whose line would be shipped with the source and fail on the cluster. Pass values as job parameters instead and read them from `params`. Type annotations are fine: the notebook does not evaluate them, so `spark: SparkSession` works without importing `SparkSession` inside the function.
+
+The teardown runs inside the same job run, after the job's tasks and before the test's assertions. Use it for side effects the test does not assert on: files under a volume, checkpoints, tables outside the temporary schema, rows written to a source table. Tables the test asserts on belong in [`lakeflow.schema()`](#temporary-schemas), which drops them after the test, so most tests need `setup=` only. Make the functions idempotent: the setup runs on every run, including every run of a job shared by several tests, hence `CREATE OR REPLACE TABLE`.
+
 ## Share one run between tests
 
 Run the job in a fixture with a broader scope, inside a `with` block so that the job is deleted when the fixture is torn down:

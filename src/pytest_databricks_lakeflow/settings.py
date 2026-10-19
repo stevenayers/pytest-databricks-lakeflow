@@ -13,8 +13,8 @@ from typing import Any, Literal, get_args
 from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.helpers import KEYS_WIDGET, TASK_KEY_WIDGET, VALUES_WIDGET
-from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX
+from pytest_databricks_lakeflow.helpers import KEYS_WIDGET, PARAMS_WIDGET, TASK_KEY_WIDGET, VALUES_WIDGET
+from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX, SETUP_KEY, TEARDOWN_KEY
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -60,7 +60,7 @@ SHARED_ACCESS_MODES = frozenset(
 
 @dataclass(frozen=True)
 class Helpers:
-    """Where the helper notebooks are, and the compute that stub and probe tasks run on.
+    """Where the helper notebooks are, and the compute that stub, probe, setup and teardown tasks run on.
 
     Attributes:
         set_values: Workspace path of the notebook that sets task values.
@@ -430,7 +430,8 @@ def check_compute(settings: jobs.JobSettings) -> None:
 def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[str] = ()) -> list[str]:
     """Add the injected tasks that the selected tasks need to `only`.
 
-    Those are the stubs that selected tasks depend on and the probes on selected tasks.
+    Those are the stubs that selected tasks depend on, the probes on selected tasks, and the setup and teardown tasks
+    whenever the job has them.
 
     Args:
         settings: The job's settings.
@@ -462,6 +463,8 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
         needed |= upstream[key] & stub_keys
     for key in upstream:
         if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
+            needed.add(key)
+        if key in (SETUP_KEY, TEARDOWN_KEY):
             needed.add(key)
     return [*only, *sorted(needed - selected)]
 
@@ -560,6 +563,57 @@ def wrap_task(
     if stubs or probes:
         _add_helper_compute(settings, helpers)
     return settings
+
+
+def inject_lifecycle(
+    settings: jobs.JobSettings, setup: str | None, teardown: str | None, helpers: Helpers
+) -> jobs.JobSettings:
+    """Add a setup task that runs before everything else and a teardown task that runs after everything else.
+
+    Every task without `depends_on`, stubs included, comes to depend on the setup task. The teardown task depends
+    on every task that no other task depends on, probes included, with `run_if` `ALL_DONE`, so it runs whether the
+    tasks before it passed or failed. Both are notebook tasks on the helper compute. Their `__pytest_params` widget
+    names the job's parameters, so the notebook can read them from the widgets that the platform fills with them.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        setup: Workspace path of the setup notebook, or `None` for no setup task.
+        teardown: Workspace path of the teardown notebook, or `None` for no teardown task.
+        helpers: Where the helper notebooks are and what they run on.
+
+    Returns:
+        `settings`.
+    """
+    if setup is None and teardown is None:
+        return settings
+    names: list[str] = []
+    for parameter in settings.parameters or []:
+        if parameter.name and not parameter.name.startswith(PREFIX):
+            names.append(parameter.name)
+    tasks = list(settings.tasks or [])
+    if setup is not None:
+        for task in tasks:
+            if not task.depends_on:
+                task.depends_on = [jobs.TaskDependency(task_key=SETUP_KEY)]
+        tasks.insert(0, _lifecycle_task(SETUP_KEY, setup, names, helpers))
+    if teardown is not None:
+        upstream = {d.task_key for t in tasks for d in t.depends_on or []}
+        leaves: list[jobs.TaskDependency] = []
+        for task in tasks:
+            if task.task_key not in upstream:
+                leaves.append(jobs.TaskDependency(task_key=task.task_key))
+        last = _lifecycle_task(TEARDOWN_KEY, teardown, names, helpers)
+        last.depends_on = leaves
+        last.run_if = jobs.RunIf.ALL_DONE
+        tasks.append(last)
+    settings.tasks = tasks
+    _add_helper_compute(settings, helpers)
+    return settings
+
+
+def _lifecycle_task(task_key: str, notebook_path: str, names: Sequence[str], helpers: Helpers) -> jobs.Task:
+    notebook = jobs.NotebookTask(notebook_path=notebook_path, base_parameters={PARAMS_WIDGET: escape(list(names))})
+    return _on_helper_compute(jobs.Task(task_key=task_key, notebook_task=notebook), helpers)
 
 
 def _probe_task(target_key: str, keys: Sequence[str], helpers: Helpers) -> jobs.Task:

@@ -18,8 +18,8 @@ All arguments are keyword-only.
 | `timeout` | 30 minutes | The default `timedelta` to wait for one run. Each job is created with `timeout_seconds` equal to this timeout plus 60 seconds, so the platform stops a run that the plugin can no longer cancel, for example after the pytest process was killed. A template with a smaller `timeout_seconds` keeps it. |
 | `catalog` | `None` | The catalog in which `schema()` creates temporary schemas. |
 | `helpers_path` | `/Users/<you>/.pytest-databricks-lakeflow` | The workspace folder for the two helper notebooks. |
-| `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for stub and probe tasks, for workspaces without serverless. |
-| `helpers_environment_version` | `"4"` | The serverless environment version for stub and probe tasks. |
+| `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for stub, probe, setup and teardown tasks, for workspaces without serverless. |
+| `helpers_environment_version` | `"4"` | The serverless environment version for stub, probe, setup and teardown tasks. |
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks so that a failure fails once and fast, instead of being retried by the platform. |
 | `performance_optimized` | `False` | Run every ephemeral job with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. |
 | `side_effects` | `"neutralise"` | `"neutralise"` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral job, so test runs do not email snapshots or notify subscribers. `"keep"` leaves them as the template has them. Any other value raises `ValueError`. |
@@ -138,7 +138,7 @@ The entries go to `jobs.create` unchanged, so they take `user_name`, `group_name
 
 The plugin logs to the `pytest_databricks_lakeflow` logger: INFO when it deploys, creates a job, starts and finishes a run, and deletes a job or drops a schema; WARNING when it keeps something or a cleanup call fails. Show the INFO lines with `pytest --log-cli-level=INFO`.
 
-While `run()` waits, every poll logs a line at INFO for each task run whose state changed, the plugin's stub and probe tasks included. A task run seen for the first time logs its state on its own; a later change logs the old and new state. The state is the V2 lifecycle state, such as `PENDING`, `QUEUED` or `RUNNING`, until the task run terminates, and its result state after that. A terminated task run adds its duration and the first line of its error, if it reported one:
+While `run()` waits, every poll logs a line at INFO for each task run whose state changed, the plugin's stub, probe, setup and teardown tasks included. A task run seen for the first time logs its state on its own; a later change logs the old and new state. The state is the V2 lifecycle state, such as `PENDING`, `QUEUED` or `RUNNING`, until the task run terminates, and its result state after that. A terminated task run adds its duration and the first line of its error, if it reported one:
 
 ```text
 extract: PENDING

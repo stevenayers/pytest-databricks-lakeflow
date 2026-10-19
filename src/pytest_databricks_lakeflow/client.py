@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import posixpath
 import re
 import secrets
 import warnings
@@ -17,7 +18,7 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import session
+from pytest_databricks_lakeflow import helpers, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.results import JobRun
@@ -28,6 +29,7 @@ from pytest_databricks_lakeflow.settings import (
     SideEffects,
     check_params,
     disable_tasks,
+    inject_lifecycle,
     inject_probes,
     inject_test_marker,
     run_job_tasks,
@@ -86,9 +88,9 @@ class Lakeflow:
         catalog: The catalog in which `schema()` creates temporary schemas.
         helpers_path: The workspace folder for the helper notebooks. Defaults to
             `/Users/<you>/.pytest-databricks-lakeflow`.
-        helpers_compute: A `job_cluster_key` from the job for stub and probe tasks, for workspaces without
-            serverless.
-        helpers_environment_version: The serverless environment version for stub and probe tasks.
+        helpers_compute: A `job_cluster_key` from the job for stub, probe, setup and teardown tasks, for workspaces
+            without serverless.
+        helpers_environment_version: The serverless environment version for stub, probe, setup and teardown tasks.
         disable_auto_optimization: Stop serverless from retrying failed tasks, so that a failure fails once and fast.
         performance_optimized: Run every ephemeral job as `PERFORMANCE_OPTIMIZED`, whatever the template says.
         side_effects: `neutralise` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral
@@ -98,8 +100,9 @@ class Lakeflow:
             `helpers_environment_version`.
         budget_policy_id: The budget policy of every ephemeral job.
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
-            cluster, stub and probe tasks and tasks nested in a `for_each_task` included, so that tests skip
-            cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their compute.
+            cluster, stub, probe, setup and teardown tasks and tasks nested in a `for_each_task` included, so that
+            tests skip cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their
+            compute.
         single_node: Make every job cluster and every task's `new_cluster` in each ephemeral job a single node
             cluster, so that runs start faster and cost one node: no workers, no autoscaling, and the single node
             Spark configuration and `ResourceClass` tag. The job fails to build if one of those clusters uses
@@ -221,8 +224,16 @@ class Lakeflow:
         disable: Sequence[str] | None = None,
         *,
         children: Children = "warn",
+        setup: Callable[..., object] | None = None,
+        teardown: Callable[..., object] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
+
+        `setup` and `teardown` are plain functions that run on the job's compute, as notebook tasks of the copy. Each
+        takes any of `spark`, `dbutils` and `params`, the run's job parameters as strings. The setup task runs before
+        every other task on every run, and the teardown task after every other task, whether they passed or failed.
+        A function must be self-contained: it is shipped as source, so imports go inside it and it cannot use
+        variables of an enclosing function. A value it returns becomes the task's `output` as JSON.
 
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
@@ -237,6 +248,10 @@ class Lakeflow:
                 child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
                 inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
                 created.
+            setup: Runs first, as the task `__pytest_setup`, which every task without `depends_on` comes to depend
+                on. Its outcome is `JobRun.setup`.
+            teardown: Runs last, as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no
+                other task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -244,16 +259,20 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
-                the job, a parameter name is reserved, or `children` is `"refuse"` and the copy has a Run Job task
-                that is not disabled nor inside a disabled `for_each_task`.
+                the job, a parameter name is reserved, `children` is `"refuse"` and the copy has a Run Job task
+                that is not disabled nor inside a disabled `for_each_task`, or `setup` or `teardown` is not a plain
+                function with its source in a file, uses variables of an enclosing function, or takes a parameter
+                other than `spark`, `dbutils` and `params`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
+        notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
+        self._inject_lifecycle(settings, notebooks)
         return self._ephemeral(
             item,
             key,
@@ -276,6 +295,8 @@ class Lakeflow:
         run_as: RunAs = None,
         *,
         children: Children = "warn",
+        setup: Callable[..., object] | None = None,
+        teardown: Callable[..., object] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -289,6 +310,8 @@ class Lakeflow:
             capture_task_values: The task value keys to capture from the task.
             run_as: Who the job runs as, as for `job()`.
             children: What to do when the task is a Run Job task, as for `job()`.
+            setup: Runs first, before the stubs, as for `job()`.
+            teardown: Runs last, after the task and its probe, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -296,11 +319,12 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed, a value is too large or not JSON-serialisable, or `children` is `"refuse"`
-                and the task is a Run Job task.
+                task that is not stubbed, a value is too large or not JSON-serialisable, `children` is `"refuse"`
+                and the task is a Run Job task, or `setup` or `teardown` cannot run, as for `job()`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
+        notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         job_key, _, task_key = ref.partition(".")
         if not job_key or not task_key:
@@ -309,6 +333,7 @@ class Lakeflow:
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
+        self._inject_lifecycle(settings, notebooks)
         capture: dict[str, list[str]] = {}
         if capture_task_values:
             capture = {task_key: list(capture_task_values)}
@@ -396,6 +421,16 @@ class Lakeflow:
             job_cluster_key=self.helpers_compute,
         )
 
+    def _inject_lifecycle(self, settings: jobs.JobSettings, notebooks: Mapping[str, str]) -> None:
+        if not notebooks:
+            return
+        folder = posixpath.dirname(self._state()["helpers"]["set_values"])
+        uploaded = session.current().uploaded_notebooks
+        paths: dict[str, str] = {}
+        for role, source in notebooks.items():
+            paths[role] = helpers.upload_lifecycle(self.ws, folder, role, source, uploaded)
+        inject_lifecycle(settings, paths.get("setup"), paths.get("teardown"), self._helpers())
+
     def _ephemeral(
         self,
         item: pytest.Item,
@@ -465,6 +500,16 @@ def _flag_name(flag: str) -> str:
     if name.startswith("--"):
         return name
     return name[:2]
+
+
+def _lifecycle_notebooks(setup: Callable[..., object] | None, teardown: Callable[..., object] | None) -> dict[str, str]:
+    """Build the setup and teardown notebooks that were asked for, by role, checking both before anything else."""
+    notebooks: dict[str, str] = {}
+    if setup is not None:
+        notebooks["setup"] = helpers.lifecycle_notebook(setup, "setup")
+    if teardown is not None:
+        notebooks["teardown"] = helpers.lifecycle_notebook(teardown, "teardown")
+    return notebooks
 
 
 def _check_children(children: str) -> None:
