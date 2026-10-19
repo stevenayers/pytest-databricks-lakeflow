@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+from collections.abc import Callable, Collection
 from datetime import timedelta
 from typing import Any
 
@@ -35,6 +36,7 @@ from pytest_databricks_lakeflow.settings import (
     sanitise,
     select,
     tag_value,
+    unreached_notebook_tasks,
     wrap_task,
 )
 
@@ -1194,3 +1196,92 @@ class TestPipelineParams:
         inner = {"task_key": "each_inner", "pipeline_task": {"pipeline_id": "abc"}}
         settings = jobs.JobSettings.from_dict({"tasks": [for_each(inner)]})
         assert self.refresh(settings, full_refresh=False) == jobs.PipelineParams(full_refresh=False)
+
+
+DEPS = ["faker==30.0.0"]
+CLUSTER_HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values", job_cluster_key="classic")
+NOTEBOOK = {"notebook_path": "/n"}
+STUB = {"extract": {"row_count": 3}}
+
+
+def reached(settings: jobs.JobSettings | None = None) -> jobs.JobSettings:
+    """Add `DEPS` to `settings`, `example_settings()` by default, as `extra_dependencies` does."""
+    return add_dependencies(settings or example_settings(), DEPS)
+
+
+def moved(environments: dict[str, dict[str, Any]], **compute: str) -> jobs.JobSettings:
+    """Add `DEPS`, merge `environments`, then set `compute` on `transform`, as `modify_settings` would."""
+    settings = merge_environments(reached(), environments)
+    for name, value in compute.items():
+        setattr(task(settings, "transform"), name, value)
+    return settings
+
+
+def looped(disabled: bool) -> jobs.JobSettings:
+    loop = for_each({"task_key": "inner", "notebook_task": NOTEBOOK})
+    loop["disabled"] = disabled
+    return reached(with_tasks(loop))
+
+
+class TestUnreachedNotebookTasks:
+    """Which tasks extra_dependencies cannot reach."""
+
+    @pytest.mark.parametrize(
+        ("build", "stubs", "expected"),
+        [
+            pytest.param(reached, (), ["extract", "transform"], id="serverless"),
+            pytest.param(lambda: disable_tasks(reached(), ["extract"]), (), ["transform"], id="disabled"),
+            pytest.param(lambda: moved({}, environment_key="default"), (), ["extract"], id="moved-to-default"),
+            pytest.param(
+                lambda: moved({"test": {"environment_version": "4"}}, environment_key="test"),
+                (),
+                ["extract", "transform"],
+                id="moved-to-new-environment",
+            ),
+            pytest.param(
+                lambda: moved({}, job_cluster_key="classic"), (), ["extract", "transform"], id="moved-to-cluster"
+            ),
+            pytest.param(
+                lambda: moved({"default": {"dependencies": ["pkg==1.0"]}}, environment_key="default"),
+                (),
+                ["extract", "transform"],
+                id="default-dependencies-replaced",
+            ),
+            pytest.param(
+                lambda: reached(with_tasks({"task_key": "query", "notebook_task": {**NOTEBOOK, "warehouse_id": "w1"}})),
+                (),
+                ["extract", "transform"],
+                id="warehouse",
+            ),
+            pytest.param(lambda: looped(disabled=False), (), ["extract", "transform", "inner"], id="enabled-loop"),
+            pytest.param(lambda: looped(disabled=True), (), ["extract", "transform"], id="disabled-loop"),
+            pytest.param(
+                lambda: inject_probes(reached(), {"transform": ["k"]}, HELPERS),
+                (),
+                ["extract", "transform"],
+                id="probe-serverless",
+            ),
+            pytest.param(
+                lambda: inject_probes(reached(), {"transform": ["k"]}, CLUSTER_HELPERS),
+                (),
+                ["extract", "transform"],
+                id="probe-on-cluster",
+            ),
+            pytest.param(
+                lambda: wrap_task(reached(), "transform", STUB, ["k"], HELPERS),
+                {"extract"},
+                ["transform"],
+                id="stub-serverless",
+            ),
+            pytest.param(
+                lambda: wrap_task(reached(), "transform", STUB, ["k"], CLUSTER_HELPERS),
+                {"extract"},
+                ["transform"],
+                id="stub-on-cluster",
+            ),
+        ],
+    )
+    def test_unreached_notebook_tasks(
+        self, build: Callable[[], jobs.JobSettings], stubs: Collection[str], expected: list[str]
+    ) -> None:
+        assert unreached_notebook_tasks(build(), DEPS, stubs) == expected

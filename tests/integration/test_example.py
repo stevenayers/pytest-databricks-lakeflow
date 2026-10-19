@@ -618,6 +618,30 @@ def test_extra_dependencies_are_importable(lakeflow: Lakeflow) -> None:
         assert "inflection 0.5.1" in wheel_task.logs
 
 
+def add_inflection_to_the_helper_environment(settings: jobs.JobSettings, item: pytest.Item) -> None:
+    for environment in settings.environments or []:
+        if environment.environment_key == "__pytest_serverless" and environment.spec is not None:
+            environment.spec.dependencies = ["inflection==0.5.1"]
+
+
+def report_inflection():
+    import importlib.metadata
+
+    return importlib.metadata.version("inflection")
+
+
+def test_serverless_notebook_task_installs_its_environment_dependencies(lakeflow: Lakeflow) -> None:
+    # Serverless environment 4 does not ship inflection, so the setup task, a serverless notebook task with the
+    # environment_key of the helper environment, can import it only if that environment's dependencies are installed.
+    # The docs' advice to move a notebook task onto an environment that lists its test-only packages rests on this.
+    probe = dataclasses.replace(lakeflow, modify_settings=add_inflection_to_the_helper_environment)
+    with probe.task("my_example_job.extract", setup=report_inflection) as job:
+        run = job.run()
+        assert run.setup is not None
+        assert run.setup.succeeded, run.setup.error
+        assert run.setup.output_json == "0.5.1"
+
+
 def test_local_wheel_extras_are_installed(lakeflow: Lakeflow) -> None:
     # The example wheel's `test` extra pulls in inflection, which serverless environment 4 does not ship.
     with lakeflow.task(

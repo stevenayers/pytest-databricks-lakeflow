@@ -1018,6 +1018,111 @@ class TestCreateSettings:
         assert {t.task_key: t.max_retries for t in single["tasks"]} == {"transform": None, "load": 2}
 
 
+ON_DEFAULT = ("environment_key", "default")
+
+
+def unreached_warning(keys: list[str]) -> str:
+    """The warning that `extra_dependencies=["faker==30.0.0"]` does not reach `keys` of `my_job`, as a fnmatch line."""
+    message = (
+        f"extra_dependencies ['faker==30.0.0'] do not reach tasks {keys} of job 'my_job': neither the environment "
+        "nor the cluster libraries of these notebook tasks list them, and a serverless notebook task without an "
+        "environment_key has neither. Install them with %pip install in the notebook, or run the task on an "
+        "environment that lists them."
+    )
+    # fnmatch reads "[" as the start of a character class.
+    return "*" + message.replace("[", "[[]") + "*"
+
+
+def move_tasks(**changes: tuple[str, str]) -> str:
+    """A `modify_settings` callback, `move`, that sets the `(field, value)` given for each task key on that task."""
+    lines = ["", "", "def move(settings, item):", "    for task in settings.tasks:"]
+    for key, (field, value) in changes.items():
+        lines += [f"        if task.task_key == {key!r}:", f"            task.{field} = {value!r}"]
+    return "\n".join(lines) + "\n"
+
+
+class TestUnreachedDependencies:
+    """The warning for test-only packages that notebook tasks do not get."""
+
+    @pytest.mark.parametrize(
+        ("modify", "call", "expected"),
+        [
+            pytest.param(None, 'lakeflow.job("my_job", {})', ["extract", "transform"], id="job"),
+            pytest.param(None, 'lakeflow.task("my_job.extract", {})', ["extract"], id="task"),
+            pytest.param(
+                None,
+                'lakeflow.task("my_job.transform", upstream_task_values={{"extract": {{"row_count": 3}}}}, {})',
+                ["transform"],
+                id="task-with-stub",
+            ),
+            pytest.param(
+                move_tasks(transform=("environment_key", "default"), extract=("job_cluster_key", "classic")),
+                'lakeflow.job("my_job", {})',
+                ["extract"],
+                id="modify-settings",
+            ),
+        ],
+    )
+    def test_warns_once_naming_the_tasks(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        modify: str | None,
+        call: str,
+        expected: list[str],
+    ) -> None:
+        if modify is not None:
+            configure_lakeflow(pytester, "modify_settings=move", modify)
+        source = call.format('extra_dependencies=["faker==30.0.0"]')
+        result = run_tests(pytester, f"def test_job(lakeflow):\n    with {source}:\n        pass\n")
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines([unreached_warning(expected)])
+        assert len(fake_ws.jobs.created) == 1
+
+    @pytest.mark.parametrize(
+        ("environments", "key"),
+        [({"test": {"environment_version": "4"}}, "test"), ({"default": {"dependencies": ["pkg==1.0"]}}, "default")],
+        ids=["new", "replaced"],
+    )
+    def test_names_tasks_on_an_environment_without_the_packages(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, environments: dict[str, Any], key: str
+    ) -> None:
+        on_environment = ("environment_key", key)
+        move = move_tasks(extract=on_environment, transform=on_environment)
+        configure_lakeflow(pytester, "modify_settings=move", move)
+        call = f'lakeflow.job("my_job", extra_dependencies=["faker==30.0.0"], environments={environments!r})'
+        result = run_tests(pytester, f"def test_job(lakeflow):\n    with {call}:\n        pass\n")
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines([unreached_warning(["extract", "transform"])])
+
+    @pytest.mark.parametrize(
+        ("modify", "call"),
+        [
+            pytest.param(None, 'lakeflow.task("my_job.load", extra_dependencies=["faker==30.0.0"])', id="wheel-task"),
+            pytest.param(None, 'lakeflow.task("my_job.classic", extra_dependencies=["faker==30.0.0"])', id="cluster"),
+            pytest.param(None, 'lakeflow.job("my_job")', id="no-dependencies"),
+            pytest.param(
+                None,
+                'lakeflow.job("my_job", extra_dependencies=["faker==30.0.0"], disable=["extract", "transform"])',
+                id="disabled",
+            ),
+            pytest.param(
+                move_tasks(extract=ON_DEFAULT, transform=ON_DEFAULT),
+                'lakeflow.job("my_job", extra_dependencies=["faker==30.0.0"])',
+                id="on-default",
+            ),
+        ],
+    )
+    def test_no_warning_when_every_task_is_reached(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, modify: str | None, call: str
+    ) -> None:
+        if modify is not None:
+            configure_lakeflow(pytester, "modify_settings=move", modify)
+        result = run_tests(pytester, f"def test_job(lakeflow):\n    with {call}:\n        pass\n")
+        result.assert_outcomes(passed=1)
+        assert "warnings" not in result.parseoutcomes()
+
+
 class TestDisabledTasks:
     """Disabling tasks on the copy, and telling disabled tasks from those `only` left out."""
 

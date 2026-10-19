@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import uuid
+import warnings
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -47,6 +48,7 @@ from pytest_databricks_lakeflow.settings import (
     select,
     selected_tasks,
     stub_upstream,
+    unreached_notebook_tasks,
     upstream_values_from,
 )
 
@@ -101,6 +103,8 @@ class EphemeralJob:
         params: Job parameters for every run.
         capture_task_values: The task value keys captured by probes, by task key.
         stubs: Keys of the stub tasks.
+        extra_dependencies: The test-only dependencies passed to `job()` or `task()`, local wheels resolved to their
+            uploaded copies.
         job_id: The job's id, once created.
         runs: The outcome of each finished run, in order.
     """
@@ -113,6 +117,8 @@ class EphemeralJob:
         params: Mapping[str, str] | None = None,
         capture_task_values: Mapping[str, Sequence[str]] | None = None,
         stubs: Collection[str] = (),
+        *,
+        extra_dependencies: Sequence[str] = (),
     ) -> None:
         self.lakeflow = lakeflow
         self.job_key = job_key
@@ -120,6 +126,7 @@ class EphemeralJob:
         self.params = dict(params or {})
         self.capture_task_values = {key: list(keys) for key, keys in (capture_task_values or {}).items()}
         self.stubs = frozenset(stubs)
+        self.extra_dependencies = list(extra_dependencies)
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
         self._run_urls: dict[int, str] = {}
@@ -149,6 +156,9 @@ class EphemeralJob:
     def create(self) -> None:
         """Create the job if it does not exist yet.
 
+        Emits a `UserWarning` naming the notebook tasks that `extra_dependencies` does not reach, checked after
+        `modify_settings`, before `jobs.create`.
+
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
                 declare after `modify_settings` has run, or a serverless task that needs an environment has none.
@@ -166,10 +176,23 @@ class EphemeralJob:
             name_lifecycle_params(self.settings, self.params)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         check_compute(self.settings)
+        self._warn_unreached_dependencies()
         self.job_id = self._create_job()
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
         item.user_properties.append(("lakeflow_job_id", self.job_id))
+
+    def _warn_unreached_dependencies(self) -> None:
+        unreached = unreached_notebook_tasks(self.settings, self.extra_dependencies, self.stubs)
+        if not unreached:
+            return
+        warnings.warn(
+            f"extra_dependencies {self.extra_dependencies} do not reach tasks {unreached} of job {self.job_key!r}: "
+            "neither the environment nor the cluster libraries of these notebook tasks list them, and a serverless "
+            "notebook task without an environment_key has neither. Install them with %pip install in the notebook, "
+            "or run the task on an environment that lists them.",
+            stacklevel=4,
+        )
 
     def _create_job(self) -> int | None:
         """Create the job, checking first that its creator may make it run as the service principal it names."""

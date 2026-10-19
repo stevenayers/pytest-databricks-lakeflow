@@ -117,13 +117,47 @@ Job code under test sometimes needs packages that must not ship in the productio
 
 ```python
 def test_with_test_helpers(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", extra_dependencies=["chispa>=0.10"]) as job:
-        assert job.run().succeeded
+    with lakeflow.task("my_example_job.my_wheel_task", extra_dependencies=["chispa>=0.10"]) as task:
+        assert task.run().succeeded
 ```
 
-Each entry is a PyPI requirement, the `/Workspace` or `/Volumes` path of a wheel, or a local wheel (see below). It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else, a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
+Each entry is a PyPI requirement, the `/Workspace` or `/Volumes` path of a wheel, or a local wheel (see below). It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else, a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Tasks nested in a `for_each_task` get them too. `lakeflow.job()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
 
-Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged; install the package with `%pip install` in the notebook, or give the task an environment in the bundle.
+Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged. Rather than let such a task fail minutes into the run on a `ModuleNotFoundError`, the plugin names it in a `UserWarning` when the job is created. In the example bundle, `lakeflow.job("my_example_job", extra_dependencies=["faker==30.0.0"])` warns:
+
+```
+extra_dependencies ['faker==30.0.0'] do not reach tasks ['extract', 'transform', 'load'] of job 'my_example_job': neither the environment nor the cluster libraries of these notebook tasks list them, and a serverless notebook task without an environment_key has neither. Install them with %pip install in the notebook, or run the task on an environment that lists them.
+```
+
+The check reads the settings the job is created with, after `environments=` and `modify_settings`, so it also names a notebook task that `modify_settings` moves onto a job cluster (it was serverless when the libraries were added) or onto an environment that `environments=` adds, and a notebook task on an environment whose `dependencies` `environments=` replaces. A notebook task on a cluster whose `libraries` hold every entry, or on an environment whose `dependencies` do, is not named, nor is a disabled task, a task in a disabled `for_each_task`, a notebook task on a SQL warehouse, or one of the plugin's setup, teardown, probe and stub tasks. The warning is a reminder, not an error: the job is created and runs as before. To silence it for one test, mark the test with `@pytest.mark.filterwarnings("ignore:extra_dependencies .* do not reach tasks")`.
+
+A serverless notebook task installs the `dependencies` of the environment its `environment_key` names. To give one a test-only package without changing the bundle, add an environment that lists it with `environments=`, and move the task onto it with `modify_settings`:
+
+```python
+import dataclasses
+
+import pytest
+from databricks.sdk.service import jobs
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+def extract_on_the_test_environment(settings: jobs.JobSettings, item: pytest.Item) -> None:
+    for task in settings.tasks or []:
+        if task.task_key == "extract":
+            task.environment_key = "test"
+
+
+def test_extract_with_synthetic_rows(lakeflow: Lakeflow) -> None:
+    on_test_environment = dataclasses.replace(lakeflow, modify_settings=extract_on_the_test_environment)
+    with on_test_environment.task(
+        "my_example_job.extract",
+        environments={"test": {"environment_version": "4", "dependencies": ["faker==30.0.0"]}},
+    ) as task:
+        assert task.run().succeeded
+```
+
+No warning is emitted here, because `extra_dependencies` is not passed. Passing `extra_dependencies=["faker==30.0.0"]` with `environments={"test": {"environment_version": "4"}}` instead would warn about `extract`: `test` is a new environment, so `extra_dependencies` never reaches it.
 
 #### Local wheels and extras
 
@@ -131,8 +165,8 @@ A path that starts with `./` or `../` is a local wheel, relative to the bundle r
 
 ```python
 def test_with_the_test_extra(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", extra_dependencies=["./dist/*.whl[test]"]) as job:
-        assert job.run().succeeded
+    with lakeflow.task("my_example_job.my_wheel_task", extra_dependencies=["./dist/*.whl[test]"]) as task:
+        assert task.run().succeeded
 ```
 
 The extras are split off before globbing, each matching file is pointed at the copy that the last `bundle deploy` uploaded, `<workspace.artifact_path>/.internal/<file name>`, and the extras are added back, so the environment gains `/Workspace/.../.internal/pkg-0.1-py3-none-any.whl[test]`. The file must be built and deployed: with `sync="deploy"` the session's own deploy uploads the bundle's artifacts, with `sync="none"` an earlier deploy must have, and `sync="sync"` uploads no wheels, so a local path raises `LakeflowError` naming `Lakeflow(sync="deploy")`. A pattern that matches no file, or a file without an uploaded copy, raises `LakeflowError` too. A deploy uploads only the wheels the bundle's jobs use, so with `sync="deploy"` the path must match a wheel that is a library or environment dependency of a job in the bundle. Any other wheel, such as one built only for the tests, has no uploaded copy even straight after the session's deploy, and the `not found` error, which asks for a `databricks bundle deploy`, does not go away with another deploy: add the wheel to a job of the bundle, or upload it to a volume and pass its `/Volumes` path. Every error is raised before anything is created.
