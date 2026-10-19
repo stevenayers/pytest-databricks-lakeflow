@@ -55,7 +55,6 @@ ATTRIBUTION = {
     "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
 }
 SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
-HAS_BASE_ENVIRONMENT = "base_environment" in compute.Environment.__dataclass_fields__
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 
 
@@ -199,13 +198,7 @@ class TestComputeOverrides:
         [
             ({"environment_key": "other", "spec": {"environment_version": "3"}}, {"other": "5"}),
             ({"environment_key": "bare"}, {"bare": "5"}),
-            pytest.param(
-                {"environment_key": "custom", "spec": {"base_environment": "/Workspace/envs/base.yml"}},
-                {"custom": None},
-                marks=pytest.mark.skipif(
-                    not HAS_BASE_ENVIRONMENT, reason="this databricks-sdk has no base_environment"
-                ),
-            ),
+            ({"environment_key": "custom", "spec": {"base_environment": "/Workspace/envs/base.yml"}}, {"custom": None}),
         ],
     )
     def test_environment_version_override(self, environment: dict[str, Any], expected: dict[str, str | None]) -> None:
@@ -396,10 +389,6 @@ class TestSideEffects:
         assert power_bi == task(before, "refresh_powerbi").power_bi_task
         assert power_bi.refresh_after_update is True
 
-    @pytest.mark.skipif(
-        "filters" not in jobs.DashboardTask.__dataclass_fields__,
-        reason="this databricks-sdk has no DashboardTask.filters",
-    )
     def test_sanitise_keeps_dashboard_filters(self) -> None:
         settings = reporting_settings()
         template = task(settings, "dashboard").dashboard_task
@@ -917,12 +906,35 @@ class TestAddDependencies:
             {"pypi": {"package": "chispa"}},
         ]
 
-    def test_add_dependencies_uses_whl_for_wheel_paths(self) -> None:
-        wheel = "/Workspace/Shared/libs/helpers-0.1-py3-none-any.whl"
-        settings = add_dependencies(example_settings(), [wheel])
+    @pytest.mark.parametrize(
+        ("dependency", "library"),
+        [
+            (
+                "/Workspace/Shared/libs/helpers-0.1-py3-none-any.whl",
+                compute.Library(whl="/Workspace/Shared/libs/helpers-0.1-py3-none-any.whl"),
+            ),
+            (
+                "/Workspace/Users/user@example.com/libs/helpers-0.1-py3-none-any.whl",
+                compute.Library(whl="/Workspace/Users/user@example.com/libs/helpers-0.1-py3-none-any.whl"),
+            ),
+            (
+                "pkg @ https://host/pkg-1.0-py3-none-any.whl",
+                compute.Library(pypi=compute.PythonPyPiLibrary(package="pkg @ https://host/pkg-1.0-py3-none-any.whl")),
+            ),
+            (
+                "pkg[extra]@https://host/pkg-1.0-py3-none-any.whl",
+                compute.Library(
+                    pypi=compute.PythonPyPiLibrary(package="pkg[extra]@https://host/pkg-1.0-py3-none-any.whl")
+                ),
+            ),
+        ],
+        ids=["wheel path", "wheel path under a user folder", "direct reference", "direct reference without spaces"],
+    )
+    def test_add_dependencies_picks_the_library_type(self, dependency: str, library: compute.Library) -> None:
+        settings = add_dependencies(example_settings(), [dependency])
         [default] = settings.environments or []
-        assert default.spec is not None and default.spec.dependencies == [wheel]
-        assert task(settings, "classic").libraries == [compute.Library(whl=wheel)]
+        assert default.spec is not None and default.spec.dependencies == [dependency]
+        assert task(settings, "classic").libraries == [library]
 
     @pytest.mark.parametrize("dependency", ["./dist/*.whl[test]", "../dist/pkg-0.1-py3-none-any.whl", "dist/pkg.whl"])
     def test_add_dependencies_rejects_local_paths(self, dependency: str) -> None:
@@ -991,7 +1003,6 @@ class TestMergeEnvironments:
             merge_environments(settings, {"default": override})
         assert settings == example_settings(), "nothing changes before the error"
 
-    @pytest.mark.skipif(not HAS_BASE_ENVIRONMENT, reason="this databricks-sdk has no base_environment")
     def test_merge_environments_rejects_version_and_base_environment_together(self) -> None:
         base = {"base_environment": "/Workspace/envs/base.yml"}
         with pytest.raises(LakeflowError, match=r"environments\['default'\] would set both environment_version and"):
