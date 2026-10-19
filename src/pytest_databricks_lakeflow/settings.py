@@ -156,13 +156,90 @@ def sanitise(
         settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
     settings.max_concurrent_runs = 1
     if timeout is not None:
-        mirrored = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
-        if not settings.timeout_seconds or settings.timeout_seconds > mirrored:
-            settings.timeout_seconds = mirrored
+        _mirror_timeout(settings, timeout)
     settings.name = _trim(NAME_PREFIX + NEWLINES.sub(" ", name), MAX_NAME_BYTES)
     if description is not None:
         parts = [description, settings.description] if settings.description else [description]
         settings.description = _trim("\n\n".join(parts), MAX_DESCRIPTION_BYTES)
+    _add_tags(settings, tags)
+    return settings
+
+
+def _run_as(run_as: str | jobs.JobRunAs | None) -> jobs.JobRunAs | None:
+    if run_as is None or isinstance(run_as, jobs.JobRunAs):
+        return run_as
+    if "@" in run_as:
+        return jobs.JobRunAs(user_name=run_as)
+    return jobs.JobRunAs(service_principal_name=run_as)
+
+
+def _serverless(task: jobs.Task) -> bool:
+    runs_code = task.notebook_task or task.spark_python_task or task.python_wheel_task or task.spark_jar_task
+    on_warehouse = task.notebook_task and task.notebook_task.warehouse_id
+    return bool(runs_code) and not _on_cluster(task) and not on_warehouse
+
+
+def _on_cluster(task: jobs.Task) -> bool:
+    return bool(task.job_cluster_key or task.new_cluster or task.existing_cluster_id)
+
+
+def _pause_subscriptions(task: jobs.Task) -> None:
+    if task.dashboard_task and task.dashboard_task.subscription:
+        task.dashboard_task.subscription.paused = True
+    if task.sql_task and task.sql_task.alert:
+        task.sql_task.alert.pause_subscriptions = True
+
+
+def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
+    for env in settings.environments or []:
+        if env.environment_key == ENV_KEY:
+            continue
+        # Environment.base_environment only exists in recent databricks-sdk releases.
+        if env.spec and getattr(env.spec, "base_environment", None):
+            continue
+        if env.spec is None:
+            env.spec = compute.Environment.from_dict({})
+        env.spec.environment_version = version
+
+
+def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
+    for task in _with_nested(settings.tasks):
+        if task.job_cluster_key or task.new_cluster:
+            task.existing_cluster_id = cluster_id
+            task.job_cluster_key = None
+            task.new_cluster = None
+    settings.job_clusters = None
+
+
+def _single_node_clusters(settings: jobs.JobSettings) -> None:
+    clusters: list[tuple[str | None, compute.ClusterSpec]] = []
+    for job_cluster in settings.job_clusters or []:
+        if job_cluster.new_cluster:
+            clusters.append((job_cluster.job_cluster_key, job_cluster.new_cluster))
+    for task in _with_nested(settings.tasks):
+        if task.new_cluster:
+            clusters.append((task.task_key, task.new_cluster))
+    for key, cluster in clusters:
+        if cluster.data_security_mode in SHARED_ACCESS_MODES:
+            raise LakeflowError(
+                f"single_node cannot change cluster {key!r}: its data_security_mode is "
+                f"{cluster.data_security_mode.value}, and single node compute needs dedicated access mode. Set "
+                "data_security_mode to SINGLE_USER or DATA_SECURITY_MODE_DEDICATED, or leave single_node off."
+            )
+    for _, cluster in clusters:
+        cluster.num_workers = 0
+        cluster.autoscale = None
+        cluster.spark_conf = {**(cluster.spark_conf or {}), **SINGLE_NODE_CONF}
+        cluster.custom_tags = {**(cluster.custom_tags or {}), **SINGLE_NODE_TAGS}
+
+
+def _mirror_timeout(settings: jobs.JobSettings, timeout: timedelta) -> None:
+    mirrored = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+    if not settings.timeout_seconds or settings.timeout_seconds > mirrored:
+        settings.timeout_seconds = mirrored
+
+
+def _add_tags(settings: jobs.JobSettings, tags: Mapping[str, str]) -> None:
     required = {key: tag_value(value) for key, value in tags.items() if key not in ATTRIBUTION_TAGS}
     settings.tags = {**(settings.tags or {}), **required}
     if len(settings.tags) > MAX_TAGS:
@@ -180,7 +257,16 @@ def sanitise(
             dropped.append(key)
     if dropped:
         log.debug("Left out the tags %s, because the job already has %d tags", dropped, MAX_TAGS)
-    return settings
+
+
+def tag_value(value: str) -> str:
+    """Make a string acceptable as a job tag value: Latin-1, one line, at most 256 UTF-8 bytes."""
+    latin1 = "".join(c if ord(c) < 256 else "?" for c in NEWLINES.sub(" ", value))
+    return _trim(latin1, MAX_TAG_BYTES)
+
+
+def _trim(text: str, max_bytes: int) -> str:
+    return text.encode()[:max_bytes].decode(errors="ignore")
 
 
 def inject_test_marker(settings: jobs.JobSettings, nodeid: str) -> jobs.JobSettings:
@@ -200,13 +286,6 @@ def inject_test_marker(settings: jobs.JobSettings, nodeid: str) -> jobs.JobSetti
     marker = jobs.JobParameterDefinition(name=TEST_ID_PARAMETER, default=_trim(nodeid, MAX_PARAMETER_DEFAULT_BYTES))
     settings.parameters = [*kept, marker]
     return settings
-
-
-def _pause_subscriptions(task: jobs.Task) -> None:
-    if task.dashboard_task and task.dashboard_task.subscription:
-        task.dashboard_task.subscription.paused = True
-    if task.sql_task and task.sql_task.alert:
-        task.sql_task.alert.pause_subscriptions = True
 
 
 def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSettings:
@@ -276,18 +355,12 @@ def pipeline_params(
     return jobs.PipelineParams(full_refresh=full_refresh, **chosen)
 
 
-def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
-    for env in settings.environments or []:
-        if env.environment_key == ENV_KEY or (env.spec and getattr(env.spec, "base_environment", None)):
-            continue
-        if env.spec is None:
-            env.spec = compute.Environment.from_dict({})
-        env.spec.environment_version = version
-
-
 def _with_nested(tasks: Sequence[jobs.Task] | None) -> list[jobs.Task]:
-    tasks = list(tasks or [])
-    return [*tasks, *(t.for_each_task.task for t in tasks if t.for_each_task and t.for_each_task.task)]
+    result = list(tasks or [])
+    for task in list(result):
+        if task.for_each_task and task.for_each_task.task:
+            result.append(task.for_each_task.task)
+    return result
 
 
 def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
@@ -306,68 +379,17 @@ def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
     return [task for task in _with_nested(enabled) if task.run_job_task and not task.disabled]
 
 
-def _use_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
-    for task in _with_nested(settings.tasks):
-        if task.job_cluster_key or task.new_cluster:
-            task.existing_cluster_id = cluster_id
-            task.job_cluster_key = None
-            task.new_cluster = None
-    settings.job_clusters = None
-
-
-def _single_node_clusters(settings: jobs.JobSettings) -> None:
-    clusters = [(c.job_cluster_key, c.new_cluster) for c in settings.job_clusters or [] if c.new_cluster]
-    clusters += [(t.task_key, t.new_cluster) for t in _with_nested(settings.tasks) if t.new_cluster]
-    for key, cluster in clusters:
-        if cluster.data_security_mode in SHARED_ACCESS_MODES:
-            raise LakeflowError(
-                f"single_node cannot change cluster {key!r}: its data_security_mode is "
-                f"{cluster.data_security_mode.value}, and single node compute needs dedicated access mode. Set "
-                "data_security_mode to SINGLE_USER or DATA_SECURITY_MODE_DEDICATED, or leave single_node off."
-            )
-    for _, cluster in clusters:
-        _single_node(cluster)
-
-
-def _single_node(cluster: compute.ClusterSpec) -> None:
-    cluster.num_workers = 0
-    cluster.autoscale = None
-    cluster.spark_conf = {**(cluster.spark_conf or {}), **SINGLE_NODE_CONF}
-    cluster.custom_tags = {**(cluster.custom_tags or {}), **SINGLE_NODE_TAGS}
-
-
-def _run_as(run_as: str | jobs.JobRunAs | None) -> jobs.JobRunAs | None:
-    if run_as is None or isinstance(run_as, jobs.JobRunAs):
-        return run_as
-    if "@" in run_as:
-        return jobs.JobRunAs(user_name=run_as)
-    return jobs.JobRunAs(service_principal_name=run_as)
-
-
-def tag_value(value: str) -> str:
-    """Make a string acceptable as a job tag value: Latin-1, one line, at most 256 UTF-8 bytes."""
-    latin1 = "".join(c if ord(c) < 256 else "?" for c in NEWLINES.sub(" ", value))
-    return _trim(latin1, MAX_TAG_BYTES)
-
-
-def _trim(text: str, max_bytes: int) -> str:
-    return text.encode()[:max_bytes].decode(errors="ignore")
-
-
-def _serverless(task: jobs.Task) -> bool:
-    runs_code = task.notebook_task or task.spark_python_task or task.python_wheel_task or task.spark_jar_task
-    on_cluster = task.job_cluster_key or task.new_cluster or task.existing_cluster_id
-    on_warehouse = task.notebook_task and task.notebook_task.warehouse_id
-    return bool(runs_code) and not on_cluster and not on_warehouse
-
-
 def create_kwargs(settings: jobs.JobSettings) -> dict[str, Any]:
     """Get the settings fields that `jobs.create` accepts, leaving out `None` and empty lists."""
-    return {
-        f.name: value
-        for f in fields(settings)
-        if f.name in CREATE_PARAMETERS and (value := getattr(settings, f.name)) is not None and value != []
-    }
+    kwargs: dict[str, Any] = {}
+    for field in fields(settings):
+        if field.name not in CREATE_PARAMETERS:
+            continue
+        value = getattr(settings, field.name)
+        if value is None or value == []:
+            continue
+        kwargs[field.name] = value
+    return kwargs
 
 
 def check_params(job_key: str, settings: jobs.JobSettings, params: Mapping[str, str], allow_undeclared: bool) -> None:
@@ -393,12 +415,11 @@ def check_compute(settings: jobs.JobSettings) -> None:
         LakeflowError: If a Python script, Python wheel, JAR or dbt task, nested `for_each_task` tasks included, has no
             cluster and no `environment_key`.
     """
-    missing = [
-        task.task_key
-        for task in _with_nested(settings.tasks)
-        if (task.spark_python_task or task.python_wheel_task or task.spark_jar_task or task.dbt_task)
-        and not (task.job_cluster_key or task.new_cluster or task.existing_cluster_id or task.environment_key)
-    ]
+    missing: list[str] = []
+    for task in _with_nested(settings.tasks):
+        needs_environment = task.spark_python_task or task.python_wheel_task or task.spark_jar_task or task.dbt_task
+        if needs_environment and not _on_cluster(task) and not task.environment_key:
+            missing.append(task.task_key)
     if missing:
         raise LakeflowError(
             f"Tasks {missing} have no cluster and no environment_key. Serverless Python script, Python wheel, JAR "
@@ -435,8 +456,13 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
             selected |= _reachable(key, upstream)
         if entry.endswith("+"):
             selected |= _reachable(key, downstream)
-    needed = {dep for key in selected for dep in upstream[key] if dep in stubs}
-    needed |= {key for key in upstream if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected}
+    needed: set[str] = set()
+    stub_keys = set(stubs)
+    for key in selected:
+        needed |= upstream[key] & stub_keys
+    for key in upstream:
+        if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
+            needed.add(key)
     return [*only, *sorted(needed - selected)]
 
 
@@ -476,7 +502,9 @@ def inject_probes(
         )
     for target, value_keys in capture_task_values.items():
         _check_keys(target, value_keys)
-    probes = [_probe_task(target, value_keys, helpers) for target, value_keys in capture_task_values.items()]
+    probes: list[jobs.Task] = []
+    for target, value_keys in capture_task_values.items():
+        probes.append(_probe_task(target, value_keys, helpers))
     settings.tasks = [*(settings.tasks or []), *probes]
     _add_helper_compute(settings, helpers)
     return settings
@@ -525,7 +553,9 @@ def wrap_task(
     _check_keys(task_key, capture_task_values)
     target.depends_on = [jobs.TaskDependency(task_key=key) for key in upstream_task_values] or None
     stubs = [_stub_task(key, values, helpers) for key, values in upstream_task_values.items()]
-    probes = [_probe_task(task_key, capture_task_values, helpers)] if capture_task_values else []
+    probes = []
+    if capture_task_values:
+        probes.append(_probe_task(task_key, capture_task_values, helpers))
     settings.tasks = [*stubs, target, *probes]
     if stubs or probes:
         _add_helper_compute(settings, helpers)
@@ -602,14 +632,16 @@ def _add_helper_compute(settings: jobs.JobSettings, helpers: Helpers) -> None:
                 f"helpers_compute is {helpers.job_cluster_key!r}, but the job has no job cluster with "
                 f"that key. Available: {clusters}"
             )
-    elif not any(env.environment_key == ENV_KEY for env in settings.environments or []):
-        existing = [env.environment_key for env in settings.environments or []]
-        if len(existing) >= MAX_ENVIRONMENTS:
-            raise LakeflowError(
-                f"The job already has {len(existing)} environments, the most a job allows is {MAX_ENVIRONMENTS}: "
-                f"{existing}. One must go from the bundle job to make room for the helper "
-                f"environment {ENV_KEY!r}, or pass helpers_compute to run helper tasks on a job cluster."
-            )
-        spec = compute.Environment.from_dict({"environment_version": helpers.environment_version})
-        environment = jobs.JobEnvironment(environment_key=ENV_KEY, spec=spec)
-        settings.environments = [*(settings.environments or []), environment]
+        return
+    existing = [env.environment_key for env in settings.environments or []]
+    if ENV_KEY in existing:
+        return
+    if len(existing) >= MAX_ENVIRONMENTS:
+        raise LakeflowError(
+            f"The job already has {len(existing)} environments, the most a job allows is {MAX_ENVIRONMENTS}: "
+            f"{existing}. One must go from the bundle job to make room for the helper "
+            f"environment {ENV_KEY!r}, or pass helpers_compute to run helper tasks on a job cluster."
+        )
+    spec = compute.Environment.from_dict({"environment_version": helpers.environment_version})
+    environment = jobs.JobEnvironment(environment_key=ENV_KEY, spec=spec)
+    settings.environments = [*(settings.environments or []), environment]
