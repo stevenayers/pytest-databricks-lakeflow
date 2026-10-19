@@ -43,18 +43,31 @@ def _first_line(text: str, limit: int = 200) -> str:
     return line if len(line) <= limit else f"{line[: limit - 3]}..."
 
 
+def _last_exception_line(lines: Sequence[str]) -> tuple[str, str] | None:
+    # The last `Name: message` line of a trace names the exception that ended it.
+    for line in reversed(lines):
+        match = EXC_LINE.match(line)
+        if match and match["msg"] is not None:
+            return match["name"], match["msg"].strip()
+    return None
+
+
 def format_parameters(parameters: Mapping[str, str] | Sequence[str] | None) -> str:
     """Format resolved parameters as one line of JSON with sorted keys, or `""` when there are none.
 
     Each value is cut to its first line of at most 200 characters. Keys the plugin injects are left out.
     """
+    shown: dict[str, str] | list[str]
     if isinstance(parameters, Mapping):
-        shown: dict[str, str] | list[str] = {
-            key: _first_line(str(value)) for key, value in parameters.items() if not key.startswith(PREFIX)
-        }
+        shown = {}
+        for key, value in parameters.items():
+            if not key.startswith(PREFIX):
+                shown[key] = _first_line(str(value))
     else:
         shown = [_first_line(str(value)) for value in parameters or []]
-    return json.dumps(shown, sort_keys=True) if shown else ""
+    if not shown:
+        return ""
+    return json.dumps(shown, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -89,19 +102,20 @@ class TaskError:
         """
         if not error and not trace:
             return None
-        err = ANSI.sub("", error or "").strip("\n")
-        tr = ANSI.sub("", trace or "")
-        if err:
-            first, *rest = err.splitlines()
+        error_text = ANSI.sub("", error or "").strip("\n")
+        trace_text = ANSI.sub("", trace or "")
+        if error_text:
+            first, *rest = error_text.splitlines()
             match = EXC_LINE.match(first)
             if match:
-                lines = [match["msg"] or "", *(line for line in rest if not JAVA_FRAME.match(line))]
-                return cls(type=match["name"], message="\n".join(lines).strip(), trace=tr or err)
-        for line in reversed(tr.splitlines()):
-            match = EXC_LINE.match(line)
-            if match and match["msg"] is not None:
-                return cls(type=match["name"], message=match["msg"].strip(), trace=tr)
-        return cls(type=None, message=err or tr.strip(), trace=tr)
+                message_lines = [match["msg"] or ""]
+                message_lines += [line for line in rest if not JAVA_FRAME.match(line)]
+                return cls(type=match["name"], message="\n".join(message_lines).strip(), trace=trace_text or error_text)
+        last = _last_exception_line(trace_text.splitlines())
+        if last:
+            name, message = last
+            return cls(type=name, message=message, trace=trace_text)
+        return cls(type=None, message=error_text or trace_text.strip(), trace=trace_text)
 
     @property
     def root_cause(self) -> str | None:
@@ -120,13 +134,15 @@ class TaskError:
             match = CAUSED_BY.match(line)
             if match:
                 return match["cause"].strip()
-        if outer:
-            for line in reversed(lines):
-                match = EXC_LINE.match(line)
-                if match and match["msg"] is not None:
-                    msg = match["msg"].strip()
-                    return f"{match['name']}: {msg}" if msg else match["name"]
-        return None
+        if not outer:
+            return None
+        last = _last_exception_line(lines)
+        if last is None:
+            return None
+        name, message = last
+        if message:
+            return f"{name}: {message}"
+        return name
 
     @property
     def code(self) -> str | None:
@@ -141,7 +157,9 @@ class TaskError:
         return None
 
     def __str__(self) -> str:
-        return f"{self.type}: {self.message}" if self.type else self.message
+        if self.type:
+            return f"{self.type}: {self.message}"
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -339,11 +357,11 @@ class TaskRun:
         `None` for any other task or when the platform reported no state. An alert task succeeds whether or not the
         alert triggered, so assert on this rather than on `succeeded`.
         """
-        alert = self.alert_output
-        if alert is not None and alert.alert_state is not None:
-            return _enum(alert.alert_state)
-        legacy = self.sql_output.alert_output if self.sql_output else None
-        return _enum(legacy.alert_state) if legacy else None
+        if self.alert_output is not None and self.alert_output.alert_state is not None:
+            return _enum(self.alert_output.alert_state)
+        if self.sql_output is not None and self.sql_output.alert_output is not None:
+            return _enum(self.sql_output.alert_output.alert_state)
+        return None
 
     @property
     def output_json(self) -> object:
@@ -382,9 +400,12 @@ class TaskRun:
         return self.error.type.rsplit(".", 1)[-1] == exc_type.__name__
 
     def __repr__(self) -> str:
-        error = f", error={_first_line(str(self.error))!r}" if self.error else ""
-        params = f", params={self.parameters!r}" if self.error and self.parameters is not None else ""
-        return f"TaskRun({self.task_key!r}, {self.result_state}{error}{params}, {self.run_url})"
+        detail = ""
+        if self.error:
+            detail = f", error={_first_line(str(self.error))!r}"
+            if self.parameters is not None:
+                detail += f", params={self.parameters!r}"
+        return f"TaskRun({self.task_key!r}, {self.result_state}{detail}, {self.run_url})"
 
 
 @dataclass(frozen=True)
@@ -437,7 +458,7 @@ class JobRun:
         Injected and skipped tasks do not count, nor do tasks `EXCLUDED` because their `run_if` or if/else
         condition was not met.
         """
-        return bool(self.tasks) and not self._failing()
+        return bool(self.tasks) and not self._failing_tasks()
 
     @property
     def failed(self) -> bool:
@@ -447,12 +468,12 @@ class JobRun:
     @property
     def timed_out(self) -> bool:
         """Whether the parent run ended `TIMEDOUT` or any task in `tasks` timed out."""
-        return self.result_state == "TIMEDOUT" or any(t.timed_out for t in self.tasks.values())
+        return self.result_state == "TIMEDOUT" or any(task.timed_out for task in self.tasks.values())
 
     @property
     def executed_tasks(self) -> list[str]:
         """The sorted keys of the tasks in `tasks` whose `ran` is true."""
-        return sorted(key for key, t in self.tasks.items() if t.ran)
+        return sorted(key for key, task in self.tasks.items() if task.ran)
 
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.
@@ -467,14 +488,14 @@ class JobRun:
             KeyError: If the task was not part of the run. The message lists the available keys and says whether
                 the task was disabled in the job or skipped by `only`.
         """
-        if key not in self.tasks:
-            why = ""
-            if key in self.disabled_tasks:
-                why = f" Disabled in the job: {sorted(self.disabled_tasks)}."
-            elif key in self.skipped_tasks:
-                why = f" Skipped by only: {sorted(self.skipped_tasks)}."
-            raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{why}")
-        return self.tasks[key]
+        if key in self.tasks:
+            return self.tasks[key]
+        reason = ""
+        if key in self.disabled_tasks:
+            reason = f" Disabled in the job: {sorted(self.disabled_tasks)}."
+        elif key in self.skipped_tasks:
+            reason = f" Skipped by only: {sorted(self.skipped_tasks)}."
+        raise KeyError(f"No task {key!r} in run. Available: {sorted(self.tasks)}.{reason}")
 
     def branch_taken(self, key: str) -> bool:
         """Get the outcome of an if/else condition task.
@@ -490,12 +511,11 @@ class JobRun:
             LakeflowError: If the task is not a condition task, or the platform reported no outcome for it.
         """
         task = self.task(key)
-        outcome = task.condition_outcome
-        if outcome is None:
+        if task.condition_outcome is None:
             raise LakeflowError(
                 f"Task {key!r} is not a condition task or has no outcome; check its result_state ({task.result_state})"
             )
-        return outcome
+        return task.condition_outcome
 
     def raise_for_failure(self) -> JobRun:
         """Raise if the run did not succeed.
@@ -511,37 +531,55 @@ class JobRun:
         """
         if self.succeeded:
             return self
-        params = format_parameters(self.parameters)
-        lines = [self._repr(params=False), f"params: {params}"] if params else [repr(self)]
-        task_params = failing_parameters(self)
-        for t in self._failing():
-            cause = f" (root cause: {t.error.root_cause})" if t.error and t.error.root_cause else ""
-            lines.append(f"{t.task_key}: {t.error if t.error else t.result_state}{cause} {t.run_url}")
-            if t.task_key in task_params:
-                lines.append(f"  params: {task_params[t.task_key]}")
+        run_parameters = format_parameters(self.parameters)
+        # The job parameters go on a line of their own, so the first line leaves them out.
+        lines = [self._describe(show_parameters=not run_parameters)]
+        if run_parameters:
+            lines.append(f"params: {run_parameters}")
+        task_parameters = failing_parameters(self)
+        for task in self._failing_tasks():
+            outcome = str(task.error) if task.error else task.result_state
+            cause = ""
+            if task.error and task.error.root_cause:
+                cause = f" (root cause: {task.error.root_cause})"
+            lines.append(f"{task.task_key}: {outcome}{cause} {task.run_url}")
+            if task.task_key in task_parameters:
+                lines.append(f"  params: {task_parameters[task.task_key]}")
         raise LakeflowRunFailed("\n".join(lines), self)
 
-    def _failing(self) -> list[TaskRun]:
-        return [t for t in self.tasks.values() if not t.succeeded and t.result_state != "EXCLUDED"]
+    def _failing_tasks(self) -> list[TaskRun]:
+        return [task for task in self.tasks.values() if not task.succeeded and not task.excluded]
 
     def __repr__(self) -> str:
-        return self._repr(params=True)
+        return self._describe(show_parameters=True)
 
-    def _repr(self, *, params: bool) -> str:
+    def _describe(self, *, show_parameters: bool) -> str:
         failing = describe_failing(self)
-        shown = f"params={self.parameters!r}, " if params and failing and self.parameters else ""
-        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, {shown}failing={failing})"
+        parameters = ""
+        if show_parameters and failing and self.parameters:
+            parameters = f"params={self.parameters!r}, "
+        return f"JobRun({self.job_key!r}, {self.result_state}, {self.run_url}, {parameters}failing={failing})"
 
 
 def describe_failing(run: JobRun) -> list[str]:
     """Describe each failing task of `run` as `key: error`, with the error's first line or the result state."""
-    return [f"{t.task_key}: {_first_line(str(t.error)) if t.error else t.result_state}" for t in run._failing()]
+    described: list[str] = []
+    for task in run._failing_tasks():
+        if task.error:
+            described.append(f"{task.task_key}: {_first_line(str(task.error))}")
+        else:
+            described.append(f"{task.task_key}: {task.result_state}")
+    return described
 
 
 def failing_parameters(run: JobRun) -> dict[str, str]:
     """Format the resolved parameters of each failing task of `run` that has any, by task key."""
-    formatted = {t.task_key: format_parameters(t.parameters) for t in run._failing()}
-    return {key: text for key, text in formatted.items() if text}
+    formatted: dict[str, str] = {}
+    for task in run._failing_tasks():
+        text = format_parameters(task.parameters)
+        if text:
+            formatted[task.task_key] = text
+    return formatted
 
 
 def build_job_run(
@@ -576,26 +614,47 @@ def build_job_run(
     Returns:
         The run's outcome.
     """
-    by_key: dict[str, list[jobs.RunTask]] = {}
-    for task in run.tasks or []:
-        by_key.setdefault(task.task_key or "", []).append(task)
-    for tasks in by_key.values():
-        tasks.sort(key=lambda t: t.attempt_number or 0)
-    ran = [task for tasks in by_key.values() for task in tasks if has_output(task)]
-    known = dict(outputs or {})
-    known.update(fetch_outputs(ws, [task for task in ran if (task.run_id or 0) not in known]))
-    attempts = {
-        key: [_with_child_run(ws, _task_run(task, known.get(task.run_id or 0)), job_keys or {}) for task in tasks]
-        for key, tasks in by_key.items()
-    }
-    task_runs = {key: runs[-1] for key, runs in attempts.items()}
-    injected = {key: t for key, t in task_runs.items() if key.startswith(PREFIX) or key in stubs}
-    user = {key: t for key, t in task_runs.items() if key not in injected}
+    task_runs_by_key = _task_runs_by_key(run)
+    known_outputs = dict(outputs or {})
+    unread: list[jobs.RunTask] = []
+    for task_runs in task_runs_by_key.values():
+        for task_run in task_runs:
+            if has_output(task_run) and (task_run.run_id or 0) not in known_outputs:
+                unread.append(task_run)
+    known_outputs.update(fetch_outputs(ws, unread))
+
+    attempts: dict[str, list[TaskRun]] = {}
+    for key, task_runs in task_runs_by_key.items():
+        attempts[key] = []
+        for task_run in task_runs:
+            attempt = _task_run(task_run, known_outputs.get(task_run.run_id or 0))
+            attempts[key].append(_with_child_run(ws, attempt, job_keys or {}))
+
+    injected: dict[str, TaskRun] = {}
+    user: dict[str, TaskRun] = {}
+    for key, key_attempts in attempts.items():
+        if key.startswith(PREFIX) or key in stubs:
+            injected[key] = key_attempts[-1]
+        else:
+            user[key] = key_attempts[-1]
     for target, keys in (capture_task_values or {}).items():
         if target in user:
-            user[target] = _with_values(user[target], injected.get(f"{PROBE_PREFIX}{target}"), keys)
-    injected = {key: _with_attempts(t, attempts[key]) for key, t in injected.items()}
-    user = {key: _with_attempts(t, attempts[key]) for key, t in user.items()}
+            probe = injected.get(f"{PROBE_PREFIX}{target}")
+            user[target] = _with_values(user[target], probe, keys)
+    injected = {key: _with_attempts(task, attempts[key]) for key, task in injected.items()}
+    user = {key: _with_attempts(task, attempts[key]) for key, task in user.items()}
+
+    tasks: dict[str, TaskRun] = {}
+    skipped_tasks: dict[str, TaskRun] = {}
+    disabled_tasks: dict[str, TaskRun] = {}
+    for key, task in user.items():
+        if not task.disabled:
+            tasks[key] = task
+        elif key in disabled:
+            disabled_tasks[key] = task
+        else:
+            skipped_tasks[key] = task
+
     details = run.status.termination_details if run.status else None
     return JobRun(
         job_key=job_key,
@@ -606,18 +665,28 @@ def build_job_run(
         termination_code=_enum(details.code if details else None),
         termination_message=details.message if details else None,
         duration=duration(run.start_time, run.end_time),
-        tasks={key: t for key, t in user.items() if not t.disabled},
+        tasks=tasks,
         injected_tasks=injected,
-        skipped_tasks={key: t for key, t in user.items() if t.disabled and key not in disabled},
-        disabled_tasks={key: t for key, t in user.items() if t.disabled and key in disabled},
+        skipped_tasks=skipped_tasks,
+        disabled_tasks=disabled_tasks,
         parameters=_job_parameters(run.job_parameters),
         timing=Timing.from_run(run),
         effective_performance_target=_enum(run.effective_performance_target),
     )
 
 
+def _task_runs_by_key(run: jobs.Run) -> dict[str, list[jobs.RunTask]]:
+    # Every attempt of a task, in attempt order, keyed by task key in the order the run lists the tasks.
+    by_key: dict[str, list[jobs.RunTask]] = {}
+    for task_run in run.tasks or []:
+        by_key.setdefault(task_run.task_key or "", []).append(task_run)
+    for task_runs in by_key.values():
+        task_runs.sort(key=lambda t: t.attempt_number or 0)
+    return by_key
+
+
 def _with_child_run(ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, str]) -> TaskRun:
-    if task.child_run_id is None or task.result_state in NOT_RUN:
+    if task.child_run_id is None or not task.ran:
         return task
     try:
         child = ws.jobs.get_run(task.child_run_id, include_resolved_values=True)
@@ -637,16 +706,20 @@ def _with_attempts(last: TaskRun, attempts: list[TaskRun]) -> TaskRun:
 
 
 def _job_parameters(parameters: Sequence[jobs.JobParameter] | None) -> dict[str, str]:
-    return {
-        p.name: p.value if p.value is not None else p.default or ""
-        for p in parameters or []
-        if p.name and not p.name.startswith(PREFIX)
-    }
+    resolved: dict[str, str] = {}
+    for parameter in parameters or []:
+        if not parameter.name or parameter.name.startswith(PREFIX):
+            continue
+        if parameter.value is not None:
+            resolved[parameter.name] = parameter.value
+        else:
+            resolved[parameter.name] = parameter.default or ""
+    return resolved
 
 
 def has_output(task: jobs.RunTask) -> bool:
     """Whether a terminated task run has an output to read: every task run but a disabled one has."""
-    return _enum(_result_state(task)) != "DISABLED"
+    return _result_state(task) != "DISABLED"
 
 
 def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
@@ -667,27 +740,26 @@ def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[in
 
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
-    if output is None or _enum(_result_state(task)) in NOT_RUN:
+    if output is None or _result_state(task) in NOT_RUN:
         return None
     error = TaskError.from_output(output.error, output.error_trace)
-    return _first_line(str(error)) if error else None
+    if error is None:
+        return None
+    return _first_line(str(error))
 
 
 def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
     out = out or jobs.RunOutput()
-    state = _enum(_result_state(task))
-    details = task.status.termination_details if task.status else None
-    clean_room = out.clean_rooms_notebook_output
-    notebook = out.notebook_output
-    if (notebook is None or notebook.result is None) and clean_room and clean_room.notebook_output:
-        notebook = clean_room.notebook_output
     key = task.task_key or ""
-    truncated = [
-        what for what, cut in (("output", notebook and notebook.truncated), ("logs", out.logs_truncated)) if cut
-    ]
-    if truncated:
-        verb = "were" if len(truncated) > 1 else "was"
-        warnings.warn(f"The {' and '.join(truncated)} of task {key!r} {verb} cut at the 5 MB limit", stacklevel=2)
+    state = _result_state(task)
+    details = task.status.termination_details if task.status else None
+    notebook = _notebook_output(out)
+    output_truncated = bool(notebook and notebook.truncated)
+    logs_truncated = bool(out.logs_truncated)
+    _warn_when_truncated(key, output_truncated=output_truncated, logs_truncated=logs_truncated)
+    error = None
+    if state not in NOT_RUN:
+        error = TaskError.from_output(out.error, out.error_trace)
     return TaskRun(
         task_key=key,
         run_id=task.run_id or 0,
@@ -697,10 +769,10 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         run_url=task.run_page_url,
         duration=duration(task.start_time, task.end_time),
         output=notebook.result if notebook else None,
-        output_truncated=bool(notebook and notebook.truncated),
+        output_truncated=output_truncated,
         logs=out.logs or "",
-        logs_truncated=bool(out.logs_truncated),
-        error=None if state in NOT_RUN else TaskError.from_output(out.error, out.error_trace),
+        logs_truncated=logs_truncated,
+        error=error,
         attempt=task.attempt_number or 0,
         parameters=_parameters(task.resolved_values),
         timing=Timing.from_run(task),
@@ -713,13 +785,42 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None) -> TaskRun:
         run_job_output=out.run_job_output,
         child_run_id=out.run_job_output.run_id if out.run_job_output else None,
         dashboard_output=out.dashboard_output,
-        clean_rooms_notebook_output=clean_room,
+        clean_rooms_notebook_output=out.clean_rooms_notebook_output,
     )
 
 
+def _notebook_output(out: jobs.RunOutput) -> jobs.NotebookOutput | None:
+    # A clean room notebook task reports its exit value under `clean_rooms_notebook_output` instead.
+    notebook = out.notebook_output
+    if notebook is not None and notebook.result is not None:
+        return notebook
+    clean_room = out.clean_rooms_notebook_output
+    if clean_room and clean_room.notebook_output:
+        return clean_room.notebook_output
+    return notebook
+
+
+def _warn_when_truncated(key: str, *, output_truncated: bool, logs_truncated: bool) -> None:
+    cut: list[str] = []
+    if output_truncated:
+        cut.append("output")
+    if logs_truncated:
+        cut.append("logs")
+    if not cut:
+        return
+    verb = "were" if len(cut) > 1 else "was"
+    # stacklevel 3 attributes the warning to the caller of `_task_run`, which builds the whole run.
+    warnings.warn(f"The {' and '.join(cut)} of task {key!r} {verb} cut at the 5 MB limit", stacklevel=3)
+
+
 def _condition_outcome(condition: jobs.RunConditionTask | None) -> bool | None:
-    outcome = condition.outcome if condition else None
-    return {"true": True, "false": False}.get(outcome or "")
+    if condition is None:
+        return None
+    if condition.outcome == "true":
+        return True
+    if condition.outcome == "false":
+        return False
+    return None
 
 
 def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[str] | None:
@@ -731,12 +832,14 @@ def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[s
         return resolved.sql_task.parameters
     if resolved.python_wheel_task is not None:
         wheel = resolved.python_wheel_task
-        return wheel.named_parameters if wheel.named_parameters is not None else wheel.parameters
+        if wheel.named_parameters is not None:
+            return wheel.named_parameters
+        return wheel.parameters
     if resolved.run_job_task is not None:
         return resolved.run_job_task.job_parameters
-    for strings in (resolved.spark_jar_task, resolved.spark_python_task, resolved.spark_submit_task):
-        if strings is not None:
-            return strings.parameters
+    for positional in (resolved.spark_jar_task, resolved.spark_python_task, resolved.spark_submit_task):
+        if positional is not None:
+            return positional.parameters
     if resolved.dbt_task is not None:
         return resolved.dbt_task.commands
     return None
@@ -745,18 +848,21 @@ def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[s
 def _with_values(target: TaskRun, probe: TaskRun | None, keys: Sequence[str]) -> TaskRun:
     name = target.task_key
     if not target.ran:
-        why = {k: f"Task {name!r} did not run ({target.result_state}), so value {k!r} was not captured" for k in keys}
-        return replace(target, task_values=TaskValues({}, why), missing_task_values=list(keys))
+        reasons = {
+            key: f"Task {name!r} did not run ({target.result_state}), so value {key!r} was not captured" for key in keys
+        }
+        return replace(target, task_values=TaskValues({}, reasons), missing_task_values=list(keys))
     captured = _probe_output(probe)
     if isinstance(captured, str):
-        why = {k: f"Value {k!r} of task {name!r} was not captured: {captured}" for k in keys}
-        return replace(target, task_values=TaskValues({}, why), missing_task_values=list(keys))
+        reasons = {key: f"Value {key!r} of task {name!r} was not captured: {captured}" for key in keys}
+        return replace(target, task_values=TaskValues({}, reasons), missing_task_values=list(keys))
     values, missing = captured
-    why = {k: f"Task {name!r} never set value {k!r}" for k in missing}
-    return replace(target, task_values=TaskValues(values, why), missing_task_values=missing)
+    reasons = {key: f"Task {name!r} never set value {key!r}" for key in missing}
+    return replace(target, task_values=TaskValues(values, reasons), missing_task_values=missing)
 
 
 def _probe_output(probe: TaskRun | None) -> tuple[dict[str, object], list[str]] | str:
+    # The captured values and the keys the task never set, or a string saying why nothing was captured.
     if probe is None:
         return "its probe task was not part of the run"
     if not probe.succeeded:
@@ -770,17 +876,23 @@ def _probe_output(probe: TaskRun | None) -> tuple[dict[str, object], list[str]] 
         return f"probe task {probe.task_key} returned unreadable output{truncated}"
 
 
-def _result_state(task: jobs.RunTask) -> jobs.RunResultState | None:
-    return task.state.result_state if task.state else None
+def _result_state(task: jobs.RunTask) -> str | None:
+    return _enum(task.state.result_state if task.state else None)
 
 
 def _enum(value: Enum | str | None) -> str | None:
-    return value.value if isinstance(value, Enum) else value
+    if isinstance(value, Enum):
+        return value.value
+    return value
 
 
 def duration(start: int | None, end: int | None) -> timedelta:
-    return timedelta(milliseconds=end - start) if start and end and end >= start else timedelta(0)
+    if start and end and end >= start:
+        return timedelta(milliseconds=end - start)
+    return timedelta(0)
 
 
 def _millis(value: int | None) -> timedelta:
-    return timedelta(milliseconds=value) if value else timedelta(0)
+    if value:
+        return timedelta(milliseconds=value)
+    return timedelta(0)
