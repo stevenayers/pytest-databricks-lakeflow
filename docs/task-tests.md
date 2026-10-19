@@ -21,6 +21,7 @@ with lakeflow.task(
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
 - `run_as` chooses who the job runs as: `None` by default, which runs it as you, `"keep"` for the template's `run_as`, a user's email, a service principal's application id, or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity).
 - `children` and `extra_dependencies` work as for job tests, see [Jobs that run other jobs](job-tests.md#jobs-that-run-other-jobs) and [Test-only dependencies](job-tests.md#test-only-dependencies). The stub and probe tasks never get the dependencies.
+- `environments` changes the job's serverless environments as for job tests, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created).
 
 `setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data). The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
 
@@ -147,7 +148,7 @@ Each helper task costs 7 to 30 seconds of serverless compute, so a task test typ
 
 ## What a single-task job loses
 
-Only the target task is kept. On a shared job cluster, a task can import libraries that other tasks declared, and on its own it loses them. Declare every library on the task that needs it. Serverless tasks are unaffected, because their dependencies come from the environment named by their `environment_key`, and the job's `environments` are kept.
+Only the target task is kept. On a shared job cluster, a task can import libraries that other tasks declared, and on its own it loses them. Declare every library on the task that needs it. Serverless tasks are unaffected, because their dependencies come from the environment named by their `environment_key`, and the job's `environments` are kept. To give a serverless task a dependency it needs on its own, pass `environments` with the task's environment, such as `lakeflow.task("my_example_job.load", environments={"default": {"dependencies": ["/Volumes/main/libs/wheels/my_pkg-0.2.0-py3-none-any.whl", "requests"]}})`; `dependencies` replaces the environment's list, so name everything the task needs, or use `extra_dependencies` to append.
 
 ## Task tests with tables
 
