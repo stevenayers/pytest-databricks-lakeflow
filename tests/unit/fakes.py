@@ -12,6 +12,7 @@ from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -263,6 +264,9 @@ class FakeWorkspace:
         self.listed: list[workspace.ObjectInfo] = []
         self.deleted: list[str] = []
         self.modified: dict[str, int] = {}
+        self.object_ids: dict[str, int] = {}
+        self.upload_errors: dict[str, Exception] = {}
+        self._ids = itertools.count(5000)
 
     def mkdirs(self, path: str) -> None:
         self.folders.append(path)
@@ -271,14 +275,27 @@ class FakeWorkspace:
         parent = path.rsplit("/", 1)[0]
         if parent not in self.folders:
             raise NotFound(f"The parent folder ({parent}) does not exist.")
+        if path in self.upload_errors:
+            raise self.upload_errors[path]
         self.upload_calls.append(path)
         self.uploads[path] = {"content": content.decode(), **kwargs}
         self.objects.add(path)
+        self.object_ids.setdefault(path, next(self._ids))
 
     def get_status(self, path: str) -> SimpleNamespace:
         if path not in self.objects:
             raise NotFound(f"Path ({path}) doesn't exist.")
-        return SimpleNamespace(path=path, modified_at=self.modified.get(path))
+        return SimpleNamespace(
+            path=path,
+            modified_at=self.modified.get(path),
+            object_id=self.object_ids.get(path),
+            object_type=workspace.ObjectType.NOTEBOOK,
+        )
+
+    def download(self, path: str, *, format: workspace.ExportFormat | None = None) -> BytesIO:
+        if path not in self.uploads:
+            raise NotFound(f"Path ({path}) doesn't exist.")
+        return BytesIO(self.uploads[path]["content"].encode())
 
     def list(self, path: str, **kwargs: Any) -> Iterator[workspace.ObjectInfo]:
         """List the objects in `listed` directly inside the folder `path`."""

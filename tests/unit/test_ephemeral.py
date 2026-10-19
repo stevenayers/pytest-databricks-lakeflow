@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import compute, jobs
+from databricks.sdk.service.workspace import Language
 
 from pytest_databricks_lakeflow import ephemeral
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
@@ -2454,6 +2455,212 @@ class TestChildren:
         assert created["name"].startswith("[pytest]")
 
 
+DEBUG_FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow/debug"
+TRANSFORM_PATH = "/Workspace/Users/someone@example.com/.bundle/example/test/files/src/transform"
+HELPER_UPLOADS = [
+    "/Users/someone@example.com/.pytest-databricks-lakeflow/set_values",
+    "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+]
+FAILS_IN_WITH = """
+def test_job(lakeflow):
+    with lakeflow.job("my_job") as job:
+        job.run()
+        assert False, "boom"
+"""
+
+
+def queue_failed_transform(ws: FakeWorkspaceClient, state: str = "FAILED") -> None:
+    """Queue run 77, whose transform task (task run 7700) ends `state` with resolved parameters."""
+    ws.jobs.resolved[7700] = jobs.ResolvedValues(
+        notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7", "param1": "hello"})
+    )
+    ws.jobs.queue(make_run(77, {"transform": state}, "FAILED", "RUN_EXECUTION_ERROR"))
+
+
+def debug_uploads(ws: FakeWorkspaceClient) -> dict[str, dict[str, Any]]:
+    return {path: upload for path, upload in ws.workspace.uploads.items() if path.startswith(f"{DEBUG_FOLDER}/")}
+
+
+class TestDebugNotebook:
+    """`debug_notebook()` and `--lakeflow-debug-notebook`: a notebook that replays a task's resolved parameters."""
+
+    def test_debug_notebook_uploads_under_helpers_path(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_failed_transform(fake_ws)
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow, request):
+                with lakeflow.job("my_job") as job:
+                    job.run()
+                    notebook = job.debug_notebook("transform")
+                assert (notebook.task_key, notebook.run_id) == ("transform", 77)
+                assert str(notebook) == notebook.url
+                print("URL", notebook.url, notebook.path)
+                assert ("lakeflow_debug_notebook", notebook.url) in request.node.user_properties
+            """,
+            "-s",
+        )
+        result.assert_outcomes(passed=1)
+        path = f"{DEBUG_FOLDER}/my_job__transform__77"
+        assert list(debug_uploads(fake_ws)) == [path]
+        upload = fake_ws.workspace.uploads[path]
+        assert f"# MAGIC %run {TRANSFORM_PATH}" in upload["content"]
+        assert 'dbutils.widgets.text("row_count", "7")' in upload["content"]
+        assert "/jobs/runs/7700" in upload["content"], "the heading links the task run"
+        assert (upload["language"], upload["overwrite"]) == (Language.PYTHON, True)
+        result.stdout.fnmatch_lines([f"*URL {HOST}/#notebook/{fake_ws.workspace.object_ids[path]} {path}"])
+
+    @pytest.mark.parametrize(
+        ("task_key", "message"),
+        [
+            pytest.param(
+                "load",
+                "Task 'load' of 'my_job' is not a notebook task, so there is no notebook to run. "
+                "Notebook tasks: ['classic', 'extract', 'transform']",
+                id="wheel_task",
+            ),
+            pytest.param(
+                "nope",
+                "Job 'my_job' has no task 'nope'. Available: ['classic', 'extract', 'load', 'transform']",
+                id="unknown_task",
+            ),
+            pytest.param(
+                "git",
+                "Task 'git' of 'my_job' runs its notebook from Git (src/git), which %run cannot reach",
+                id="git_source",
+            ),
+        ],
+    )
+    def test_debug_notebook_rejects_non_notebook_tasks(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, task_key: str, message: str
+    ) -> None:
+        settings = example_settings()
+        if task_key == "git":
+            notebook = jobs.NotebookTask(notebook_path="src/git", source=jobs.Source.GIT)
+            settings.tasks = [*(settings.tasks or []), jobs.Task(task_key="git", notebook_task=notebook)]
+        fake_ws.jobs.settings[fake_cli.deployed["my_job"]] = settings
+        result = run_tests(
+            pytester,
+            f"""
+            import re
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                job = lakeflow.job("my_job")
+                with pytest.raises(LakeflowError, match=re.escape({message!r})):
+                    job.debug_notebook({task_key!r})
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert debug_uploads(fake_ws) == {}
+
+    def test_debug_notebook_needs_resolved_parameters(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_failed_transform(fake_ws, "UPSTREAM_FAILED")
+        result = run_tests(
+            pytester,
+            """
+            import re
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.run()
+                    message = "Task 'transform' did not run in run 77 (UPSTREAM_FAILED), so it has no resolved"
+                    with pytest.raises(LakeflowError, match=re.escape(message) + " parameters$"):
+                        job.debug_notebook("transform")
+                    with pytest.raises(KeyError, match="extract"):
+                        job.debug_notebook("extract")
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert debug_uploads(fake_ws) == {}
+
+    def test_debug_notebook_before_any_run_fails_clearly(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    message = "Job 'my_job' has not run yet, so there are no resolved parameters to replay"
+                    with pytest.raises(LakeflowError, match=message):
+                        job.debug_notebook("transform")
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_debug_notebook_flag_writes_for_failed_tests(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_failed_transform(fake_ws)
+        result = run_tests(pytester, FAILS_IN_WITH, "--lakeflow-debug-notebook", "--junitxml=report.xml")
+        result.assert_outcomes(failed=1)
+        path = f"{DEBUG_FOLDER}/my_job__transform__77"
+        assert list(debug_uploads(fake_ws)) == [path]
+        url = f"{HOST}/#notebook/{fake_ws.workspace.object_ids[path]}"
+        result.stdout.fnmatch_lines(["*- lakeflow -*", f"lakeflow_debug_notebook: {url}"])
+        assert f'<property name="lakeflow_debug_notebook" value="{url}"' in (pytester.path / "report.xml").read_text()
+
+    @pytest.mark.parametrize(
+        ("source", "states", "flags"),
+        [
+            pytest.param(FAILS_IN_WITH, {"transform": "FAILED"}, [], id="without_the_flag"),
+            pytest.param(
+                'def test_job(lakeflow):\n    with lakeflow.job("my_job") as job:\n        assert job.run().failed\n',
+                {"transform": "FAILED"},
+                ["--lakeflow-debug-notebook"],
+                id="passing_test",
+            ),
+            pytest.param(FAILS_IN_WITH, {"transform": "SUCCESS"}, ["--lakeflow-debug-notebook"], id="successful_run"),
+            pytest.param(FAILS_IN_WITH, {"load": "FAILED"}, ["--lakeflow-debug-notebook"], id="wheel_task_failed"),
+        ],
+    )
+    def test_nothing_is_written_without_a_failed_notebook_task_in_a_failed_test(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        source: str,
+        states: dict[str, str],
+        flags: list[str],
+    ) -> None:
+        fake_ws.jobs.resolved[7700] = jobs.ResolvedValues(
+            notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
+        )
+        fake_ws.jobs.queue(make_run(77, states, "FAILED", "RUN_EXECUTION_ERROR"))
+        result = run_tests(pytester, source, *flags)
+        result.stdout.no_fnmatch_line("*lakeflow_debug_notebook*")
+        result.stdout.no_fnmatch_line("*debug notebook*")
+        assert fake_ws.workspace.upload_calls == HELPER_UPLOADS
+
+    def test_debug_notebook_flag_does_not_fail_teardown(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_failed_transform(fake_ws)
+        fake_ws.workspace.upload_errors[f"{DEBUG_FOLDER}/my_job__transform__77"] = PermissionDenied("no write access")
+        result = run_tests(pytester, FAILS_IN_WITH, "--lakeflow-debug-notebook")
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines(
+            ["*Could not write a debug notebook for task 'transform' of run 77: no write access"]
+        )
+        result.stdout.fnmatch_lines(["*Keeping job 1001 from my_job*"])
+        assert "AssertionError: boom" in result.stdout.str()
+
+
 class TestPublicApi:
     """The package exports and the shape of `EphemeralJob.run`."""
 
@@ -2472,6 +2679,7 @@ class TestPublicApi:
             "LakeflowRunFailed",
             "RunHandle",
             "PipelineUpdate",
+            "DebugNotebook",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__

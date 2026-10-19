@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
+from databricks.sdk.service.workspace import ExportFormat, ObjectType
 
 from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session
 from pytest_databricks_lakeflow.results import serialise
@@ -126,6 +127,27 @@ def test_raise_for_failure_names_the_permission_error(forbidden_run: JobRun) -> 
     assert excinfo.value.run is forbidden_run
     assert "PermissionError" in str(excinfo.value)
     assert "transform" in str(excinfo.value)
+
+
+@pytest.mark.xdist_group("forbidden_run")
+def test_debug_notebook_is_uploaded(lakeflow: Lakeflow, forbidden_run: JobRun) -> None:
+    # A job that is never run is never created, so this replays the shared run without a run of its own.
+    job = lakeflow.job("my_example_job")
+    notebook = job.debug_notebook("transform", forbidden_run)
+    try:
+        status = lakeflow.ws.workspace.get_status(notebook.path)
+        assert status.object_type == ObjectType.NOTEBOOK
+        assert notebook.url == f"{lakeflow.ws.config.host}/#notebook/{status.object_id}"
+        assert notebook.path.endswith(
+            f"/.pytest-databricks-lakeflow/debug/my_example_job__transform__{forbidden_run.run_id}"
+        )
+        source = lakeflow.ws.workspace.download(notebook.path, format=ExportFormat.SOURCE).read().decode()
+        assert 'dbutils.widgets.text("param1", "forbidden")' in source
+        assert 'dbutils.widgets.text("row_count", "7")' in source
+        assert "# MAGIC %run /Workspace/" in source
+        assert source.rstrip().endswith("/src/notebooks/transform")
+    finally:
+        lakeflow.ws.workspace.delete(notebook.path)
 
 
 def test_root_cause_follows_the_exception_chain(lakeflow: Lakeflow) -> None:

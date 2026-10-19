@@ -31,6 +31,9 @@ USES_LAKEFLOW = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
 USES_SCHEMA = "def test_schema(lakeflow):\n    with lakeflow.schema():\n        pass\n"
 FAILING_JOB = "def test_{0}(lakeflow):\n    lakeflow.job('my_job').create()\n    assert False\n"
 CREATES_JOBS = "def test_{0}(lakeflow):\n    with lakeflow.job('my_job'):\n        pass\n"
+FAILED_RUN = (
+    "def test_{0}(lakeflow):\n    with lakeflow.job('my_job') as job:\n        job.run()\n        assert False\n"
+)
 SWEEP_HINT = "hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours"
 VARIABLES_FIXTURE = """
 
@@ -49,6 +52,23 @@ def make_client(profile):
     ws.jobs.start_ids_at(1000 * (2 + int(os.environ["PYTEST_XDIST_WORKER"][2:])))
     return ws
 """
+XDIST_FAILED_TRANSFORM = """
+
+from databricks.sdk.service import jobs
+
+from fakes import make_run
+
+
+def make_client(profile):
+    ws = FakeWorkspaceClient()
+    ws.jobs.add(example_settings())
+    parameters = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
+    ws.jobs.resolved[7700] = jobs.ResolvedValues(notebook_task=parameters)
+    # Terminated at the first poll, because the workers poll at the plugin's real interval.
+    for _ in range(2):
+        ws.jobs.queue_polls([make_run(77, {"transform": "FAILED"}, "FAILED")])
+    return ws
+"""
 
 
 def uses_lakeflow(*names: str) -> str:
@@ -57,6 +77,12 @@ def uses_lakeflow(*names: str) -> str:
 
 def leaves_runs_active(runs: str) -> str:
     return USES_LAKEFLOW.format("leak") + f"    lakeflow.active_runs.update({runs})\n"
+
+
+def queue_failed_transform(ws: FakeWorkspaceClient) -> None:
+    parameters = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
+    ws.jobs.resolved[7700] = jobs.ResolvedValues(notebook_task=parameters)
+    ws.jobs.queue(make_run(77, {"transform": "FAILED"}, "FAILED"))
 
 
 def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
@@ -628,3 +654,22 @@ class TestTerminalSummary:
         urls = [line for line in result.stdout.lines if line.startswith(f"  {HOST}/jobs/")]
         assert len(urls) == 2
         assert len(set(urls)) == 2
+
+    def test_lists_debug_notebooks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        queue_failed_transform(fake_ws)
+        pytester.makepyfile(FAILED_RUN.format("failed"))
+        result = pytester.runpytest("--lakeflow-debug-notebook")
+        result.assert_outcomes(failed=1)
+        path = f"{FOLDER}/debug/my_job__transform__77"
+        url = f"{HOST}/#notebook/{fake_ws.workspace.object_ids[path]}"
+        result.stdout.fnmatch_lines(
+            ["*= lakeflow =*", "lakeflow: 1 job kept", "*", "lakeflow: 1 debug notebook written", f"  {url}"]
+        )
+
+    def test_xdist_controller_summarises_debug_notebooks(self, pytester: pytest.Pytester) -> None:
+        pytest.importorskip("xdist")
+        make_xdist_conftest(pytester, XDIST_FAILED_TRANSFORM)
+        pytester.makepyfile(FAILED_RUN.format("a") + "\n" + FAILED_RUN.format("b"))
+        result = pytester.runpytest("-n", "2", "--lakeflow-debug-notebook")
+        result.assert_outcomes(failed=2)
+        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 2 debug notebooks written", f"  {HOST}/#notebook/*"])

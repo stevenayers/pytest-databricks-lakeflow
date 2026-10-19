@@ -104,6 +104,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="DIR",
         help="Write each test's runs to DIR: a report.json per test, with raw logs and exported notebooks.",
     )
+    group.addoption(
+        "--lakeflow-debug-notebook",
+        action="store_true",
+        dest="lakeflow_debug_notebook",
+        help="When a test fails, write a notebook for each failed notebook task of its job's last run, which sets the "
+        "task's resolved parameters as widgets and runs the task's notebook.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -131,6 +138,7 @@ def pytest_configure(config: pytest.Config) -> None:
         keep_ttl=_keep_ttl(config),
         destroy=config.getoption("lakeflow_destroy"),
         report_dir=report_dir,
+        debug_notebook=config.getoption("lakeflow_debug_notebook"),
     )
     config.stash[STATE] = state
     activate(state)
@@ -273,6 +281,7 @@ def _report_to_controller(workeroutput: dict[str, Any], state: SessionState) -> 
     workeroutput["lakeflow_deployed"] = state.deployed
     workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
     workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
+    workeroutput["lakeflow_debug_notebooks"] = state.debug_notebooks
     workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
     workeroutput["lakeflow_sweep_dry_run"] = state.sweep_dry_run
 
@@ -299,6 +308,7 @@ def pytest_testnodedown(node: Any, error: object) -> None:
         state.deployed.append((root, target, profile, tuple(tuple(pair) for pair in variables)))
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
+    state.debug_notebooks.extend(output.get("lakeflow_debug_notebooks", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
     if output.get("lakeflow_sweep_dry_run") is not None:
         state.sweep_dry_run = output["lakeflow_sweep_dry_run"]
@@ -308,7 +318,8 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: p
     state = config.stash.get(STATE, None)
     if state is None or hasattr(config, "workerinput"):
         return
-    if not (state.kept_jobs or state.kept_schemas or state.cancelled_runs or state.sweep_dry_run is not None):
+    summarised = (state.kept_jobs, state.kept_schemas, state.debug_notebooks, state.cancelled_runs)
+    if not any(summarised) and state.sweep_dry_run is None:
         return
     terminalreporter.write_sep("=", "lakeflow")
     if state.sweep_dry_run is not None:
@@ -318,6 +329,10 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: p
             terminalreporter.write_line(f"lakeflow: {_count(len(names), noun)} kept")
             for name in names:
                 terminalreporter.write_line(f"  {name}")
+    if state.debug_notebooks:
+        terminalreporter.write_line(f"lakeflow: {_count(len(state.debug_notebooks), 'debug notebook')} written")
+        for url in state.debug_notebooks:
+            terminalreporter.write_line(f"  {url}")
     if state.cancelled_runs:
         terminalreporter.write_line(f"lakeflow: {_count(state.cancelled_runs, 'run')} cancelled at session end")
     if state.kept_jobs:

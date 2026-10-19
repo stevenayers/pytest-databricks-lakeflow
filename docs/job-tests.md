@@ -678,6 +678,30 @@ A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pyt
 
 Every kept job and schema is listed in a `lakeflow` block at the end of the run, with a hint to run `pytest --lakeflow-sweep` when jobs were kept, so you do not need `--log-cli-level` to find them.
 
+### Reproduce a failed notebook task
+
+`job.debug_notebook("transform")` writes a notebook to your workspace that reproduces a notebook task of the job's last run: a first cell sets the task's resolved parameters as text widgets, and a second cell runs the task's notebook with `%run`. Open it, change a widget if you like, and run all cells to step through the failure on interactive compute. Pass `run=` to replay an earlier run of the same job.
+
+```python
+def test_transform(lakeflow):
+    with lakeflow.job("my_example_job", params={"param1": "forbidden"}) as job:
+        run = job.run()
+        notebook = job.debug_notebook("transform")
+        print(notebook.url)  # also in the test report as lakeflow_debug_notebook
+        assert run.succeeded
+```
+
+It returns a `DebugNotebook` with the notebook's `path` and `url`. The notebook goes to `<helpers_path>/debug/<job key>__<task key>__<run id>`, replacing one written earlier for the same run, and stays there until you delete it. It raises `LakeflowError` for a task that is not a notebook task, a notebook that runs from Git, a job that has not run, or a task that did not run in that run.
+
+`pytest --lakeflow-debug-notebook` writes one for every notebook task that failed in the last run of each job of a failed test, when the job closes. Each URL goes to the test's `lakeflow` report section and JUnit XML as `lakeflow_debug_notebook`, and the terminal summary lists them all. A test that passes, or fails with a run whose notebook tasks all succeeded, writes nothing, and an error while writing is logged as a warning without failing the teardown.
+
+The notebook replays the parameters, not the run:
+
+- A notebook that reads upstream task values with `dbutils.jobs.taskValues.get()` raises `TypeError` outside a job unless it passes `debugValue=`, as in `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path", debugValue="/Volumes/example/raw/landing")`.
+- `%run` runs the notebook of the deployed test target, so a redeploy changes what it runs, and `--lakeflow-destroy` removes it.
+- A text widget holds at most 2048 bytes. A longer value is written in full to a `parameters` dict in the first cell, and its widget holds a truncated copy, which is what the notebook reads.
+- In CI with a service principal, the notebooks land in the service principal's home folder. Set `helpers_path` to a `/Shared/...` folder so engineers can open them.
+
 ## Jobs that run other jobs
 
 The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled and not inside a disabled `for_each_task` loop, naming the task, the job and the child's job id. The job is still created.

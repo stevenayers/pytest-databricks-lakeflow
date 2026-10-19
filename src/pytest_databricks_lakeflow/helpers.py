@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
+import posixpath
 import string
 import textwrap
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
@@ -87,6 +89,18 @@ for __pytest_statement in __pytest_statements:
 dbutils.notebook.exit(json.dumps({{"statements": len(__pytest_statements)}}))
 """
 NOTEBOOK_MARKER = "# Databricks notebook source"
+CELL_SEPARATOR = "# COMMAND ----------"
+DEBUG_FOLDER = "debug"
+# dbutils.widgets.text refuses a longer default with DefaultValueIsTooLong ("longer than 2048 bytes").
+WIDGET_LIMIT_BYTES = 2048
+DEBUG_HINT = (
+    "# Edit the widgets above, then run all cells. dbutils.jobs.taskValues.get() raises outside a job\n"
+    "# unless the notebook passes debugValue=."
+)
+LONG_VALUES_HINT = (
+    "# Values longer than the 2048 bytes a text widget holds, in full. Their widgets hold a truncated copy, which is\n"
+    "# what the notebook reads."
+)
 
 LifecycleStep = Callable[..., object] | Sequence[str] | Path
 
@@ -255,3 +269,52 @@ def upload_lifecycle(ws: WorkspaceClient, folder: str, role: str, source: str, u
         ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
         uploaded.add(path)
     return path
+
+
+def debug_notebook_source(notebook_path: str, parameters: Mapping[str, str], *, heading: str) -> str:
+    """Build a notebook that sets `parameters` as text widgets, then runs `notebook_path` with `%run`.
+
+    Widgets set in the caller reach the notebook that `%run` runs. Each name and value is written with `json.dumps`,
+    which gives a Python string literal for any text, so a value holding `{{`, quotes or newlines arrives unchanged.
+    A value longer than a text widget takes is written in full to a `parameters` dict, and its widget gets the
+    longest prefix that fits.
+
+    Args:
+        notebook_path: The workspace path of the task's notebook.
+        parameters: The task's resolved parameters, in the order the platform returned them.
+        heading: A comment line that says where the parameters came from.
+
+    Returns:
+        The notebook's source, in the SOURCE format.
+    """
+    lines = [NOTEBOOK_MARKER, f"# {heading}", DEBUG_HINT]
+    long_values = {key: value for key, value in parameters.items() if len(value.encode()) > WIDGET_LIMIT_BYTES}
+    if long_values:
+        lines += [LONG_VALUES_HINT, f"parameters = {json.dumps(long_values)}"]
+    for key, value in parameters.items():
+        lines.append(f"dbutils.widgets.text({json.dumps(key)}, {json.dumps(_widget_value(value))})")
+    lines += ["", CELL_SEPARATOR, "", f"# MAGIC %run {notebook_path}", ""]
+    return "\n".join(lines)
+
+
+def _widget_value(value: str) -> str:
+    """The longest prefix of `value` that a text widget takes, cut at a character boundary."""
+    return value.encode()[:WIDGET_LIMIT_BYTES].decode(errors="ignore")
+
+
+def upload_notebook(ws: WorkspaceClient, path: str, source: str) -> str:
+    """Upload a Python notebook, replacing any at `path`, and creating its folder first.
+
+    Args:
+        ws: The workspace client.
+        path: The notebook's workspace path.
+        source: The notebook's source, in the SOURCE format.
+
+    Returns:
+        The notebook's page in the workspace, `<host>/#notebook/<object id>`.
+    """
+    ws.workspace.mkdirs(posixpath.dirname(path))
+    ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
+    # The documented notebook URL names the notebook by its object id, which the upload does not return.
+    object_id = ws.workspace.get_status(path).object_id
+    return f"{ws.config.host}/#notebook/{object_id}"

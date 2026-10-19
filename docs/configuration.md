@@ -76,6 +76,7 @@ These apply to one pytest run and win over the matching arguments.
 | `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete. |
 | `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file, relative to the directory pytest was started in. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
+| `--lakeflow-debug-notebook` | When a test fails, write a notebook for each notebook task that failed in the last run of each of its jobs, which sets the task's resolved parameters as widgets and runs the task's notebook. See [Reproduce a failed notebook task](job-tests.md#reproduce-a-failed-notebook-task). |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`, relative to the directory pytest was invoked from: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](#report-directory). |
 
 ### Sweeping leftovers
@@ -207,12 +208,13 @@ Each test's job and run coordinates are appended to `item.user_properties`, so t
 | `lakeflow_failing` | when a run fails | each failing task as `key: error`, with the error's first line, joined by `; ` |
 | `lakeflow_params` | when a run fails and has job parameters | the run's job parameters as one line of JSON with sorted keys, such as `{"date": "2026-10-01"}` |
 | `lakeflow_task_params` | when a run fails and a failing task reported resolved parameters | one JSON object of each such failing task's parameters, by task key |
+| `lakeflow_debug_notebook` | when `debug_notebook()` or `--lakeflow-debug-notebook` writes a notebook | the notebook's page in the workspace |
 
 A job that runs more than once adds a set of run properties for each run. `lakeflow_failing`, `lakeflow_params` and `lakeflow_task_params` are added for failed runs only, also when the test expects the failure. Each parameter value is cut to its first line, at most 200 characters, and the parameters the plugin injects are left out.
 
 The same lines are attached as a `lakeflow` section to the setup, call and teardown reports of the test, so a job created in a fixture whose setup fails still shows its URL in the error. The task state lines of every run follow the property lines in that section. They are recorded as they are logged, so a run that raises `LakeflowTimeout` still shows what its tasks did before the deadline. The section is shown for a failed test, and for every test with `-rA`. A test that fails in both call and teardown shows the section twice. In the section of a failed report, each failing task with an exported notebook adds the first code line of the cell that failed and the last 50 lines of the notebook's `stdout`, see [Read what a notebook printed](job-tests.md#read-what-a-notebook-printed).
 
-At the end of the session, a `lakeflow` block in the terminal summary lists every kept job with its URL, every kept schema, and the number of runs cancelled at session end, followed by a reminder of `--lakeflow-sweep` when jobs were kept:
+At the end of the session, a `lakeflow` block in the terminal summary lists every kept job with its URL, every kept schema, every debug notebook written, and the number of runs cancelled at session end, followed by a reminder of `--lakeflow-sweep` when jobs were kept:
 
 ```text
 =================================== lakeflow ===================================
@@ -221,11 +223,13 @@ lakeflow: 2 jobs kept
   https://adb-123.azuredatabricks.net/jobs/1002
 lakeflow: 1 schema kept
   dev_sandbox.pytest_ab12cd34_9f0e1d2c
+lakeflow: 1 debug notebook written
+  https://adb-123.azuredatabricks.net/#notebook/4096
 lakeflow: 1 run cancelled at session end
 hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours
 ```
 
-It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing, cancelled nothing and ran no sweep dry run prints no block. A sweep dry run adds its list at the top of the block, see [sweeping leftovers](#sweeping-leftovers).
+It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing, wrote no debug notebook, cancelled nothing and ran no sweep dry run prints no block. A sweep dry run adds its list at the top of the block, see [sweeping leftovers](#sweeping-leftovers).
 
 ### Report directory
 
