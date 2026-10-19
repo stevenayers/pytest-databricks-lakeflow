@@ -150,6 +150,14 @@ class TestWrapTask:
         with pytest.raises(LakeflowError, match=message):
             wrap_task(example_settings(), task_key, upstream, [], HELPERS)
 
+    def test_rejects_any_reference_to_a_task_left_out(self) -> None:
+        settings = example_settings()
+        transform = (settings.tasks or [])[1]
+        assert transform.notebook_task is not None
+        transform.notebook_task.base_parameters = {"upstream": "{{tasks.extract.result_state}}"}
+        with pytest.raises(LakeflowError, match=r"refers to task values of \['extract'\]"):
+            wrap_task(settings, "transform", {}, [], HELPERS)
+
 
 class TestStubUpstream:
     """`stub_upstream` replaces the named tasks of a whole job with stubs, in place."""
