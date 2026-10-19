@@ -38,6 +38,13 @@ LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<cat
 
 `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, passed as the bundle variable `warehouse_id`; `test_sql.py` skips when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
 
+`tests/integration/test_classic.py` is skipped unless `LAKEFLOW_CLASSIC=1` is set as well. Its bundle runs on a classic job cluster (`Standard_D4s_v5`, `SINGLE_USER` access mode, no cluster policy), which takes five to ten minutes to start, and it checks `single_node=True` against the Jobs API and the cluster's reported `spark.master`. Run it on its own when you change the compute overrides:
+
+```bash
+LAKEFLOW_INTEGRATION=1 LAKEFLOW_CLASSIC=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
+    uv run pytest tests/integration/test_classic.py --lakeflow-sweep
+```
+
 ### Bundles
 
 Each use case gets its own bundle, so a bundle only holds the jobs and tasks its tests need:
@@ -59,10 +66,15 @@ tests/integration/
             resources/*.job.yml
             src/queries/*.sql
         branches/                # name: lakeflow_branches, an if/else condition job
+        classic/                 # name: lakeflow_classic, one job on a classic job cluster (needs LAKEFLOW_CLASSIC=1)
+            databricks.yml
+            resources/*.job.yml
+            src/notebooks/*.py
     test_example.py              # one module per bundle, named after it
     test_run_job.py              # child_run and the children= option against the run_job bundle
     test_sql.py
     test_branches.py
+    test_classic.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
