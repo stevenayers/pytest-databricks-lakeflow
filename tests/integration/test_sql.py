@@ -19,7 +19,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from pytest_databricks_lakeflow import JobRun, Lakeflow, Stub
+from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, Stub
 
 from .conftest import lakeflow_for
 
@@ -119,6 +119,15 @@ def test_output_references_resolve_to_the_query_results(sql_run: JobRun) -> None
     assert row == {"n": "1", "m": "", "d": "1.5", "day": "2026-01-01", "b": "true"}
     assert parameters["row"] == json.dumps(row, separators=(",", ":"))
     assert json.loads(parameters["rows"]) == [row]
+
+
+def test_output_references_to_left_out_tasks_are_refused(lakeflow: Lakeflow) -> None:
+    # The platform fails such a run with INVALID_RUN_CONFIGURATION "Failed to resolve references: Cannot access output
+    # from task 'query' because the task was skipped.", so the plugin refuses it before the run starts.
+    with lakeflow.job("sql_job") as job:
+        with pytest.raises(LakeflowError, match=r"Task 'use_results' refers to the output of \['query', 'types'\]"):
+            job.run(only=["use_results"])
+        assert job.runs == []
 
 
 def test_stubbed_outputs_replace_the_references(lakeflow: Lakeflow) -> None:

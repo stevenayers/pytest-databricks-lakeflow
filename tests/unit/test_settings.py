@@ -778,6 +778,22 @@ class TestSelect:
         transform.notebook_task.base_parameters = {"upstream": f"{{{{tasks.extract.{field}}}}}"}
         check_references(settings, {"transform"}, set())
 
+    def test_check_references_refuses_output_references_to_a_left_out_task(self) -> None:
+        # Probed on the sql bundle: the platform fails such a run with INVALID_RUN_CONFIGURATION "Failed to resolve
+        # references: Cannot access output from task 'query' because the task was skipped."
+        settings = example_settings()
+        transform = task(settings, "transform")
+        assert transform.notebook_task is not None
+        transform.notebook_task.base_parameters = {"row": "{{tasks.extract.output.first_row}}"}
+        message = (
+            "Task 'transform' refers to the output of ['extract'], which only leaves out, so the platform could not "
+            "resolve it. Select them in only, or stub them with Stub(outputs=...) in upstream_task_values on job()."
+        )
+        with pytest.raises(LakeflowError) as excinfo:
+            check_references(settings, {"transform"}, set())
+        assert str(excinfo.value) == message
+        check_references(settings, {"transform", "extract"}, set())
+
     def test_check_references_counts_only_the_stubs_that_run(self) -> None:
         settings = example_settings()
         load = task(settings, "load")
@@ -862,14 +878,21 @@ class TestDisableAndRunJobTasks:
         assert found.task_key == "trigger_child"
         assert found.run_job_task is not None and found.run_job_task.job_id == 123
 
-    def test_run_job_tasks_skips_disabled_tasks_and_tasks_in_disabled_loops(self) -> None:
+    def test_run_job_tasks_skips_disabled_tasks_their_dependants_and_tasks_in_disabled_loops(self) -> None:
         settings = parent_settings()
         nested = jobs.Task(task_key="each_child", run_job_task=jobs.RunJobTask(job_id=456))
-        loop = jobs.Task(task_key="loop", for_each_task=jobs.ForEachTask(inputs="[1, 2]", task=nested))
+        loop = jobs.Task(
+            task_key="loop",
+            depends_on=[jobs.TaskDependency(task_key="prepare")],
+            for_each_task=jobs.ForEachTask(inputs="[1, 2]", task=nested),
+        )
         settings.tasks = [*(settings.tasks or []), loop]
         assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
-        assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
-        assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+        loop_disabled = disable_tasks(copy.deepcopy(settings), ["loop"])
+        assert [t.task_key for t in run_job_tasks(loop_disabled)] == ["trigger_child"]
+        assert run_job_tasks(disable_tasks(copy.deepcopy(settings), ["trigger_child", "loop"])) == []
+        # The platform disables every task downstream of a disabled task: here trigger_child and the loop.
+        assert run_job_tasks(disable_tasks(settings, ["prepare"])) == []
 
 
 class TestDisabledTaskKeys:
@@ -1131,6 +1154,7 @@ class TestForceConditions:
             ([], {"nope": True}, r"Unknown task 'nope' in force_conditions. Available: \['check', 'check_input'"),
             ([], {"check": "true"}, r"force_conditions\['check'\] must be True or False, got 'true'"),
             (["check"], {"check": True}, "Task 'check' in force_conditions is disabled"),
+            (["check_input"], {}, "Task 'check' in force_conditions is disabled, so its condition is never evaluated"),
         ],
     )
     def test_force_conditions_rejects(self, disable: list[str], outcomes: dict[str, Any], match: str) -> None:

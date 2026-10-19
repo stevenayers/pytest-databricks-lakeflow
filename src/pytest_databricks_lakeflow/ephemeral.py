@@ -36,6 +36,7 @@ from pytest_databricks_lakeflow.results import (
 from pytest_databricks_lakeflow.settings import (
     TIMEOUT_GRACE_SECONDS,
     check_compute,
+    check_output_references,
     check_params,
     check_references,
     create_kwargs,
@@ -65,6 +66,7 @@ REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
 NOTEBOOKS = pytest.StashKey[list[str]]()
 RUNS = pytest.StashKey[list[tuple["EphemeralJob", JobRun]]]()
+DEBUG_NOTEBOOKS = pytest.StashKey[list[DebugNotebook]]()
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.TERMINATED,
@@ -159,7 +161,8 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
-                declare after `modify_settings` has run, or a serverless task that needs an environment has none.
+                declare after `modify_settings` has run, a serverless task that needs an environment has none, or a
+                task refers to the output of a notebook task, which `jobs.create` refuses.
                 Also if the job runs as a service principal and you do not have the Service Principal User role on
                 it, or `jobs.create` refuses the job with `PERMISSION_DENIED`, with the platform's error as its
                 cause. Without a service principal in `run_as`, errors from `jobs.create` are raised unchanged.
@@ -174,6 +177,7 @@ class EphemeralJob:
             name_lifecycle_params(self.settings, self.params)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         check_compute(self.settings)
+        check_output_references(self.job_key, self.settings)
         self._warn_unreached_dependencies()
         self.job_id = self._create_job()
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
@@ -284,10 +288,10 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a selected task refers to the task values of a task that `only` leaves out and no stub
-                replaces, a pipeline refresh option is set and the job has no pipeline task, a selection is set and
-                the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`. Also if
-                `replay` is passed without `only` or to a job that has been created, is a run of another job, or
+                task, a selected task refers to the task values or the output of a task that `only` leaves out
+                and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
+                is set and the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`.
+                Also if `replay` is passed without `only` or to a job that has been created, is a run of another job, or
                 lacks the captured values of a task it would stub. Each is raised before the run starts.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
@@ -354,9 +358,9 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a selected task refers to the task values of a task that `only` leaves out and no stub
-                replaces, a pipeline refresh option is set and the job has no pipeline task, or a selection is set
-                and the installed databricks-sdk cannot send it.
+                task, a selected task refers to the task values or the output of a task that `only` leaves out
+                and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, or a
+                selection is set and the installed databricks-sdk cannot send it.
             ValueError: If `performance_target` is not a known performance target.
         """
         target = _performance_target(performance_target)
@@ -687,11 +691,13 @@ class EphemeralJob:
         path = f"{folder}/{helpers.DEBUG_FOLDER}/{self.job_key}__{task_key}__{run.run_id}"
         url = helpers.upload_notebook(self.lakeflow.ws, path, source)
         log.info("Wrote a debug notebook for task %r of run %s: %s", task_key, run.run_id, url)
+        written = DebugNotebook(task_key=task_key, run_id=run.run_id, path=path, url=url)
         state = session.current()
-        state.debug_notebooks.append(url)
+        state.debug_notebooks.append(_summary_line(written, state.item, helpers.cut_parameters(parameters)))
         if state.item is not None:
             state.item.user_properties.append(("lakeflow_debug_notebook", url))
-        return DebugNotebook(task_key=task_key, run_id=run.run_id, path=path, url=url)
+            state.item.stash.setdefault(DEBUG_NOTEBOOKS, []).append(written)
+        return written
 
     def _notebook_task(self, task_key: str) -> jobs.NotebookTask:
         """The notebook task `task_key` of the job, which `%run` can reach."""
@@ -988,6 +994,21 @@ def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jo
     if error:
         line = f"{line} {error}"
     return line
+
+
+def _summary_line(notebook: DebugNotebook, item: pytest.Item | None, cut: list[str]) -> str:
+    """Describe a debug notebook for the terminal summary, such as `<url> (test_x.py::test_y, task 'transform')`.
+
+    Naming the test matters when the job closed in a finaliser: the `lakeflow_debug_notebook` line then lands on the
+    teardown report, which pytest shows only with `-rA`.
+    """
+    where = f"task {notebook.task_key!r}"
+    if item is not None:
+        where = f"{item.nodeid}, {where}"
+    if cut:
+        names = ", ".join(repr(key) for key in cut)
+        where = f"{where}; widgets cut at {helpers.WIDGET_LIMIT_BYTES} bytes: {names}"
+    return f"{notebook.url} ({where})"
 
 
 def item_failed(stash: pytest.Stash) -> bool:

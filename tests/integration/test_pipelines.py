@@ -47,6 +47,8 @@ def refresh_run(lakeflow: Lakeflow) -> Iterator[tuple[JobRun, str]]:
 def test_pipeline_full_refresh(refresh_run: tuple[JobRun, str]) -> None:
     run, pipeline_id = refresh_run
     assert run.succeeded, run
+    # runs/get-output reports an error for every pipeline task run, which the plugin drops when the task succeeded.
+    assert run.task("refresh").error is None
     update = run.task("refresh").pipeline_update
     assert update is not None
     assert update.pipeline_id == pipeline_id

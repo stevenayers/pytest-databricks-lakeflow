@@ -291,7 +291,7 @@ Each `TaskRun` has:
 - `sql_result`, the rows a SQL file task returned, as a `SqlResult` with `columns`, `types`, `rows`, `first_row`, `truncated`, `warehouse_id` and `query_text`, or `None` for any other task, including a saved query task. See [SQL file task rows](#sql-file-task-rows).
 - `pipeline_update`, the update a pipeline task started, as a `PipelineUpdate` with `pipeline_id`, `update_id`, `state`, `cause`, `full_refresh` and `events()`, or `None` for any other task. See [pipeline tasks](#pipeline-tasks).
 - `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
-- `alert_state`, the state an alert evaluated to, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, ending with `TRIGGERED` or `OK`, so assert on `alert_state`. When the alert cannot be evaluated, for example because its query failed, the task fails and `alert_state` is `ERROR`. databricks-sdk lists one more state, `UNKNOWN`, which the integration tests have not seen on a task run.
+- `alert_state`, the state an alert evaluated to, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, ending with `TRIGGERED` or `OK`, so assert on `alert_state`. When the alert cannot be evaluated, for example because its query failed, the task fails and `alert_state` is `ERROR`. The Jobs API reports no error for such a task, so its `error` holds the task's termination message, such as `An error occurred during execution of task Alert task: Query execution failed. ...`, with `type` `None`. databricks-sdk lists one more state, `UNKNOWN`, which the integration tests have not seen on a task run.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs; what a notebook printed is in `notebook`, see [Read what a notebook printed](#read-what-a-notebook-printed).
 - `notebook`, a `NotebookView` of a notebook task that ran and did not succeed, read from the rendered notebook, or `None`. See [Read what a notebook printed](#read-what-a-notebook-printed).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
@@ -404,7 +404,7 @@ def test_forced_true_branch(lakeflow: Lakeflow) -> None:
         assert run.executed_tasks == ["check", "check_input", "on_true"]
 ```
 
-A key that is not a task, a task that is not a condition task, a disabled condition task and an outcome that is not `True` or `False` raise `LakeflowError` before the job is created. The error for a task that is not a condition task lists the job's condition tasks.
+A key that is not a task, a task that is not a condition task, a condition task that is disabled or downstream of a disabled task (which the platform disables too, so its condition is never evaluated) and an outcome that is not `True` or `False` raise `LakeflowError` before the job is created. The error for a task that is not a condition task lists the job's condition tasks.
 
 ### Errors from Spark
 
@@ -477,7 +477,7 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
 
 Asking for a skipped task raises a `KeyError` that says it was skipped by `only`. When the job has probes or stubs, `only` is extended with the ones the selected tasks need.
 
-A task that refers to the task values of another, such as `transform` with `{{tasks.extract.values.row_count}}` in its parameters, cannot run without it: the platform would start the run and end it `INTERNAL_ERROR` with "Failed to resolve references". So `run(only=["transform"])` and `run(only=["transform+"])` raise `LakeflowError` before the run starts, naming the task and the tasks it refers to. Select those tasks too, as `only=["+transform"]` does, or stub them. Other references to a task left out, such as `{{tasks.extract.result_state}}`, are not checked: the platform resolves them against the left-out task's `DISABLED` run, to `disabled` in that case.
+A task that refers to the task values of another, such as `transform` with `{{tasks.extract.values.row_count}}` in its parameters, cannot run without it: the platform would start the run and end it `INTERNAL_ERROR` with "Failed to resolve references". So `run(only=["transform"])` and `run(only=["transform+"])` raise `LakeflowError` before the run starts, naming the task and the tasks it refers to. Select those tasks too, as `only=["+transform"]` does, or stub them. The same goes for an output reference, such as `use_results` with `{{tasks.query.output.first_row.n}}` in the `sql` integration bundle: the platform fails that run with `INVALID_RUN_CONFIGURATION` and "Failed to resolve references: Cannot access output from task 'query' because the task was skipped.", so `run(only=["use_results"])` raises `LakeflowError` (`refers to the output of ['query', 'types']`) unless those tasks are selected or stubbed with `Stub(outputs=...)`. Other references to a task left out, such as `{{tasks.extract.result_state}}`, are not checked: the platform resolves them against the left-out task's `DISABLED` run, to `disabled` in that case.
 
 ### Stub upstream tasks
 
@@ -545,6 +545,8 @@ def test_pipeline_full_refresh(lakeflow: Lakeflow) -> None:
 `pipeline_id` and `update_id` name the update, `state` is its state as a string, such as `COMPLETED`, `FAILED` or `CANCELED`, `cause` is what started it, `JOB_TASK` for a pipeline task, and `full_refresh` says whether it refreshed every table. `events(level=None)` reads the events the update logged, newest first, as `databricks.sdk.service.pipelines.PipelineEvent`s with `level`, `event_type`, `message` and, for an error, `error`; `level` keeps one level, such as `"ERROR"`, `"WARN"` or `"INFO"`. Each call to `events()` reads them again with `pipelines.list_pipeline_events`.
 
 The Jobs API does not say which update a pipeline task started, so once the run has finished the plugin lists the pipeline's updates with `pipelines.list_updates` and takes the one created between the task's start and end, preferring one whose `cause` is `JOB_TASK`. When none was created in that time, or the updates cannot be read, `pipeline_update` is `None` and a warning naming the task and the pipeline is logged; the run is built as usual. A pipeline task that did not run has no update.
+
+The Jobs API reports the error "Please refer to the logs for this pipeline in the pipelines page." for every pipeline task, also one that succeeded, so the plugin leaves it out when the task succeeded: `error` is `None` and the progress line shows no error. A failed pipeline task keeps it as its `error`; the update's `events(level="ERROR")` say what went wrong.
 
 ## Capture task values
 
@@ -742,18 +744,18 @@ def test_transform(lakeflow):
 
 It returns a `DebugNotebook` with the notebook's `path` and `url`. The notebook goes to `<helpers_path>/debug/<job key>__<task key>__<run id>`, replacing one written earlier for the same run, and stays there until you delete it. It raises `LakeflowError` for a task that is not a notebook task, a notebook that runs from Git, a job that has not run, or a task that did not run in that run.
 
-`pytest --lakeflow-debug-notebook` writes one for every notebook task that failed in the last run of each job of a failed test, when the job closes. Each URL goes to the test's `lakeflow` report section and JUnit XML as `lakeflow_debug_notebook`, and the terminal summary lists them all. A test that passes, or fails with a run whose notebook tasks all succeeded, writes nothing, and an error while writing is logged as a warning without failing the teardown.
+`pytest --lakeflow-debug-notebook` writes one for every notebook task that failed in the last run of each job of a failed test, when the job closes. Each URL goes to the test's `lakeflow` report section and JUnit XML as `lakeflow_debug_notebook`, and the terminal summary lists them all, each with its test and task, so one written as a fixture's finaliser closes the job, whose report section pytest shows only with `-rA`, is still in view. With `--lakeflow-report-dir`, the test's `report.json` lists them under `debug_notebooks`. A test that passes, or fails with a run whose notebook tasks all succeeded, writes nothing, and an error while writing is logged as a warning without failing the teardown.
 
 The notebook replays the parameters, not the run:
 
 - A notebook that reads upstream task values with `dbutils.jobs.taskValues.get()` raises `TypeError` outside a job unless it passes `debugValue=`, as in `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path", debugValue="/Volumes/example/raw/landing")`.
 - `%run` runs the notebook of the deployed test target, so a redeploy changes what it runs, and `--lakeflow-destroy` removes it.
-- A text widget holds at most 2048 bytes. A longer value is written in full to a `parameters` dict in the first cell, and its widget holds a truncated copy, which is what the notebook reads.
+- A text widget holds at most 2048 bytes. A longer value is written in full to a `parameters` dict in the widgets cell, and its widget holds a truncated copy, which is what the notebook reads. A first cell of comments then names those parameters, and the terminal summary adds them to the notebook's line, such as `widgets cut at 2048 bytes: 'payload'`.
 - In CI with a service principal, the notebooks land in the service principal's home folder. Set `helpers_path` to a `/Shared/...` folder so engineers can open them.
 
 ## Jobs that run other jobs
 
-The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled and not inside a disabled `for_each_task` loop, naming the task, the job and the child's job id. The job is still created.
+The copy keeps each Run Job task as deployed, so its `run_job_task.job_id` still names the deployed child job. Running the copy starts a real run of that child, with the child's own `run_as` and notifications, and the plugin neither cancels nor deletes it. So that this does not happen unnoticed, `lakeflow.job()` and `lakeflow.task()` emit a `UserWarning` for each Run Job task in the copy that is not disabled, not downstream of a disabled task (which the platform disables too) and not inside a disabled `for_each_task` loop, naming the task, the job and the child's job id. The job is still created.
 
 Pass `children="refuse"` to raise `LakeflowError` instead, before anything is created, or disable the task (or the loop that holds it) to leave the child alone:
 

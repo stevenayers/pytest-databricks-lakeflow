@@ -51,11 +51,11 @@ If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is no
 
 Stub values arrive as JSON through a widget. `{{` inside a value is escaped so that the platform does not treat it as a reference, and the value reaches the task verbatim.
 
-Other references to a stubbed task resolve against the stub's own run: `{{tasks.<key>.run_id}}` to its run id, and `result_state` and `error_code` to the stub's, which are expected to be `success` and an empty string. `{{tasks.<key>.notebook_path}}` resolves to the helper notebook's path, not the real task's.
+Other references to a stubbed task resolve against the stub's own run, as a run in the workspace confirmed: `{{tasks.<key>.run_id}}` to the stub's task run id, `{{tasks.<key>.result_state}}` to `success` and `{{tasks.<key>.error_code}}` to an empty string. `{{tasks.<key>.notebook_path}}` resolves to the helper notebook's path, not the real task's.
 
 ### Output references
 
-A stub is a notebook task, so it has no SQL, alert or other task output, and a `{{tasks.<key>.output.<path>}}` reference to it could never resolve. Give the outputs the task reads with a `Stub`, whose `values` are the task values it sets and whose `outputs` are literals for those references, by the path after `output.`. A plain mapping is the same as `Stub(values=mapping)`. In the `sql` integration bundle, `use_results` reads `{{tasks.query.output.first_row.n}}`, `{{tasks.types.output.first_row}}` and `{{tasks.types.output.rows}}`:
+A stub is a notebook task, so it has no SQL, alert or other task output, and Databricks refuses a `{{tasks.<key>.output.<path>}}` reference to a notebook task when the job is created ("Unsupported task type for the 'output' namespace."). The plugin replaces the references to a stub, and raises `LakeflowError` before anything is created for one to a notebook task of the copy that is not a stub, in `lakeflow.job()` too. Give the outputs the task reads with a `Stub`, whose `values` are the task values it sets and whose `outputs` are literals for those references, by the path after `output.`. A plain mapping is the same as `Stub(values=mapping)`. In the `sql` integration bundle, `use_results` reads `{{tasks.query.output.first_row.n}}`, `{{tasks.types.output.first_row}}` and `{{tasks.types.output.rows}}`:
 
 ```python
 from pytest_databricks_lakeflow import Lakeflow, Stub

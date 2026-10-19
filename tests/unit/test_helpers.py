@@ -40,15 +40,21 @@ class TestDebugNotebookSource:
         assert run.strip() == f"# MAGIC %run {NOTEBOOK}"
         compile(widgets, "widgets", "exec")
 
-    def test_values_over_the_widget_limit_are_kept_whole_beside_a_truncated_widget(self) -> None:
+    def test_values_over_the_widget_limit_are_named_and_kept_whole_beside_a_truncated_widget(self) -> None:
         long = "é" * 1500
-        source = debug_notebook_source(NOTEBOOK, {"long": long, "short": "x"}, heading="h")
-        widgets = source.split(CELL)[0]
+        source = debug_notebook_source(NOTEBOOK, {"long": long, "short": "x", "big": "b" * 2049}, heading="h")
+        named, widgets, _ = source.split(CELL)
+        assert named.splitlines()[:2] == [
+            "# Databricks notebook source",
+            '# These widgets hold only the first 2048 bytes of their value: "long", "big". The notebook reads the',
+        ]
+        assert not [line for line in named.splitlines() if line and not line.startswith("#")], "comments only"
         values = widget_values(widgets)
         assert values["short"] == "x"
         assert len(values["long"].encode()) <= 2048
         assert long.startswith(values["long"])
-        assert ast.literal_eval(widgets.split("parameters = ", 1)[1].splitlines()[0]) == {"long": long}
+        written = ast.literal_eval(widgets.split("parameters = ", 1)[1].splitlines()[0])
+        assert written == {"long": long, "big": "b" * 2049}
         compile(widgets, "widgets", "exec")
 
 

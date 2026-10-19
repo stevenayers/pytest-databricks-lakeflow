@@ -54,8 +54,9 @@ MAX_KEY_CHARS = 512
 # jobs/create refuses any reference to a task that is not in the job: "Invalid reference:
 # 'tasks.ghost.result_state'. Task 'ghost' does not exist."
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
-# Of the references to a task that run_now(only=...) leaves out, only task values fail the run. The others resolve
-# against the task's DISABLED run: result_state to "disabled", error_code to "Disabled", run_id to its run id.
+# Of the references to a task that run_now(only=...) leaves out, task values fail the run, and so do outputs
+# ("Cannot access output from task '<key>' because the task was skipped."). The others resolve against the task's
+# DISABLED run: result_state to "disabled", error_code to "Disabled", run_id to its run id.
 TASK_VALUES_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.values\.")
 # A stub is a notebook task, which has no SQL, alert or clean room output, so these references are replaced by the
 # literals its outputs give. The platform's paths after `output.` include rows, first_row, first_row.<column>,
@@ -626,13 +627,14 @@ def force_conditions(settings: jobs.JobSettings, outcomes: Mapping[str, bool]) -
         `settings`.
 
     Raises:
-        LakeflowError: If a key is not a task in the job, its task has no `condition_task`, the task is disabled,
-            or an outcome is not a bool.
+        LakeflowError: If a key is not a task in the job, its task has no `condition_task`, the task is disabled
+            or downstream of a disabled task, or an outcome is not a bool.
     """
     if not outcomes:
         return settings
     tasks = {t.task_key: t for t in settings.tasks or []}
     conditions = sorted(key for key, task in tasks.items() if task.condition_task)
+    disabled = disabled_task_keys(settings)
     for key, outcome in outcomes.items():
         if key not in tasks:
             raise LakeflowError(f"Unknown task {key!r} in force_conditions. Available: {sorted(tasks)}")
@@ -640,8 +642,9 @@ def force_conditions(settings: jobs.JobSettings, outcomes: Mapping[str, bool]) -
             raise LakeflowError(
                 f"Task {key!r} in force_conditions has no condition_task. Condition tasks: {conditions}"
             )
-        if tasks[key].disabled:
-            # A disabled condition task is never evaluated, so forcing its outcome would do nothing.
+        if key in disabled:
+            # A disabled condition task, or one downstream of a disabled task, which the platform disables too, is
+            # never evaluated, so forcing its outcome would do nothing.
             raise LakeflowError(f"Task {key!r} in force_conditions is disabled, so its condition is never evaluated")
         if not isinstance(outcome, bool):
             # bool("false") is True, so a string would silently force the true branch.
@@ -734,7 +737,7 @@ def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
     """Get the enabled tasks that run another job, tasks nested in a `for_each_task` included.
 
     `sanitise` keeps their `run_job_task` as deployed, so they trigger the deployed job, not a copy. A disabled
-    task, and a task nested in a disabled `for_each_task`, does not run, so it is left out.
+    task, a task downstream of one and a task nested in a disabled `for_each_task` does not run, so it is left out.
 
     Args:
         settings: The job's settings.
@@ -742,12 +745,15 @@ def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
     Returns:
         Every enabled task with a `run_job_task`, in the order of `settings.tasks`, nested tasks last.
     """
-    return [task for task in _enabled_tasks(settings) if task.run_job_task]
+    return [task for task in _enabled_tasks(settings, skip=disabled_task_keys(settings)) if task.run_job_task]
 
 
-def _enabled_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
-    """Get the tasks that are not disabled, nested tasks included unless they or their `for_each_task` are."""
-    enabled = [task for task in settings.tasks or [] if not task.disabled]
+def _enabled_tasks(settings: jobs.JobSettings, *, skip: Collection[str] = ()) -> list[jobs.Task]:
+    """Get the tasks that are not disabled, nested tasks included unless they or their `for_each_task` are.
+
+    The top-level tasks in `skip` are left out too, with the task nested in each.
+    """
+    enabled = [task for task in settings.tasks or [] if not task.disabled and task.task_key not in skip]
     return [task for task in _with_nested(enabled) if not task.disabled]
 
 
@@ -989,10 +995,12 @@ def selected_tasks(settings: jobs.JobSettings, only: Sequence[str], stubs: Colle
 
 
 def check_references(settings: jobs.JobSettings, selected: Collection[str], stubs: Collection[str]) -> None:
-    """Fail early when a selected task refers to the task values of a task that the run leaves out.
+    """Fail early when a selected task refers to the task values or the output of a task that the run leaves out.
 
     The platform does not check this when the run starts. It ends the run with life cycle state `INTERNAL_ERROR` and
-    "Failed to resolve references: Task value referenced by 'tasks.<key>.values.<name>' was not found."
+    "Failed to resolve references: Task value referenced by 'tasks.<key>.values.<name>' was not found.", or, for an
+    output, with termination code `INVALID_RUN_CONFIGURATION` and "Failed to resolve references: Cannot access output
+    from task '<key>' because the task was skipped."
 
     Args:
         settings: The job's settings.
@@ -1000,20 +1008,55 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
         stubs: Keys of the stub tasks. `select` adds only those that a selected task depends on, so only they run.
 
     Raises:
-        LakeflowError: If a selected task that is not a stub refers to the task values of a task that is neither
-            selected nor a stub that runs.
+        LakeflowError: If a selected task that is not a stub refers to the task values or the output of a task
+            that is neither selected nor a stub that runs.
     """
     running = {*selected, *_running_stubs(settings, selected, stubs)}
     for task in settings.tasks or []:
         if task.task_key not in selected or task.task_key in stubs:
             continue
-        referenced = set(TASK_VALUES_REFERENCE.findall(json.dumps(task.as_dict())))
-        missing = sorted(referenced - running)
+        text = json.dumps(task.as_dict())
+        missing = sorted(set(TASK_VALUES_REFERENCE.findall(text)) - running)
         if missing:
             raise LakeflowError(
                 f"Task {task.task_key!r} refers to task values of {missing}, which only leaves out, so the platform "
                 "could not resolve them. Select them in only, stub them with upstream_task_values on job(), or pass "
                 "replay to run()."
+            )
+        missing = sorted({key for key, _ in OUTPUT_REFERENCE.findall(text)} - running)
+        if missing:
+            raise LakeflowError(
+                f"Task {task.task_key!r} refers to the output of {missing}, which only leaves out, so the platform "
+                "could not resolve it. Select them in only, or stub them with Stub(outputs=...) in "
+                "upstream_task_values on job()."
+            )
+
+
+def check_output_references(job_key: str, settings: jobs.JobSettings) -> None:
+    """Fail early when a task refers to the output of a notebook task, which Databricks refuses when the job is created.
+
+    `jobs/create` refuses `{{tasks.<key>.output.<path>}}` to a notebook task with InvalidParameterValue "Unsupported
+    task type for the 'output' namespace." A stub is a notebook task too, but its outputs have been replaced by then.
+
+    Args:
+        job_key: The bundle resource key of the job, for the message.
+        settings: The job's settings, as they will be created.
+
+    Raises:
+        LakeflowError: If a task, nested tasks included, refers to the output of a notebook task.
+    """
+    tasks = _with_nested(settings.tasks)
+    notebooks = {task.task_key for task in tasks if task.notebook_task is not None}
+    for task in tasks:
+        for match in OUTPUT_REFERENCE.finditer(json.dumps(task.as_dict())):
+            target = match[1]
+            if target not in notebooks:
+                continue
+            raise LakeflowError(
+                f"Task {task.task_key!r} of {job_key!r} refers to {match[0]}, but {target!r} is a notebook task, and "
+                "Databricks refuses output references to notebook tasks (\"Unsupported task type for the 'output' "
+                f'namespace."). Set a task value in the notebook and refer to it with '
+                f"{{{{tasks.{target}.values.<name>}}}} instead."
             )
 
 

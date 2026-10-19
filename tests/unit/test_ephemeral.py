@@ -581,6 +581,31 @@ class TestKeepRules:
 class TestCreateSettings:
     """What reaches `jobs.create`: the test marker, attribution, permissions, run_as and compute settings."""
 
+    def test_output_reference_to_a_notebook_task_is_refused_before_creating(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        # Probed on the example bundle: jobs/create refuses it with InvalidParameterValue "Unsupported task type for
+        # the 'output' namespace."
+        message = (
+            "Task 'transform' of 'my_job' refers to {{tasks.extract.output.result}}, but 'extract' is a notebook "
+            'task, and Databricks refuses output references to notebook tasks ("Unsupported task type for the '
+            "'output' namespace.\"). Set a task value in the notebook and refer to it with "
+            "{{tasks.extract.values.<name>}} instead."
+        )
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                reference = "{{{{tasks.extract.output.result}}}}"
+                job = lakeflow.job("my_job", task_params={{"transform": {{"row": reference}}}})
+                with pytest.raises(LakeflowError) as excinfo:
+                    job.create()
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
+
     @pytest.mark.parametrize(
         ("extra", "name"),
         [("", "[pytest] test_jobs.py::test_job"), (', name="custom"', "[pytest] custom")],
@@ -2279,6 +2304,7 @@ class TestReportDir:
         assert entry["settings"]["name"] == created["name"]
         assert [task["task_key"] for task in entry["settings"]["tasks"]] == [task.task_key for task in created["tasks"]]
         assert sorted(entry["tasks"]) == ["extract", "load"]
+        assert report["debug_notebooks"] == []
 
     @pytest.mark.parametrize(
         ("logs", "written"),
@@ -2657,6 +2683,9 @@ class TestChildren:
             pytest.param(
                 True, 'lakeflow.job("parent", disable=["trigger_child", "loop"], children="refuse")', id="disabled-loop"
             ),
+            pytest.param(
+                False, 'lakeflow.job("parent", disable=["prepare"], children="refuse")', id="downstream-of-disabled"
+            ),
             pytest.param(False, 'lakeflow.task("parent.prepare", children="refuse")', id="other-task"),
             pytest.param(False, 'lakeflow.job("my_job").run()', id="no-run-job-task"),
         ],
@@ -2908,6 +2937,40 @@ class TestDebugNotebook:
         result.stdout.no_fnmatch_line("*lakeflow_debug_notebook*")
         result.stdout.no_fnmatch_line("*debug notebook*")
         assert fake_ws.workspace.upload_calls == HELPER_UPLOADS
+
+    def test_debug_notebook_of_a_job_its_finaliser_closes(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        # The finaliser closes the job in the teardown phase, whose report section shows only with -rA, so the
+        # terminal summary names the test, and report.json lists the notebook.
+        parameters = {"row_count": "7", "payload": "x" * 3000}
+        fake_ws.jobs.resolved[7700] = jobs.ResolvedValues(
+            notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters=parameters)
+        )
+        fake_ws.jobs.queue(make_run(77, {"transform": "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR"))
+        source = """
+            import pytest
+
+            @pytest.fixture
+            def failed_run(lakeflow):
+                return lakeflow.job("my_job").run()
+
+            def test_job(failed_run):
+                assert False, "boom"
+            """
+        result = run_tests(pytester, source, "--lakeflow-debug-notebook", "--lakeflow-report-dir=out")
+        result.assert_outcomes(failed=1)
+        path = f"{DEBUG_FOLDER}/my_job__transform__77"
+        url = f"{HOST}/#notebook/{fake_ws.workspace.object_ids[path]}"
+        result.stdout.fnmatch_lines(
+            [
+                "*= lakeflow =*",
+                "lakeflow: 1 debug notebook written",
+                f"  {url} (test_jobs.py::test_job, task 'transform'; widgets cut at 2048 bytes: 'payload')",
+            ]
+        )
+        _, report = report_of(pytester.path / "out")
+        assert report["debug_notebooks"] == [{"task_key": "transform", "run_id": 77, "path": path, "url": url}]
 
     @pytest.mark.parametrize(
         ("key", "message"),

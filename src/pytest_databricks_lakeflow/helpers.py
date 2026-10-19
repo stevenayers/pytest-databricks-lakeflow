@@ -97,6 +97,10 @@ DEBUG_HINT = (
     "# Edit the widgets above, then run all cells. dbutils.jobs.taskValues.get() raises outside a job\n"
     "# unless the notebook passes debugValue=."
 )
+CUT_WIDGETS_HINT = (
+    "# These widgets hold only the first 2048 bytes of their value: {names}. The notebook reads the\n"
+    "# truncated values; the full values are in the parameters dict in the next cell."
+)
 LONG_VALUES_HINT = (
     "# Values longer than the 2048 bytes a text widget holds, in full. Their widgets hold a truncated copy, which is\n"
     "# what the notebook reads."
@@ -277,7 +281,7 @@ def debug_notebook_source(notebook_path: str, parameters: Mapping[str, str], *, 
     Widgets set in the caller reach the notebook that `%run` runs. Each name and value is written with `json.dumps`,
     which gives a Python string literal for any text, so a value holding `{{`, quotes or newlines arrives unchanged.
     A value longer than a text widget takes is written in full to a `parameters` dict, and its widget gets the
-    longest prefix that fits.
+    longest prefix that fits. A first cell of comments then names those parameters.
 
     Args:
         notebook_path: The workspace path of the task's notebook.
@@ -287,14 +291,28 @@ def debug_notebook_source(notebook_path: str, parameters: Mapping[str, str], *, 
     Returns:
         The notebook's source, in the SOURCE format.
     """
-    lines = [NOTEBOOK_MARKER, f"# {heading}", DEBUG_HINT]
-    long_values = {key: value for key, value in parameters.items() if len(value.encode()) > WIDGET_LIMIT_BYTES}
-    if long_values:
+    cut = cut_parameters(parameters)
+    lines = [NOTEBOOK_MARKER]
+    if cut:
+        names = ", ".join(json.dumps(key) for key in cut)
+        lines += [CUT_WIDGETS_HINT.format(names=names), "", CELL_SEPARATOR, ""]
+    lines += [f"# {heading}", DEBUG_HINT]
+    if cut:
+        long_values = {key: parameters[key] for key in cut}
         lines += [LONG_VALUES_HINT, f"parameters = {json.dumps(long_values)}"]
     for key, value in parameters.items():
         lines.append(f"dbutils.widgets.text({json.dumps(key)}, {json.dumps(_widget_value(value))})")
     lines += ["", CELL_SEPARATOR, "", f"# MAGIC %run {notebook_path}", ""]
     return "\n".join(lines)
+
+
+def cut_parameters(parameters: Mapping[str, str]) -> list[str]:
+    """The keys of the values in `parameters` that are longer than a text widget takes, in their order."""
+    cut = []
+    for key, value in parameters.items():
+        if len(value.encode()) > WIDGET_LIMIT_BYTES:
+            cut.append(key)
+    return cut
 
 
 def _widget_value(value: str) -> str:
