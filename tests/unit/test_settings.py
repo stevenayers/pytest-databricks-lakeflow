@@ -105,16 +105,18 @@ class TestStripping:
 class TestRunAs:
     """The run_as option: stripped by default, kept on request, or replaced by a principal."""
 
+    def test_run_as_is_stripped_by_default(self) -> None:
+        assert sanitised().run_as is None
+
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
-            (None, None),
             ("keep", jobs.JobRunAs(user_name="someone@example.com")),
             ("me@example.com", jobs.JobRunAs(user_name="me@example.com")),
             ("0000-app-id", jobs.JobRunAs(service_principal_name="0000-app-id")),
         ],
     )
-    def test_run_as_string_picks_user_or_service_principal(self, value: str | None, expected: object) -> None:
+    def test_run_as_option_is_applied(self, value: str, expected: jobs.JobRunAs) -> None:
         assert sanitised(run_as=value).run_as == expected
 
     def test_run_as_object_is_used_as_is(self) -> None:

@@ -415,7 +415,7 @@ def check_compute(settings: jobs.JobSettings) -> None:
         LakeflowError: If a Python script, Python wheel, JAR or dbt task, nested `for_each_task` tasks included, has no
             cluster and no `environment_key`.
     """
-    missing = []
+    missing: list[str] = []
     for task in _with_nested(settings.tasks):
         needs_environment = task.spark_python_task or task.python_wheel_task or task.spark_jar_task or task.dbt_task
         if needs_environment and not _on_cluster(task) and not task.environment_key:
@@ -502,7 +502,7 @@ def inject_probes(
         )
     for target, value_keys in capture_task_values.items():
         _check_keys(target, value_keys)
-    probes = []
+    probes: list[jobs.Task] = []
     for target, value_keys in capture_task_values.items():
         probes.append(_probe_task(target, value_keys, helpers))
     settings.tasks = [*(settings.tasks or []), *probes]
