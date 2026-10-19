@@ -1,0 +1,13 @@
+resources:
+  jobs:
+    slow_job:
+      name: slow_job
+      description: A job whose only task sleeps for the seconds parameter under a task timeout, for the timeout integration tests.
+      parameters:
+        - name: seconds
+          default: "0"
+      tasks:
+        - task_key: sleep
+          timeout_seconds: 30
+          notebook_task:
+            notebook_path: ../src/notebooks/sleep.py
