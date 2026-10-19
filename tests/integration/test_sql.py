@@ -1,6 +1,6 @@
 r"""Integration tests for the ``sql`` bundle (tests/integration/bundles/sql), run in a real workspace.
 
-The bundle's ``sql_job`` runs a SQL file on the warehouse named by the ``warehouse_id`` bundle variable, which
+The bundle's ``sql_job`` runs SQL files on the warehouse named by the ``warehouse_id`` bundle variable, which
 these tests read from ``LAKEFLOW_WAREHOUSE_ID``. Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any
 
 import pytest
 
@@ -32,23 +31,50 @@ def lakeflow() -> Lakeflow:
     return dataclasses.replace(lakeflow_for("sql"), variables={"warehouse_id": WAREHOUSE_ID})
 
 
-def raw_run_output(lakeflow: Lakeflow, run_id: int) -> dict[str, Any]:
-    """Fetch a task run's output as the REST API returns it, including fields the SDK does not model."""
-    response = lakeflow.ws.api_client.do("GET", "/api/2.2/jobs/runs/get-output", query={"run_id": run_id})
-    assert isinstance(response, dict)
-    return response
-
-
 def test_sql_file_task_runs_on_the_warehouse(lakeflow: Lakeflow) -> None:
     with lakeflow.job("sql_job") as job:
-        run = job.run()
+        run = job.run(only=["query"])
         assert run.succeeded, run
         task = run.task("query")
         assert task.sql_output is not None
-        # The platform reports a SQL file task under sql_output.file_output, which databricks-sdk's SqlOutput does
-        # not model, so TaskRun cannot expose it yet. The checks below read the raw endpoint instead; move them onto
-        # task.sql_output once the plugin or the SDK models file_output.
-        file_output = raw_run_output(lakeflow, task.run_id)["sql_output"]["file_output"]
-        assert file_output["warehouse_id"] == WAREHOUSE_ID
-        assert file_output["query_text"].strip() == "SELECT 1 AS n"
-        assert file_output["query_result"]["rows"] == [{"values": [{"string_value": "1"}]}]
+        result = task.sql_result
+        assert result is not None
+        assert result.warehouse_id == WAREHOUSE_ID
+        assert result.query_text is not None and result.query_text.strip() == "SELECT 1 AS n"
+        assert (result.columns, result.types) == (["n"], ["int"])
+        assert result.rows == [{"n": "1"}]
+        assert result.first_row["n"] == "1"
+        assert result.truncated is False
+
+
+def test_sql_result_values_are_strings_and_null_is_none(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("sql_job") as job:
+        run = job.run(only=["types"])
+        assert run.succeeded, run
+        result = run.task("types").sql_result
+        assert result is not None
+        assert result.types == ["int", "null", "decimal", "date", "boolean"]
+        assert result.first_row == {"n": "1", "m": None, "d": "1.5", "day": "2026-01-01", "b": "true"}
+
+
+def test_sql_result_is_cut_at_1000_rows(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("sql_job") as job:
+        run = job.run(only=["wide"])
+        assert run.succeeded, run
+        result = run.task("wide").sql_result
+        assert result is not None
+        assert result.truncated is True
+        assert len(result.rows) == 1000
+        assert (result.rows[0], result.rows[-1]) == ({"id": "0"}, {"id": "999"})
+
+
+def test_sql_result_keeps_parameter_markers(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("sql_job", params={"n": "7"}) as job:
+        run = job.run(only=["parameterised"])
+        assert run.succeeded, run
+        task = run.task("parameterised")
+        assert task.parameters == {"n": "7"}
+        result = task.sql_result
+        assert result is not None
+        assert result.query_text is not None and result.query_text.strip() == "SELECT :n AS n"
+        assert result.first_row == {"n": "7"}

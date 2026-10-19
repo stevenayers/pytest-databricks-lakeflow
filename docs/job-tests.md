@@ -148,7 +148,8 @@ Each `TaskRun` has:
 - `condition_outcome`, for an if/else condition task: `True` when the condition held, `False` when it did not, and `None` for any other task. See [Branches](#branches).
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
-- The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
+- The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows; databricks-sdk does not model the `file_output` of a SQL file task, so its `sql_output` is empty), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
+- `sql_result`, the rows a SQL file task returned, as a `SqlResult` with `columns`, `types`, `rows`, `first_row`, `truncated`, `warehouse_id` and `query_text`, or `None` for any other task, including a saved query task. See [SQL file task rows](#sql-file-task-rows).
 - `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, so assert on `alert_state`.
 - `logs`, the stdout and stderr of a Python script, wheel or JAR task, plus `log_lines` and `logs_truncated`. Notebook tasks have no logs; what a notebook printed is in `notebook`, see [Read what a notebook printed](#read-what-a-notebook-printed).
@@ -212,6 +213,23 @@ def test_failure_detail(lakeflow: Lakeflow) -> None:
             job.run().raise_for_failure()
         assert excinfo.value.run.task("transform").raised(PermissionError)
 ```
+
+### SQL file task rows
+
+A SQL task that runs a file reports the rows it returned in `runs/get-output`, and `TaskRun.sql_result` holds them as a `SqlResult`. `rows` is a list of dicts by column name. Values are strings as the platform reports them, such as `"1"`, `"1.5"`, `"true"` or `"2026-01-01"`, and a NULL is `None`. `types` holds the platform's type name of each column, such as `int` or `decimal`. `first_row` raises `LakeflowError` when the query returned no rows. The platform keeps at most 1,000 rows, and `truncated` is true when it cut them. `query_text` is the file as it ran, with parameter markers such as `:n` kept; the values bound to them are in the task's `parameters`. In the `sql` integration bundle, the task `parameterised` runs `SELECT :n AS n` with `n` from the job parameter of the same name:
+
+```python
+def test_parameterised_query(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("sql_job", params={"n": "7"}) as job:
+        run = job.run().raise_for_failure()
+        result = run.task("parameterised").sql_result
+        assert result is not None
+        assert result.columns == ["n"]
+        assert result.first_row == {"n": "7"}
+        assert not result.truncated
+```
+
+The rows come from a field the Jobs API reference does not document, read with one extra request per SQL file task that ran; see [Limitations](limitations.md).
 
 ### Branches
 

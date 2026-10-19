@@ -16,6 +16,24 @@ from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_jo
 from .fakes import DATA, HOST, FakeWorkspaceClient, make_run, recorded
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
+RECORDED_RUNS = sorted(path.stem for path in (DATA / "runs").glob("*.json"))
+QUERY_FILE = "/Workspace/Users/someone@example.com/.bundle/lakeflow_sql/test/files/src/queries/count.sql"
+# The raw `runs/get-output` of the `sql` bundle's file task, as the workspace returned it. databricks-sdk does not
+# model `sql_output.file_output`, so `jobs.RunOutput.from_dict` drops it.
+SQL_FILE_OUTPUT = {
+    "sql_output": {
+        "file_output": {
+            "query_result": {
+                "columns": [{"name": "n", "type": "int"}],
+                "rows": [{"values": [{"string_value": "1"}]}],
+                "truncated": False,
+            },
+            "query_text": "SELECT 1 AS n\n",
+            "sql_statements": [{"lookup_key": "CiQwMWYx"}],
+            "warehouse_id": "a499e0fb0a3d1730",
+        }
+    }
+}
 FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
 
 
@@ -639,6 +657,59 @@ class TestTaskOutputs:
         assert task.clean_rooms_notebook_output is None
         assert task.alert_state is None
         assert task.output is None
+
+
+class TestSqlResults:
+    """The rows of a SQL file task are read from the raw runs/get-output response, once per task run that ran."""
+
+    def test_sql_file_task_rows_are_read_from_the_raw_output(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.raw_outputs[100] = SQL_FILE_OUTPUT
+        run = build_from(ws, make_run(1, {"query": "SUCCESS"}, sql_files={"query": QUERY_FILE}))
+        result = run.task("query").sql_result
+        assert result is not None
+        assert result.task_key == "query"
+        assert result.columns == ["n"]
+        assert result.types == ["int"]
+        assert result.rows == [{"n": "1"}]
+        assert result.first_row == {"n": "1"}
+        assert result.truncated is False
+        assert result.warehouse_id == "a499e0fb0a3d1730"
+        assert result.query_text == "SELECT 1 AS n\n"
+        assert ws.api_client.calls == [
+            {"method": "GET", "path": "/api/2.2/jobs/runs/get-output", "query": {"run_id": 100}}
+        ]
+
+    def test_raw_output_is_fetched_only_for_sql_file_tasks(self) -> None:
+        ws = FakeWorkspaceClient()
+        states = {"extract": "SUCCESS", "query": "FAILED", "later": "UPSTREAM_FAILED"}
+        sql_files = {"query": QUERY_FILE, "later": QUERY_FILE}
+        raw = make_run(1, states, "FAILED", notebooks={"extract"}, sql_files=sql_files)
+        ws.jobs.raw_outputs[run_id_of(raw, "query")] = SQL_FILE_OUTPUT
+        run = build_from(ws, raw)
+        assert [call["query"] for call in ws.api_client.calls] == [{"run_id": run_id_of(raw, "query")}]
+        assert run.task("query").sql_result is not None
+        assert run.task("extract").sql_result is None
+        assert run.task("later").sql_result is None
+
+    def test_sql_result_survives_an_unreadable_task_run(self, caplog: pytest.LogCaptureFixture) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.raw_outputs[100] = NotFound("gone")
+        run = build_from(ws, make_run(1, {"query": "SUCCESS"}, sql_files={"query": QUERY_FILE}))
+        assert run.succeeded
+        assert run.task("query").sql_result is None
+        assert "Could not read the SQL result of task query (run 100): gone" in caplog.text
+
+    def test_sql_result_is_none_without_a_query_result(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.raw_outputs[100] = {"sql_output": {"file_output": {"warehouse_id": "w1"}}}
+        run = build_from(ws, make_run(1, {"query": "SUCCESS"}, sql_files={"query": QUERY_FILE}))
+        assert run.task("query").sql_result is None
+
+    @pytest.mark.parametrize("name", RECORDED_RUNS)
+    def test_recorded_runs_never_read_raw_outputs(self, name: str) -> None:
+        _, ws = build(name)
+        assert ws.api_client.calls == []
 
 
 class TestChildRuns:

@@ -33,6 +33,7 @@ class FakeJobs:
         self.queued: list[list[jobs.Run]] = []
         self.polls: dict[int, list[jobs.Run]] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
+        self.raw_outputs: dict[int, dict[str, Any] | Exception] = {}
         self.output_calls: list[int] = []
         self.resolved: dict[int, jobs.ResolvedValues | Exception] = {}
         self.get_run_calls: list[dict[str, Any]] = []
@@ -166,6 +167,28 @@ class FakeJobs:
         return iter(self.listed)
 
 
+class FakeApiClient:
+    """Stands in for `WorkspaceClient.api_client`, serving `runs/get-output` as raw JSON from `FakeJobs.raw_outputs`."""
+
+    RUN_OUTPUT = "/api/2.2/jobs/runs/get-output"
+
+    def __init__(self, jobs: FakeJobs) -> None:
+        self.jobs = jobs
+        self.calls: list[dict[str, Any]] = []
+
+    def do(self, method: str, path: str, query: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append({"method": method, "path": path, "query": query, **kwargs})
+        if (method, path) != ("GET", self.RUN_OUTPUT):
+            raise AssertionError(f"FakeApiClient serves only GET {self.RUN_OUTPUT}, not {method} {path}")
+        run_id = (query or {}).get("run_id")
+        if run_id not in self.jobs.raw_outputs:
+            raise NotFound(f"Run {run_id} does not exist.")
+        output = self.jobs.raw_outputs[run_id]
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+
 class FakeWorkspace:
     def __init__(self) -> None:
         self.objects: set[str] = set()
@@ -224,6 +247,7 @@ class FakeCurrentUser:
 class FakeWorkspaceClient:
     def __init__(self) -> None:
         self.jobs = FakeJobs()
+        self.api_client = FakeApiClient(self.jobs)
         self.workspace = FakeWorkspace()
         self.files = FakeFiles(self.workspace)
         self.schemas = FakeSchemas()
@@ -292,6 +316,7 @@ def make_run(
     attempts: Mapping[str, Sequence[str]] | None = None,
     condition_outcomes: Mapping[str, str] | None = None,
     notebooks: Collection[str] = (),
+    sql_files: Mapping[str, str] | None = None,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -304,6 +329,9 @@ def make_run(
     `condition_outcomes` makes the tasks it names condition tasks, with the given `outcome`, such as `"true"`.
 
     `notebooks` makes the tasks it names notebook tasks, which the run reports with their `notebook_task`.
+
+    `sql_files` makes the tasks it names SQL file tasks on warehouse `w1`, running the file at the given path, which
+    the run reports with their `sql_task`.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -324,6 +352,7 @@ def make_run(
                     end_time=3_000,
                     condition_task=_condition(condition_outcomes, key),
                     notebook_task=_notebook(notebooks, key),
+                    sql_task=_sql_file(sql_files, key),
                 )
             )
     return jobs.Run(
@@ -378,6 +407,12 @@ def _notebook(notebooks: Collection[str], key: str) -> jobs.NotebookTask | None:
     if key not in notebooks:
         return None
     return jobs.NotebookTask(notebook_path=f"/Workspace/src/{key}")
+
+
+def _sql_file(sql_files: Mapping[str, str] | None, key: str) -> jobs.SqlTask | None:
+    if sql_files is None or key not in sql_files:
+        return None
+    return jobs.SqlTask(warehouse_id="w1", file=jobs.SqlTaskFile(path=sql_files[key]))
 
 
 def _details(state: str) -> jobs.TerminationDetails:

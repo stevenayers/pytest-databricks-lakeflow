@@ -49,6 +49,7 @@ NOTEBOOK_MODEL_LINE = re.compile(NOTEBOOK_MODEL + r"\s*=\s*'([^']*)'")
 HTML_TAG = re.compile(r"<[^>]*>")
 HTML_RESULTS = frozenset({"html", "htmlSandbox"})
 SKIPPED_SUMMARY = "Command skipped"
+RUN_OUTPUT_PATH = "/api/2.2/jobs/runs/get-output"
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -450,6 +451,105 @@ def _join_lines(parts: Iterable[str]) -> str:
 
 
 @dataclass(frozen=True)
+class SqlResult:
+    """The rows a SQL file task returned, as `runs/get-output` reports them under `sql_output.file_output`.
+
+    The Jobs API reference does not document `file_output` and databricks-sdk does not model it, so the plugin reads
+    the raw response. The platform keeps at most 1,000 rows, for 7 days.
+
+    Attributes:
+        task_key: The task's key.
+        columns: The column names in order, such as `["n"]`.
+        types: The platform's type name of each column, such as `["int"]`.
+        rows: One dict per row, by column name. Values are strings as the platform reports them, such as `"1"`,
+            `"1.5"`, `"true"` or `"2026-01-01"`, and a NULL is `None`. When two columns share a name, the later
+            one wins.
+        truncated: Whether the platform cut the rows, which it does after 1,000.
+        warehouse_id: The SQL warehouse the task ran on.
+        query_text: The SQL file as the task ran it. Named parameter markers such as `:n` are kept; the values
+            bound to them are in `TaskRun.parameters`.
+    """
+
+    task_key: str
+    columns: list[str]
+    types: list[str]
+    rows: list[dict[str, str | None]]
+    truncated: bool = False
+    warehouse_id: str | None = None
+    query_text: str | None = None
+
+    @property
+    def first_row(self) -> dict[str, str | None]:
+        """The first of `rows`.
+
+        Raises:
+            LakeflowError: If the query returned no rows.
+        """
+        if not self.rows:
+            raise LakeflowError(f"Task {self.task_key!r} returned no rows")
+        return self.rows[0]
+
+    @classmethod
+    def from_output(cls, task_key: str, output: Mapping[str, Any]) -> SqlResult | None:
+        """Read the query result of a SQL file task from its raw `runs/get-output` response.
+
+        Args:
+            task_key: The task's key.
+            output: The response as JSON.
+
+        Returns:
+            The result, or `None` when the response has no `sql_output.file_output.query_result`, as for a saved
+            query, alert or dashboard task.
+        """
+        file_output = _mapping(_mapping(output.get("sql_output")).get("file_output"))
+        query_result = file_output.get("query_result")
+        if not isinstance(query_result, Mapping):
+            return None
+        columns: list[str] = []
+        types: list[str] = []
+        for column in _list(query_result.get("columns")):
+            columns.append(str(_mapping(column).get("name") or ""))
+            types.append(str(_mapping(column).get("type") or ""))
+        rows: list[dict[str, str | None]] = []
+        for row in _list(query_result.get("rows")):
+            values = _list(_mapping(row).get("values"))
+            rows.append(_sql_row(columns, values))
+        return cls(
+            task_key=task_key,
+            columns=columns,
+            types=types,
+            rows=rows,
+            truncated=bool(query_result.get("truncated")),
+            warehouse_id=file_output.get("warehouse_id"),
+            query_text=file_output.get("query_text"),
+        )
+
+
+def _sql_row(columns: Sequence[str], values: Sequence[object]) -> dict[str, str | None]:
+    # A value is `{"string_value": "1"}`; the platform reports a NULL as `{}`.
+    row: dict[str, str | None] = {}
+    for name, value in zip(columns, values, strict=False):
+        string_value = _mapping(value).get("string_value")
+        if isinstance(string_value, str):
+            row[name] = string_value
+        else:
+            row[name] = None
+    return row
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _list(value: object) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+@dataclass(frozen=True)
 class TaskRun:
     """The outcome of one task in a job run.
 
@@ -488,7 +588,8 @@ class TaskRun:
             did not, `None` for any other task or when the platform reported no outcome.
         sql_output: The output of a SQL task as the platform reported it: `query_output` (with `warehouse_id`,
             `output_link`, `query_text` and `sql_statements`), `alert_output` or `dashboard_output`. Holds no query
-            rows. `None` for any other task or when the platform reported none.
+            rows: a SQL file task's rows are in `sql_result`. `None` for any other task or when the platform reported
+            none.
         alert_output: The output of an alert task, with its `alert_state`. `None` for any other task or when the
             platform reported none.
         dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`.
@@ -509,6 +610,9 @@ class TaskRun:
             `jobs.export_run` once the run finished. Exported for the tasks that `Lakeflow(notebook_export=...)`
             selects: by default, a notebook task that ran and did not succeed. `None` for any other task, and when
             `export_run` failed, which logs a warning.
+        sql_result: The columns and rows a SQL file task returned, read from `runs/get-output` once the run
+            finished. `None` for any other task, including a saved query task, for a task that did not run, and when
+            the output could not be read, which logs a warning.
     """
 
     task_key: str
@@ -540,6 +644,7 @@ class TaskRun:
     dashboard_output: jobs.DashboardTaskOutput | None = None
     clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
     notebook: NotebookView | None = None
+    sql_result: SqlResult | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -915,13 +1020,14 @@ def build_job_run(
             if _result_state(task_run) not in NOT_RUN:
                 ran.append(task_run)
     resolved = fetch_resolved_values(ws, ran)
+    sql_results = fetch_sql_results(ws, ran)
 
     attempts: dict[str, list[TaskRun]] = {}
     for key, task_runs in task_runs_by_key.items():
         attempts[key] = []
         for task_run in task_runs:
             run_id = task_run.run_id or 0
-            attempt = _task_run(task_run, known_outputs.get(run_id), resolved.get(run_id))
+            attempt = _task_run(task_run, known_outputs.get(run_id), resolved.get(run_id), sql_results.get(run_id))
             attempts[key].append(_with_child_run(ws, attempt, job_keys or {}, notebook_export))
 
     injected: dict[str, TaskRun] = {}
@@ -1120,6 +1226,38 @@ def fetch_resolved_values(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) ->
         return resolved
 
 
+def fetch_sql_results(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, SqlResult]:
+    """Read the query result of each SQL file task run in parallel, by task run id.
+
+    Only task runs with `sql_task.file` are read. The platform reports their rows under `sql_output.file_output`,
+    which databricks-sdk does not model, so the raw `runs/get-output` response is read with `ws.api_client`. A task
+    run that cannot be read, or that reports no query result, is left out.
+    """
+    file_tasks: list[jobs.RunTask] = []
+    for task in tasks:
+        if task.sql_task is not None and task.sql_task.file is not None:
+            file_tasks.append(task)
+    if not file_tasks:
+        return {}
+
+    def fetch(task: jobs.RunTask) -> SqlResult | None:
+        try:
+            output = ws.api_client.do("GET", RUN_OUTPUT_PATH, query={"run_id": task.run_id or 0})
+        except DatabricksError as e:
+            log.warning("Could not read the SQL result of task %s (run %s): %s", task.task_key, task.run_id, e)
+            return None
+        if not isinstance(output, Mapping):
+            return None
+        return SqlResult.from_output(task.task_key or "", output)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results: dict[int, SqlResult] = {}
+        for task, result in zip(file_tasks, pool.map(fetch, file_tasks), strict=True):
+            if result is not None:
+                results[task.run_id or 0] = result
+        return results
+
+
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
     if output is None or _result_state(task) in NOT_RUN:
@@ -1130,7 +1268,12 @@ def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     return _first_line(str(error))
 
 
-def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None, resolved: jobs.ResolvedValues | None) -> TaskRun:
+def _task_run(
+    task: jobs.RunTask,
+    out: jobs.RunOutput | None,
+    resolved: jobs.ResolvedValues | None,
+    sql_result: SqlResult | None,
+) -> TaskRun:
     out = out or jobs.RunOutput()
     key = task.task_key or ""
     state = _result_state(task)
@@ -1167,6 +1310,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None, resolved: jobs.Res
         child_run_id=out.run_job_output.run_id if out.run_job_output else None,
         dashboard_output=out.dashboard_output,
         clean_rooms_notebook_output=out.clean_rooms_notebook_output,
+        sql_result=sql_result,
     )
 
 
