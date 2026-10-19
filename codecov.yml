@@ -1,0 +1,10 @@
+# Coverage is reported, never enforced. A drop in the percentage is information for the
+# reviewer, not a failure, so nobody is pushed to write tests for the sake of the number.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
