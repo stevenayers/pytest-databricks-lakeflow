@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
@@ -28,7 +29,14 @@ from pytest_databricks_lakeflow.results import (
     has_output,
     task_outcome,
 )
-from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, pipeline_params, select
+from pytest_databricks_lakeflow.settings import (
+    TIMEOUT_GRACE_SECONDS,
+    check_compute,
+    check_params,
+    create_kwargs,
+    pipeline_params,
+    select,
+)
 
 if TYPE_CHECKING:
     from databricks.sdk import WorkspaceClient
@@ -92,6 +100,7 @@ class EphemeralJob:
         self._active: set[int] = set()
         self._entered = False
         self._closed = False
+        self._timeout_raised = False
 
     @property
     def url(self) -> str | None:
@@ -153,8 +162,10 @@ class EphemeralJob:
         Args:
             params: Job parameters for this run only, merged over the job's params.
             only: Task keys to run. `+key`, `key+` and `+key+` add upstream and downstream tasks.
-            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`. It must not be longer than the job's
-                `timeout_seconds`, which `Lakeflow`'s `timeout` sets.
+            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`. When this plus 60 seconds is longer than
+                the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets, the job's `timeout_seconds` is
+                raised to it before the run starts, with a warning when the template or `modify_settings` set the
+                shorter value.
             performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
             queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
@@ -170,8 +181,8 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, `timeout` is longer than the job's `timeout_seconds`, a pipeline refresh option is set and
-                the job has no pipeline task, or a selection is set and the installed databricks-sdk cannot send it.
+                task, a pipeline refresh option is set and the job has no pipeline task, or a selection is set and
+                the installed databricks-sdk cannot send it.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -179,8 +190,7 @@ class EphemeralJob:
         target = _performance_target(performance_target)
         self.create()
         if timeout is not None:
-            # Checked before the run starts, so a timeout that is too long never leaves a run behind.
-            self._check_timeout(timeout)
+            self._raise_timeout(timeout)
         handle = self.start(
             params,
             only,
@@ -263,13 +273,43 @@ class EphemeralJob:
         self._record_url(run_id, first, item)
         return RunHandle(self, run_id, item, first)
 
+    def _raise_timeout(self, timeout: timedelta) -> None:
+        """Raise the job's `timeout_seconds` to `timeout` plus the grace period when it is shorter."""
+        limit = self.settings.timeout_seconds
+        needed = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+        if not limit or needed <= limit:
+            return
+        assert self.job_id is not None
+        # Without tasks in the body, jobs/update reads a one-task job in the legacy single-task format and sets
+        # timeout_seconds on the task, leaving the job's own unchanged. Sending the tasks the job was created with
+        # changes only the job's.
+        changes = jobs.JobSettings(timeout_seconds=needed, tasks=self.settings.tasks)
+        self.lakeflow.ws.jobs.update(self.job_id, new_settings=changes)
+        mirrored = math.ceil(self.lakeflow.timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+        level = logging.INFO
+        source = ""
+        if limit < mirrored and not self._timeout_raised:
+            level = logging.WARNING
+            source = ", which the template or modify_settings set,"
+        log.log(
+            level,
+            "Raised timeout_seconds of job %s from %s%s to %s for a run timeout of %s",
+            self.job_id,
+            limit,
+            source,
+            needed,
+            timeout,
+        )
+        self.settings.timeout_seconds = needed
+        self._timeout_raised = True
+
     def _check_timeout(self, timeout: timedelta) -> None:
         limit = self.settings.timeout_seconds
         if limit and timeout.total_seconds() > limit:
             raise LakeflowError(
-                f"run(timeout={timeout}) of {self.job_key!r} is longer than the job's timeout_seconds of {limit} "
-                f"({timedelta(seconds=limit)}), so the platform would stop the run first. Pass a longer "
-                "Lakeflow(timeout=...), which sets the job's timeout, or a shorter run timeout."
+                f"wait(timeout={timeout}) of {self.job_key!r} is longer than the job's timeout_seconds of {limit} "
+                f"({timedelta(seconds=limit)}), so the platform would stop the run first. Pass the timeout to "
+                "run(timeout=...), which raises the job's timeout before the run starts, or a shorter wait timeout."
             )
 
     def _wait(
@@ -397,7 +437,8 @@ class RunHandle:
 
         Args:
             timeout: How long to wait from this call. Defaults to `Lakeflow`'s `timeout`. It must not be longer than
-                the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets.
+                the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets. The run has already started, so
+                pass a longer timeout to `run()`, which raises `timeout_seconds` first.
 
         Returns:
             The run's outcome, which is also appended to the job's `runs`.

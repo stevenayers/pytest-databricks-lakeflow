@@ -34,6 +34,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_probes,
     inject_test_marker,
     merge_environments,
+    override_tasks,
     run_job_tasks,
     sanitise,
     upstream_values_from,
@@ -93,6 +94,7 @@ class Lakeflow:
             not allowed.
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
+            A longer `timeout` passed to `run()` raises the job's `timeout_seconds` before that run starts.
         poll_interval: How long to wait between two polls of a run that has not finished. Defaults to two seconds.
             Zero or less raises `ValueError`.
         catalog: The catalog in which `schema()` creates temporary schemas.
@@ -254,6 +256,7 @@ class Lakeflow:
         teardown: Callable[..., object] | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
+        task_overrides: Mapping[str, Mapping[str, object]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -301,21 +304,27 @@ class Lakeflow:
                 `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
                 A key the job does not have adds an environment holding only the fields passed, which a task can
                 use through `modify_settings`.
+            task_overrides: Timeout and retry fields of the copy's tasks, by task key, such as
+                `{"load": {"timeout_seconds": 60, "max_retries": 1, "retry_on_timeout": True}}`. The fields are
+                `timeout_seconds`, which applies to each attempt, `max_retries`, `min_retry_interval_millis` and
+                `retry_on_timeout`. They are applied before the probes, setup and teardown tasks are added, so those
+                cannot be named.
 
         Returns:
             The job, created when entered with `with` or on its first run.
 
         Raises:
             KeyError: If the bundle has no job `key`.
-            LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
-                the job, `force_conditions` names a task that is not a condition task, is disabled, or has an outcome
-                that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path,
-                `children` is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
-                `for_each_task`, `environments` names a key starting with `__pytest_`, holds an entry that is not a
-                mapping or a field that a serverless environment does not take, sets both `environment_version` and
-                `base_environment` on one environment, or brings the job past 10 environments, or `setup` or
-                `teardown` is not a plain function with its source in a file, uses variables of an enclosing
-                function, takes a parameter other than `spark`, `dbutils` and `params`, or has a decorator.
+            LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
+                that is not in the job, `task_overrides` sets a field it does not take, `force_conditions` names a
+                task that is not a condition task, is disabled, or has an outcome that is not a bool, a parameter
+                name is reserved, an entry of `extra_dependencies` is a local path, `children` is `"refuse"` and the
+                copy has a Run Job task that is not disabled nor inside a disabled `for_each_task`, `environments`
+                names a key starting with `__pytest_`, holds an entry that is not a mapping or a field that a
+                serverless environment does not take, sets both `environment_version` and `base_environment` on one
+                environment, or brings the job past 10 environments, or `setup` or `teardown` is not a plain function
+                with its source in a file, uses variables of an enclosing function, takes a parameter other than
+                `spark`, `dbutils` and `params`, or has a decorator.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
                 name starting with `__pytest_`.
@@ -331,6 +340,7 @@ class Lakeflow:
         disable_tasks(settings, disable or [])
         force_condition_outcomes(settings, force_conditions or {})
         add_dependencies(settings, extra_dependencies or [])
+        override_tasks(settings, task_overrides or {})
         inject_probes(settings, capture_task_values or {}, self._helpers())
         self._inject_lifecycle(settings, notebooks)
         return self._ephemeral(
@@ -362,6 +372,7 @@ class Lakeflow:
         teardown: Callable[..., object] | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
+        task_overrides: Mapping[str, Mapping[str, object]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -386,6 +397,8 @@ class Lakeflow:
             teardown: Runs last, after the task and its probe, as for `job()`.
             extra_dependencies: Test-only dependencies for the job, as for `job()`.
             environments: Fields of the job's serverless environment specs, by `environment_key`, as for `job()`.
+            task_overrides: Timeout and retry fields of the task, as for `job()`. Only the task under test can be
+                named, as `{"<task_key>": {...}}`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -395,9 +408,9 @@ class Lakeflow:
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
                 task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
                 upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` is a
-                local path, `children` is `"refuse"` and the task is a Run Job task, or `task_params` names another
-                task. Also in the cases where `job()` raises it because `task_params` or `environments` cannot be
-                applied or `setup` or `teardown` cannot run.
+                local path, `children` is `"refuse"` and the task is a Run Job task, or `task_params` or
+                `task_overrides` names another task. Also in the cases where `job()` raises it because `task_params`,
+                `environments` or `task_overrides` cannot be applied or `setup` or `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -410,6 +423,9 @@ class Lakeflow:
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         check_task_params(job_key, settings, task_params or {}, params or {})
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
+        others = sorted(set(task_overrides or {}) - {task_key})
+        if others:
+            raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
         add_dependencies(settings, extra_dependencies or [])
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object]] = {}
@@ -417,6 +433,7 @@ class Lakeflow:
             upstream.update(upstream_values_from(job_key, settings, task_key, upstream_from, explicit))
         upstream.update(explicit)
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
+        override_tasks(settings, task_overrides or {})
         self._inject_lifecycle(settings, notebooks)
         capture: dict[str, list[str]] = {}
         if capture_task_values:
