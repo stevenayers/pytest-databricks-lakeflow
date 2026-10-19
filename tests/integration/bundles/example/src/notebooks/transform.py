@@ -16,6 +16,9 @@ if param1 == "forbidden":
     raise PermissionError(f"{param1} may not read {source_path}")
 if param1 == "explode":
     raise ValueError(f"validation failed for {param1}")
+if param1 == "chained":
+    # A wrapped exception: error.root_cause should name the KeyError, not the RuntimeError.
+    raise RuntimeError("wrapper failed") from KeyError("root cause")
 
 if schema:
     spark.range(row_count).write.mode("overwrite").saveAsTable(f"{schema}.example_rows")

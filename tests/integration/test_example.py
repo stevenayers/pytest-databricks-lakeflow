@@ -81,6 +81,21 @@ def test_raise_for_failure_names_the_permission_error(lakeflow: Lakeflow) -> Non
         assert "transform" in str(excinfo.value)
 
 
+def test_root_cause_follows_the_exception_chain(lakeflow: Lakeflow) -> None:
+    # transform.py raises RuntimeError("wrapper failed") from KeyError("root cause") for param1 == "chained".
+    with lakeflow.job("my_example_job", params={"param1": "chained", "param2": "world"}) as job:
+        run = job.run()
+        assert run.failed
+        error = run.task("transform").error
+        assert error is not None
+        assert error.type == "RuntimeError"
+        assert error.message == "wrapper failed"
+        assert error.root_cause == "KeyError: 'root cause'"
+        with pytest.raises(LakeflowRunFailed) as excinfo:
+            run.raise_for_failure()
+        assert "root cause: KeyError: 'root cause'" in str(excinfo.value)
+
+
 def test_output_json_refuses_a_plain_exit_value(lakeflow: Lakeflow) -> None:
     # extract.py exits with the plain string "extracted 7 rows", so there is no JSON output to parse.
     with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
