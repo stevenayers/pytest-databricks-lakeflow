@@ -249,8 +249,11 @@ class Lakeflow:
         """Make a throwaway copy of a bundle job.
 
         `setup` and `teardown` are plain functions that run on the job's compute, as notebook tasks of the copy. Each
-        takes any of `spark`, `dbutils` and `params`, the run's job parameters as strings. The setup task runs before
-        every other task on every run, and the teardown task after every other task, whether they passed or failed.
+        takes any of `spark`, `dbutils` and `params`, a dict of the parameters the job declares with their values for
+        the run, as strings. Only declared parameters reach it, because the names are fixed when `job()` is called:
+        one passed under `allow_undeclared_params=True`, or declared by `modify_settings`, is not in `params`. The
+        setup task runs before every other task on every run, and the teardown task after every other task, whether
+        they passed or failed.
         A function must be self-contained: it is shipped as source, so imports go inside it and it cannot use
         variables of an enclosing function. A value it returns becomes the task's `output` as JSON.
 
@@ -288,7 +291,8 @@ class Lakeflow:
                 that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path,
                 `children` is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
                 `for_each_task`, or `setup` or `teardown` is not a plain function with its source in a file, uses
-                variables of an enclosing function, or takes a parameter other than `spark`, `dbutils` and `params`.
+                variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params`, or
+                has a decorator.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)

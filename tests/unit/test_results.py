@@ -519,9 +519,56 @@ class TestNotebookExport:
         outputs = ["rows > 0\nsecond\n", "bold & more\nred <kept>\n", "", "", ""]
         assert [cell.output for cell in notebook.cells] == outputs
         assert notebook.cells[0].output_html == HTML_OUTPUT
-        assert notebook.stdout == "rows > 0\nsecond\nbold & more\nred <kept>\n"
+        assert notebook.stdout == "red <kept>\n"
         assert notebook.failed_cell is notebook.cells[4]
         assert notebook.failed_cell.error == "KeyError: 'k'"
+
+    def test_stdout_keeps_only_the_stdout_stream(self) -> None:
+        commands = [
+            {
+                "position": 1.0,
+                "command": "print('a'); print('b', file=sys.stderr)",
+                "results": {
+                    "type": "listResults",
+                    "data": [
+                        {"type": "ansi", "name": "stdout", "data": "\x1b[32ma\x1b[39m\n"},
+                        {"type": "ansi", "name": "stderr", "data": "b\n"},
+                    ],
+                },
+            },
+            {
+                "position": 2.0,
+                "command": "print('c')",
+                "results": {
+                    "type": "listResults",
+                    "data": [
+                        {"type": "ansi", "name": "stdout", "data": "c"},
+                    ],
+                },
+            },
+            {"position": 3.0, "command": "dbutils.notebook.exit('done')", "results": {"type": "raw", "data": "done"}},
+        ]
+        notebook = parse_notebook_export(notebook_export(commands))
+        assert [cell.output for cell in notebook.cells] == ["a\nb\n", "c\n", "done\n"]
+        assert [cell.stdout for cell in notebook.cells] == ["a\n", "c\n", ""]
+        assert notebook.stdout == "a\nc\n"
+
+    @pytest.mark.parametrize(
+        ("summary", "trace", "expected"),
+        [
+            pytest.param("Command skipped", None, None, id="skipped"),
+            pytest.param("Command skipped", "", None, id="skipped-empty-trace"),
+            pytest.param("ValueError: bad input", None, "ValueError: bad input", id="summary-without-trace"),
+            pytest.param(None, "Traceback\nKeyError: 'k'\n", "KeyError: 'k'", id="trace-without-summary"),
+            pytest.param(None, None, None, id="no-error"),
+        ],
+    )
+    def test_cell_error_decides_skipped_on_the_summary(
+        self, summary: str | None, trace: str | None, expected: str | None
+    ) -> None:
+        command = {"position": 1.0, "command": "x", "results": None, "error": trace, "errorSummary": summary}
+        notebook = parse_notebook_export(notebook_export([command]))
+        assert notebook.cells[0].error == expected
 
     @pytest.mark.parametrize(
         "html",

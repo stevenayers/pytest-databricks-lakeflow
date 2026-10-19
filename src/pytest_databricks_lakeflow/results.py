@@ -48,6 +48,7 @@ NOTEBOOK_MODEL = "__DATABRICKS_NOTEBOOK_MODEL"
 NOTEBOOK_MODEL_LINE = re.compile(NOTEBOOK_MODEL + r"\s*=\s*'([^']*)'")
 HTML_TAG = re.compile(r"<[^>]*>")
 HTML_RESULTS = frozenset({"html", "htmlSandbox"})
+SKIPPED_SUMMARY = "Command skipped"
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -251,6 +252,9 @@ class NotebookCell:
             notebook wrote.
         error: The exception the cell raised, as `Name: message`, or `None` when it raised nothing. A cell skipped
             because an earlier cell failed has no error.
+        stdout: What the cell wrote to standard output, such as what it printed, with ANSI colour codes removed.
+            Unlike `output`, it leaves out standard error, displayed results and the `dbutils.notebook.exit()`
+            value.
     """
 
     index: int
@@ -258,6 +262,7 @@ class NotebookCell:
     output: str = ""
     output_html: str = field(default="", repr=False)
     error: str | None = None
+    stdout: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -276,8 +281,8 @@ class NotebookView:
 
     @property
     def stdout(self) -> str:
-        """The text output of every cell, in order, which is what `print()` produced."""
-        return _join_lines(cell.output for cell in self.cells)
+        """What every cell wrote to standard output, in order, which is what `print()` produced."""
+        return _join_lines(cell.stdout for cell in self.cells)
 
     @property
     def failed_cell(self) -> NotebookCell | None:
@@ -365,16 +370,20 @@ def _notebook_cell(index: int, command: dict[str, Any]) -> NotebookCell:
     is_error = results.get("type") == "error"
     texts: list[str] = []
     raw: list[str] = []
+    printed: list[str] = []
     if not is_error:
-        for kind, data in _result_items(results):
+        for kind, name, data in _result_items(results):
             raw.append(data)
             if kind in HTML_RESULTS:
                 texts.append(_html_text(data))
             else:
                 texts.append(ANSI.sub("", data))
+            # Printed text is an item named "stdout"; stderr is a sibling item, the exit value a "raw" result.
+            if name == "stdout":
+                printed.append(ANSI.sub("", data))
     trace = command.get("error")
     if not trace and is_error:
-        trace = "".join(data for _, data in _result_items(results))
+        trace = "".join(data for _, _, data in _result_items(results))
     code = command.get("command")
     if not isinstance(code, str):
         code = ""
@@ -384,29 +393,32 @@ def _notebook_cell(index: int, command: dict[str, Any]) -> NotebookCell:
         output=_join_lines(texts),
         output_html="".join(raw),
         error=_cell_error(command.get("errorSummary"), trace),
+        stdout=_join_lines(printed),
     )
 
 
-def _result_items(results: dict[str, Any]) -> list[tuple[str | None, str]]:
-    # `results.data` is a string, or a list of items with their own `type` and `data`, or rows of a table.
+def _result_items(results: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    # `results.data` is a string, or a list of items with their own `type`, `name` and `data`, or rows of a table.
     data = results.get("data")
     if isinstance(data, str):
-        return [(results.get("type"), data)]
+        return [(results.get("type"), None, data)]
     if not isinstance(data, list):
         return []
-    items: list[tuple[str | None, str]] = []
+    items: list[tuple[str | None, str | None, str]] = []
     for item in data:
         if isinstance(item, dict) and isinstance(item.get("data"), str):
-            items.append((item.get("type"), item["data"]))
+            items.append((item.get("type"), item.get("name"), item["data"]))
     return items
 
 
 def _cell_error(summary: object, trace: object) -> str | None:
-    # The platform marks a cell skipped after a failure as an error with the summary "Command skipped" and no trace.
-    if not isinstance(trace, str) or not trace.strip():
+    # The platform marks a cell skipped after a failure with the summary "Command skipped" and a null `error`.
+    if isinstance(summary, str) and summary.strip() == SKIPPED_SUMMARY:
         return None
     if isinstance(summary, str) and summary.strip():
         return _error_text(summary).strip()
+    if not isinstance(trace, str) or not trace.strip():
+        return None
     text = _error_text(trace)
     last = _last_exception_line(text.splitlines())
     if last is None:
