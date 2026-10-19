@@ -95,7 +95,7 @@ def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
         assert run.task("transform").output == "hello world"
 ```
 
-The Jobs API does not return task values, so the first run must capture them: pass `capture_task_values` with every upstream task and every key the task reads. `lakeflow.task()` raises `LakeflowError` before anything is created when `upstream_from` is a run of another job, or when an upstream task was not part of that run (left out by `only` or disabled) or has no captured values. Only runs made by the plugin qualify; a production run had no probes, so its task values cannot be recovered.
+The Jobs API does not return task values, so the first run must capture them: pass `capture_task_values` with every upstream task and every key the task reads. `lakeflow.task()` raises `LakeflowError` before anything is created when `upstream_from` is a run of another job, or when an upstream task was not part of that run (left out by `only` or disabled) or has no captured values. An upstream task that sets no task values, such as one that only writes a table, has none to capture, so `upstream_from` raises for it too; stub it by passing it explicitly, such as `upstream_task_values={"write_table": {}}`. Only runs made by the plugin qualify; a production run had no probes, so its task values cannot be recovered.
 
 `upstream_task_values` still works alongside it. An entry replaces the values `upstream_from` holds for that task, and the stubs it names are added to those from the run, so a what-if test changes one value and keeps the rest:
 

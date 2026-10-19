@@ -808,6 +808,13 @@ class TestMergeEnvironments:
         assert "environment_version" in str(e.value), "the error lists the fields that are accepted"
         assert settings == example_settings(), "nothing changes before the error"
 
+    @pytest.mark.parametrize("override", [None, "5", ["dependencies"]], ids=["none", "string", "list"])
+    def test_merge_environments_rejects_an_override_that_is_not_a_mapping(self, override: Any) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=r"environments\['default'\] must be a mapping of spec fields"):
+            merge_environments(settings, {"default": override})
+        assert settings == example_settings(), "nothing changes before the error"
+
     @pytest.mark.skipif(not HAS_BASE_ENVIRONMENT, reason="this databricks-sdk has no base_environment")
     def test_merge_environments_rejects_version_and_base_environment_together(self) -> None:
         base = {"base_environment": "/Workspace/envs/base.yml"}
