@@ -37,6 +37,7 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         run = job.run()
         assert run.succeeded
         assert run.task("transform").output == "hello world"
+        assert run.task("transform").notebook is None, "only failed notebook tasks are exported by default"
         assert "Success! hello" in run.task("my_wheel_task").logs
         assert run.parameters["param1"] == "hello"
         transform = run.task("transform").parameters
@@ -68,6 +69,14 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
         assert run.task("transform").attempt == 0
         assert run.task("transform").attempts[-1].attempt == 0
         assert not run.timed_out
+        # transform.py prints two lines in its second cell and raises in its third.
+        notebook = run.task("transform").notebook
+        assert notebook is not None
+        assert "transform: checking forbidden against /Volumes/example/raw/landing" in notebook.stdout
+        assert notebook.failed_cell is not None
+        assert notebook.failed_cell.index == 2
+        assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
+        assert run.task("extract").notebook is None
         with pytest.raises(LakeflowRunFailed) as excinfo:
             run.raise_for_failure()
         assert "forbidden" in str(excinfo.value)

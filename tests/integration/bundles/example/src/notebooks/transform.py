@@ -10,6 +10,14 @@ mode = dbutils.widgets.get("mode")
 row_count = int(dbutils.widgets.get("row_count"))
 source_path = dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")
 
+# COMMAND ----------
+
+# The printed lines reach the test through task.notebook.stdout when the task fails.
+print(f"transform: checking {param1} against {source_path}")
+print(f"transform: {row_count} rows expected")
+
+# COMMAND ----------
+
 dbutils.jobs.taskValues.set(key="stage", value="validation")
 dbutils.jobs.taskValues.set(key="source_path", value=source_path)
 if param1 == "forbidden":
@@ -19,6 +27,8 @@ if param1 == "explode":
 if param1 == "chained":
     # A wrapped exception: error.root_cause should name the KeyError, not the RuntimeError.
     raise RuntimeError("wrapper failed") from KeyError("root cause")
+
+# COMMAND ----------
 
 if schema:
     spark.range(row_count).write.mode("overwrite").saveAsTable(f"{schema}.example_rows")

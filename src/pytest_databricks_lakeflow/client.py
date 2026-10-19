@@ -21,7 +21,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import helpers, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
-from pytest_databricks_lakeflow.results import JobRun
+from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, JobRun, NotebookExport
 from pytest_databricks_lakeflow.settings import (
     SIDE_EFFECTS,
     Helpers,
@@ -112,6 +112,8 @@ class Lakeflow:
         test_marker: Declare a `__pytest_test_id` job parameter on every ephemeral job, with the test node id as its
             default, so job code can tell that it runs under test. The node id is used even when `name` replaces it
             in the job name. Tests cannot pass the parameter themselves.
+        notebook_export: Which notebook tasks to read with `jobs.export_run` after a run, into `TaskRun.notebook`:
+            `failed` for those that ran and did not succeed, `always` for every one that ran, `never` for none.
         sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
@@ -146,6 +148,7 @@ class Lakeflow:
     single_node: bool = False
     allow_undeclared_params: bool = False
     test_marker: bool = False
+    notebook_export: NotebookExport = "failed"
     sweep_hours: float = 24
     keep: bool = False
     keep_failed: bool = True
@@ -161,6 +164,10 @@ class Lakeflow:
             raise ValueError(f"sync must be one of {', '.join(SYNC_STRATEGIES)}, got {self.sync!r}")
         if self.side_effects not in SIDE_EFFECTS:
             raise ValueError(f"side_effects must be one of {', '.join(SIDE_EFFECTS)}, got {self.side_effects!r}")
+        if self.notebook_export not in NOTEBOOK_EXPORTS:
+            raise ValueError(
+                f"notebook_export must be one of {', '.join(NOTEBOOK_EXPORTS)}, got {self.notebook_export!r}"
+            )
         _check_deploy_flags(self.deploy_flags)
 
     @property
