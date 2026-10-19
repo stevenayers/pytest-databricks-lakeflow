@@ -114,7 +114,7 @@ def sanitise(
             with a smaller positive `timeout_seconds` keeps it.
         side_effects: `"neutralise"` sets `dashboard_task.subscription.paused` on dashboard tasks with a
             subscription and `sql_task.alert.pause_subscriptions` on SQL alert tasks. `"keep"` leaves them as the
-            template has them.
+            template has them. Alert tasks and Power BI tasks are left as the template has them in both modes.
         environment_version: The serverless environment version of every environment except the helper
             environment and those whose spec sets `base_environment`.
         budget_policy_id: The budget policy of the job.

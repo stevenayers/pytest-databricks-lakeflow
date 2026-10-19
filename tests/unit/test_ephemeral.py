@@ -21,6 +21,7 @@ from .fakes import (
     make_run,
     parent_settings,
     pipeline_settings,
+    reporting_settings,
     running_run,
 )
 
@@ -436,6 +437,18 @@ class TestCreateSettings:
         assert "job_clusters" not in created
         tasks = {t.task_key: t for t in created["tasks"]}
         assert (tasks["classic"].existing_cluster_id, tasks["classic"].new_cluster) == ("c-1", None)
+
+    def test_alert_task_reaches_the_copy_intact(
+        self, pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_cli.deployed["reporting"] = fake_ws.jobs.add(reporting_settings())
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("reporting").run()\n')
+        result.assert_outcomes(passed=1)
+        tasks = {t.task_key: t for t in fake_ws.jobs.created[0]["tasks"]}
+        alert = tasks["check"].alert_task
+        assert alert is not None
+        assert (alert.alert_id, alert.warehouse_id) == ("a2", "w1")
+        assert alert.subscribers == [jobs.AlertTaskSubscriber(user_name="someone@example.com")]
 
     def test_standard_performance_target_warns(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

@@ -35,7 +35,7 @@ body:
     id: environment
     attributes:
       label: Python, pytest, databricks-sdk and Databricks CLI versions
-      placeholder: "Python 3.12, pytest 8.3, databricks-sdk 0.66, Databricks CLI v1.7.0"
+      placeholder: "Python 3.12, pytest 8.3, databricks-sdk 0.100, Databricks CLI v1.7.0"
     validations:
       required: true
   - type: dropdown
