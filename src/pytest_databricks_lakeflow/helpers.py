@@ -133,9 +133,9 @@ def lifecycle_source(step: LifecycleStep, rootpath: Path, argument: str) -> tupl
         whose reads cannot be known before they run.
 
     Raises:
-        LakeflowError: If `step` is a string, a statement is not a string or has a `$` that is neither a
-            placeholder nor `$$`, the file does not exist or is not a `.py` file, or the function is not a plain
-            function defined with `def`, uses variables of an enclosing function, takes a parameter other than
+        LakeflowError: If `step` is a string or an empty list, a statement is not a string or has a `$` that is
+            neither a placeholder nor `$$`, the file does not exist or is not a `.py` file, or the function is not a
+            plain function defined with `def`, uses variables of an enclosing function, takes a parameter other than
             `spark`, `dbutils` and `params`, has no source to read, or has a decorator.
     """
     if isinstance(step, Path):
@@ -165,6 +165,10 @@ def _file_source(path: Path, rootpath: Path, argument: str) -> str:
 
 
 def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, frozenset[str]]:
+    if not statements:
+        raise LakeflowError(
+            f"{argument}= is an empty list of SQL statements. Pass at least one statement, or leave {argument}= out."
+        )
     names: set[str] = set()
     for number, statement in enumerate(statements, start=1):
         if not isinstance(statement, str):
@@ -184,8 +188,8 @@ def _function_source(fn: Callable[..., object], argument: str) -> str:
     """Build a notebook that calls `fn` with the arguments it declares and exits with what it returns."""
     if not inspect.isfunction(fn):
         raise LakeflowError(
-            f"{argument}= must be a plain function defined with def, got {fn!r}. It runs as a notebook on the job's "
-            "compute, so the plugin ships its source."
+            f"{argument}= must be a plain function defined with def, a list of SQL statements or a Path to a .py "
+            f"file, got {fn!r}. A function runs as a notebook on the job's compute, so the plugin ships its source."
         )
     name = fn.__name__
     if name == "<lambda>":

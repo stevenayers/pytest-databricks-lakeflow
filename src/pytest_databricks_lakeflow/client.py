@@ -281,7 +281,9 @@ class Lakeflow:
           `output` as JSON.
         - A list of SQL statements, each rendered with `string.Template` from the same parameters (`${name}`, and
           `$$` for a literal dollar) and run in order through `spark.sql`. The output is `{"statements": <count>}`.
-          A `${name}` must be a parameter the job declares or a key of `params`.
+          The list must not be empty. Each `${name}` is checked here, when `job()` is called, so it must be a
+          parameter the bundle job declares or a key of `params`; one that only `run(params=...)` or
+          `modify_settings` would supply is refused.
         - A `pathlib.Path` to a `.py` file, relative to the pytest rootdir, uploaded as the notebook. It reads the
           parameters from its widgets and calls `dbutils.notebook.exit` itself for an output.
 
@@ -353,9 +355,9 @@ class Lakeflow:
                 serverless environment does not take, sets both `environment_version` and `base_environment` on one
                 environment, or brings the job past 10 environments, or `setup` or `teardown` is not a plain function
                 with its source in a file, uses variables of an enclosing function, takes a parameter other than
-                `spark`, `dbutils` and `params`, or has a decorator. Also if `setup` or `teardown` is a string, a
-                statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither declared nor
-                in `params`, or a path is missing or not a `.py` file.
+                `spark`, `dbutils` and `params`, or has a decorator. Also if `setup` or `teardown` is a string or an
+                empty list, a statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither
+                declared nor in `params`, or a path is missing or not a `.py` file.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
@@ -368,8 +370,9 @@ class Lakeflow:
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         _check_lifecycle_params(key, settings, params or {}, notebooks)
-        check_task_params(key, settings, task_params or {}, params or {})
+        # Applied first, so a task key or value it rejects gives no collision warning before the error.
         apply_task_params(key, settings, task_params or {})
+        check_task_params(key, settings, task_params or {}, params or {})
         disable_tasks(settings, disable or [])
         force_condition_outcomes(settings, force_conditions or {})
         add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
@@ -458,8 +461,9 @@ class Lakeflow:
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         _check_lifecycle_params(job_key, settings, params or {}, notebooks)
-        check_task_params(job_key, settings, task_params or {}, params or {})
+        # Applied first, as in job().
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
+        check_task_params(job_key, settings, task_params or {}, params or {})
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
