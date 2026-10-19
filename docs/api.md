@@ -8,14 +8,21 @@ Session-scoped. It returns `Lakeflow()` unless you override it in a `conftest.py
 
 ## Command-line flags
 
-These apply to one pytest run and win over the matching `Lakeflow` arguments.
+These apply to one pytest run and win over the matching `Lakeflow` arguments. The `--lakeflow-sweep-*` flags need `--lakeflow-sweep`; see [sweeping leftovers](configuration.md#sweeping-leftovers).
 
 | Flag | Meaning |
 | --- | --- |
 | `--lakeflow-keep` | Keep every ephemeral job and temporary schema. |
 | `--lakeflow-keep-failed` | Keep the ephemeral job when its test fails, even with `Lakeflow(keep_failed=False)`. |
 | `--no-lakeflow-keep-failed` | Delete the ephemeral job even when its test fails. |
+| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job with `pytest_expires`, this many hours (`h`) or days (`d`) ahead in UTC. The sweep keeps a tagged job until then, whatever its age. |
 | `--lakeflow-sweep` | At session start, delete your leftover ephemeral jobs from other runs that are older than `sweep_hours`. |
+| `--lakeflow-sweep-scope=all` | Sweep jobs and schemas whoever created them. The default is `mine`. |
+| `--lakeflow-sweep-schemas=<catalog>` | Also drop old `pytest_<run id>_*` schemas of other runs in that catalog. |
+| `--lakeflow-sweep-notebooks` | Also delete old `setup_<hash>` and `teardown_<hash>` notebooks from the helpers folder. |
+| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs tagged `pytest_git_branch=<branch>`. Cannot be combined with the schema and notebook flags. |
+| `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete in the terminal summary. |
+| `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](configuration.md#report-directory). |
 

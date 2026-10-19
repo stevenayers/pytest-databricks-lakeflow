@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import posixpath
 import re
+import time
 import warnings
 from datetime import timedelta
 from pathlib import Path
@@ -20,7 +22,7 @@ import pytest
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed, session
 from pytest_databricks_lakeflow.results import serialise
 
 from .conftest import lakeflow_for
@@ -428,3 +430,45 @@ def test_strict_artifacts_refuses_the_unversioned_example_wheel(lakeflow: Lakefl
     strict = dataclasses.replace(lakeflow, strict_artifacts=True)
     with pytest.raises(LakeflowError, match=r"^Artifacts \['lakeflow_example'\] have no dynamic_version: true\."):
         strict.template("my_example_job")
+
+
+def test_sweep_dry_run_lists_without_deleting(lakeflow: Lakeflow) -> None:
+    assert lakeflow.catalog, "set LAKEFLOW_CATALOG"
+    with (
+        lakeflow.schema() as schema,
+        lakeflow.job("my_example_job", setup=check_compute, teardown=report_params) as job,
+    ):
+        assert job.job_id is not None
+        notebooks: dict[str, str] = {}
+        for task in job.settings.tasks or []:
+            if task.notebook_task is not None:
+                notebooks[task.task_key] = task.notebook_task.notebook_path
+        setup, teardown = notebooks["__pytest_setup"], notebooks["__pytest_teardown"]
+        time.sleep(1)
+        # Swept as another run with no age limit would sweep, so this test's job, schema and notebooks are listed.
+        options = session.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
+        report = session.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
+        assert report.dry_run
+        assert report.errors == ()
+        assert job.job_id in report.jobs
+        assert schema in report.schemas
+        assert {setup, teardown} <= set(report.notebooks), report.notebooks
+        assert lakeflow.ws.jobs.get(job.job_id).job_id == job.job_id
+        assert lakeflow.ws.schemas.get(schema).full_name == schema
+        for path in (setup, teardown):
+            lakeflow.ws.workspace.get_status(path)
+
+
+def test_keep_ttl_tag_protects_a_job_from_the_sweep(lakeflow: Lakeflow, monkeypatch: pytest.MonkeyPatch) -> None:
+    # As --lakeflow-keep-ttl=48h sets it, for this test only.
+    monkeypatch.setattr(session.current(), "keep_ttl", timedelta(hours=48))
+    with lakeflow.job("my_example_job") as job:
+        assert job.job_id is not None
+        stored = lakeflow.ws.jobs.get(job.job_id).settings
+        assert stored is not None and stored.tags is not None
+        assert stored.tags["pytest_expires"] == (job.settings.tags or {})["pytest_expires"]
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stored.tags["pytest_expires"])
+        time.sleep(1)
+        options = session.SweepOptions(dry_run=True)
+        report = session.sweep(lakeflow.ws, "another_run", 0, "/unused", options)
+        assert job.job_id not in report.jobs
