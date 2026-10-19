@@ -174,7 +174,7 @@ def test_failure_detail(lakeflow: Lakeflow) -> None:
 
 ### Branches
 
-An if/else condition task records its outcome, and the tasks on the branch that was not taken end `EXCLUDED`. `run.branch_taken(key)` returns the condition task's `condition_outcome` and raises `LakeflowError` when the task is not a condition task or has no outcome, so check its `result_state` then. Excluded tasks do not fail the run. In the `branches` integration bundle, `check_input` sets the task value `rows` from the `rows` job parameter, `check` compares it with `> 0`, and `on_true` and `on_false` depend on the two outcomes:
+An if/else condition task records its outcome, and the tasks on the branch that was not taken end `EXCLUDED`. `run.branch_taken(key)` returns the condition task's `condition_outcome` and raises `LakeflowError` when the task is not a condition task or has no outcome, so check its `result_state` then. Excluded tasks do not fail the run. In the `branches` integration bundle, `check_input` sets the task value `rows` from the `rows` job parameter, `check` compares it with `> 0`, and `on_true` and `on_false` depend on the two outcomes. `tests/integration/test_branches.py` parametrises both outcomes; the false branch on its own looks like this:
 
 ```python
 def test_no_rows_takes_the_false_branch(lakeflow: Lakeflow) -> None:
