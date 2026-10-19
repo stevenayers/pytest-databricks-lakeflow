@@ -15,7 +15,7 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest: deploy
 - A job in a bundle is usually checked by deploying it and pressing Run. This turns that into a pytest test, with `assert`, `parametrize` and xdist.
 - Every test runs its own copy of the job, so tests run in parallel and never touch the jobs your bundle deployed, except the children of Run Job tasks, which the plugin warns about.
 - Task values cannot be read through the Jobs API. The plugin injects tasks that set and capture them, so one task can be tested on its own with the upstream values you choose.
-- Test data needs no seed task in the bundle and no Databricks Connect. `setup=` and `teardown=` run plain Python functions with the real `spark` and `dbutils` as the first and last tasks of the copy.
+- Test data needs no seed task in the bundle and no Databricks Connect. `setup=` and `teardown=` run plain Python functions with the real `spark` and `dbutils`, a list of SQL statements, or a notebook file as the first and last tasks of the copy.
 
 ## Quickstart
 

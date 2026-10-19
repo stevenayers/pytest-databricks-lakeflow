@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import string
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat, Language
 
 from pytest_databricks_lakeflow.errors import LakeflowError
+from pytest_databricks_lakeflow.results import PREFIX
 
 # Widget names carry the injected-task prefix because every job parameter is also pushed to every notebook task's
 # widgets, overriding base_parameters of the same name.
@@ -44,8 +47,18 @@ dbutils.notebook.exit(json.dumps({{
 
 NOTEBOOKS = {"set_values": SET_VALUES, "get_values": GET_VALUES}
 
-# The source of `fn`, then a call that passes the arguments it declares. Job parameters are read from the widgets
-# named in the `__pytest_params` widget, because the platform pushes every job parameter to every notebook task.
+# Job parameters are read from the widgets, because the platform pushes every job parameter to every notebook task,
+# one passed to run_now that the job does not declare included. `getAll` returns them with the task's own base
+# parameters, which for these tasks all start with the plugin's prefix. Runtimes before Databricks Runtime 13.3 LTS
+# have no `getAll`, so the notebook then reads the names in the `__pytest_params` widget.
+READ_PARAMS = f"""try:
+    __pytest_widgets = dbutils.widgets.getAll()
+except Exception:
+    __pytest_names = json.loads(dbutils.widgets.get("{PARAMS_WIDGET}"))
+    __pytest_widgets = {{name: dbutils.widgets.get(name) for name in __pytest_names}}
+__pytest_job_params = {{k: v for k, v in __pytest_widgets.items() if not k.startswith("{PREFIX}")}}"""
+
+# The source of `fn`, then a call that passes the arguments it declares.
 # The future import keeps annotations unevaluated: serverless environment 4 runs Python 3.12, which evaluates them
 # when the def runs, and the names they use, such as SparkSession, are not imported in the notebook.
 LIFECYCLE = """# Databricks notebook source
@@ -55,13 +68,27 @@ import json
 
 {source}
 
-__pytest_names = json.loads(dbutils.widgets.get("{widget}"))
-__pytest_job_params = {{name: dbutils.widgets.get(name) for name in __pytest_names}}
+{read_params}
 __pytest_result = {call}
 if __pytest_result is not None:
     dbutils.notebook.exit(json.dumps(__pytest_result, default=str))
 """
 LIFECYCLE_VALUES = {"spark": "spark", "dbutils": "dbutils", "params": "__pytest_job_params"}
+
+# The statements are a Python literal in the source, not a widget, so `{{` in them needs no escaping.
+LIFECYCLE_SQL = """# Databricks notebook source
+import json
+import string
+
+{read_params}
+__pytest_statements = {statements}
+for __pytest_statement in __pytest_statements:
+    spark.sql(string.Template(__pytest_statement).substitute(__pytest_job_params))
+dbutils.notebook.exit(json.dumps({{"statements": len(__pytest_statements)}}))
+"""
+NOTEBOOK_MARKER = "# Databricks notebook source"
+
+LifecycleStep = Callable[..., object] | Sequence[str] | Path
 
 
 def default_folder(user: str | None) -> str:
@@ -88,21 +115,73 @@ def upload(ws: WorkspaceClient, folder: str) -> dict[str, str]:
     return paths
 
 
-def lifecycle_notebook(fn: Callable[..., object], argument: str) -> str:
-    """Build a notebook that calls `fn` with the arguments it declares and exits with what it returns.
+def lifecycle_source(step: LifecycleStep, rootpath: Path, argument: str) -> tuple[str, frozenset[str]]:
+    """Build the notebook for a `setup=` or `teardown=` step, and name the job parameters it reads.
+
+    A function becomes a notebook that calls it with the arguments it declares and exits with what it returns. A
+    list of SQL statements becomes a notebook that renders each with `string.Template` from the job parameters,
+    runs them in order through `spark.sql` and exits with `{"statements": <count>}`. A `Path` to a `.py` file is
+    read, relative to `rootpath`, and becomes the notebook as it is, with the notebook marker added when it lacks it.
 
     Args:
-        fn: The function given as `setup=` or `teardown=`.
+        step: The function, statements or file given as `setup=` or `teardown=`.
+        rootpath: The pytest rootdir, against which a relative path is resolved.
         argument: `"setup"` or `"teardown"`, for error messages.
 
     Returns:
-        The notebook's source.
+        The notebook's source, and the `${name}` placeholders of the statements. Empty for a function or a file,
+        whose reads cannot be known before they run.
 
     Raises:
-        LakeflowError: If `fn` is not a plain function defined with `def`, uses variables of an enclosing
-            function, takes a parameter other than `spark`, `dbutils` and `params`, has no source to read, or has a
-            decorator.
+        LakeflowError: If `step` is a string, a statement is not a string or has a `$` that is neither a
+            placeholder nor `$$`, the file does not exist or is not a `.py` file, or the function is not a plain
+            function defined with `def`, uses variables of an enclosing function, takes a parameter other than
+            `spark`, `dbutils` and `params`, has no source to read, or has a decorator.
     """
+    if isinstance(step, Path):
+        return _file_source(step, rootpath, argument), frozenset()
+    if isinstance(step, str):
+        raise LakeflowError(
+            f"{argument}= takes a list of SQL statements, not a string: pass [{step!r}], or a Path to a .py file."
+        )
+    if isinstance(step, Sequence):
+        return _sql_source(step, argument)
+    return _function_source(step, argument), frozenset()
+
+
+def _file_source(path: Path, rootpath: Path, argument: str) -> str:
+    if path.suffix != ".py":
+        raise LakeflowError(
+            f"{argument}= must be a .py file, got {path}. Put SQL statements in a list, or run them from a .py file "
+            "through spark.sql."
+        )
+    resolved = rootpath / path
+    if not resolved.is_file():
+        raise LakeflowError(f"{argument}= file {resolved} does not exist. A relative path starts at {rootpath}.")
+    text = resolved.read_text(encoding="utf-8")
+    if text.startswith(NOTEBOOK_MARKER):
+        return text
+    return f"{NOTEBOOK_MARKER}\n{text}"
+
+
+def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, frozenset[str]]:
+    names: set[str] = set()
+    for number, statement in enumerate(statements, start=1):
+        if not isinstance(statement, str):
+            raise LakeflowError(f"{argument}= statement {number} is not a string: {statement!r}")
+        template = string.Template(statement)
+        if not template.is_valid():
+            raise LakeflowError(
+                f"{argument}= statement {number} has an invalid placeholder: {statement!r}. Write ${{name}} for a job "
+                "parameter and $$ for a literal dollar."
+            )
+        names.update(template.get_identifiers())
+    source = LIFECYCLE_SQL.format(read_params=READ_PARAMS, statements=repr(list(statements)))
+    return source, frozenset(names)
+
+
+def _function_source(fn: Callable[..., object], argument: str) -> str:
+    """Build a notebook that calls `fn` with the arguments it declares and exits with what it returns."""
     if not inspect.isfunction(fn):
         raise LakeflowError(
             f"{argument}= must be a plain function defined with def, got {fn!r}. It runs as a notebook on the job's "
@@ -134,7 +213,7 @@ def lifecycle_notebook(fn: Callable[..., object], argument: str) -> str:
             "it does not exist. Remove the decorator."
         )
     call = f"{name}({', '.join(f'{arg}={LIFECYCLE_VALUES[arg]}' for arg in declared)})"
-    return LIFECYCLE.format(source=source, widget=PARAMS_WIDGET, call=call)
+    return LIFECYCLE.format(source=source, read_params=READ_PARAMS, call=call)
 
 
 def _declared_arguments(fn: Callable[..., object], label: str) -> list[str]:

@@ -418,6 +418,58 @@ def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> 
             lakeflow.ws.files.get_metadata(landing_file)
 
 
+def declare_run_date(settings: jobs.JobSettings, item: pytest.Item) -> None:
+    run_date = jobs.JobParameterDefinition(name="run_date", default="2026-01-01")
+    settings.parameters = [*(settings.parameters or []), run_date]
+
+
+def test_sql_setup_and_teardown(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema},
+            setup=[
+                "CREATE OR REPLACE TABLE ${schema}.seed AS SELECT 1 AS id",
+                "CREATE OR REPLACE TABLE ${schema}.scratch AS SELECT 2 AS id",
+            ],
+            teardown=["DROP TABLE ${schema}.scratch"],
+        ) as job:
+            run = job.run(only=["extract"])
+            assert run.succeeded, run
+            assert run.setup is not None and run.setup.output_json == {"statements": 2}, run.setup
+            assert run.teardown is not None and run.teardown.output_json == {"statements": 1}, run.teardown
+        assert lakeflow.ws.tables.exists(f"{schema}.seed").table_exists
+        assert not lakeflow.ws.tables.exists(f"{schema}.scratch").table_exists
+
+
+def test_sql_setup_reads_a_parameter_declared_by_modify_settings(lakeflow: Lakeflow) -> None:
+    declaring = dataclasses.replace(lakeflow, modify_settings=declare_run_date)
+    with (
+        lakeflow.schema() as schema,
+        declaring.job(
+            "my_example_job",
+            params={"schema": schema, "run_date": "2026-10-19"},
+            setup=["CREATE OR REPLACE TABLE ${schema}.seed AS SELECT DATE'${run_date}' AS day, '$$1' AS price"],
+            teardown=Path("tests/integration/notebooks/read_seed.py"),
+        ) as job,
+    ):
+        run = job.run(only=["extract"])
+        assert run.succeeded, run
+        assert run.setup is not None and run.setup.succeeded, run.setup
+        assert run.teardown is not None and run.teardown.succeeded, run.teardown
+        assert run.teardown.output_json == [{"day": "2026-10-19", "price": "$1"}]
+
+
+def test_undeclared_run_params_reach_the_setup_function(lakeflow: Lakeflow) -> None:
+    loose = dataclasses.replace(lakeflow, allow_undeclared_params=True)
+    with loose.job("my_example_job", setup=report_params) as job:
+        run = job.run(params={"run_date": "2026-10-19"}, only=["extract"])
+        assert run.succeeded, run
+        assert run.setup is not None and run.setup.succeeded, run.setup
+        params = run.setup.output_json
+        assert isinstance(params, dict) and params["run_date"] == "2026-10-19", params
+
+
 def test_teardown_runs_after_a_failed_task(lakeflow: Lakeflow) -> None:
     with lakeflow.job(
         "my_example_job", params={"param1": "forbidden"}, setup=check_compute, teardown=report_params

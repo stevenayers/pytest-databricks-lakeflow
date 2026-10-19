@@ -551,7 +551,7 @@ def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> 
             assert run.teardown.succeeded
 ```
 
-- A function takes any of `spark`, `dbutils` and `params`, and the plugin passes only the ones it declares. `params` is a dict of the job parameters the job declares, with their values for the run (the job's `params` and then the run's `params` merged over the defaults), as strings, the way the job's own notebooks read them from their widgets. Only declared parameters reach it: the names are fixed when `job()` is called, so a parameter passed under `allow_undeclared_params=True`, or declared by `modify_settings`, is not in `params`.
+- A function takes any of `spark`, `dbutils` and `params`, and the plugin passes only the ones it declares. `params` is a dict of the job parameters with their values for the run (the job's `params` and then the run's `params` merged over the defaults), as strings, the way the job's own notebooks read them from their widgets. It holds the parameters the job declares, those `modify_settings` declares, and those passed undeclared under `allow_undeclared_params=True` to `job()` or `run()`, because the notebook reads every widget with `dbutils.widgets.getAll()` and leaves out the plugin's `__pytest_` ones. On a [helper cluster](task-tests.md#helper-compute) older than Databricks Runtime 13.3 LTS, which has no `getAll`, it holds only the declared parameters and the keys of `job(params=...)`.
 - The setup task, `__pytest_setup`, runs first: every task that has no `depends_on`, stubs included, comes to depend on it. The teardown task, `__pytest_teardown`, runs last, after every task that no other task depends on, probes included, with `run_if` set to `ALL_DONE`, so it runs whether the job passed or failed. Both run on every `run()`, and `run(only=...)` always includes them. A selected task still waits for the setup when the tasks between them are left out, because the platform marks a left-out task `DISABLED` only once the tasks before it have finished.
 - A value the function returns becomes the task's `output` as JSON, through `json.dumps(value, default=str)`, so `run.setup.output_json` gives it back.
 - `run.setup` and `run.teardown` are the two tasks' `TaskRun`s, or `None` when the job has none. They are in `run.injected_tasks` and do not count towards `run.succeeded`.
@@ -574,6 +574,35 @@ def test_setup_on_a_newer_runtime(lakeflow: Lakeflow) -> None:
 ```
 
 The teardown runs inside the same job run, after the job's tasks and before the test's assertions. Use it for side effects the test does not assert on: files under a volume, checkpoints, tables outside the temporary schema, rows written to a source table. Tables the test asserts on belong in [`lakeflow.schema()`](#temporary-schemas), which drops them after the test, so most tests need `setup=` only. Make the functions idempotent: the setup runs on every run, including every run of a job shared by several tests, hence `CREATE OR REPLACE TABLE`.
+
+### SQL statements and notebook files
+
+`setup=` and `teardown=` also take a list of SQL statements, or a `Path` to a `.py` file, when a function is more than the data needs:
+
+```python
+from pathlib import Path
+
+
+def test_seeded_with_sql(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema},
+            setup=["CREATE OR REPLACE TABLE ${schema}.seed AS SELECT 1 AS id, '$$1' AS price"],
+            teardown=Path("tests/integration/notebooks/read_seed.py"),
+        ) as job:
+            run = job.run()
+            assert run.succeeded, run
+            assert run.setup.output_json == {"statements": 1}
+        assert lakeflow.ws.tables.exists(f"{schema}.seed").table_exists
+```
+
+- Each statement is rendered with Python's `string.Template` from the job parameters, the same ones a function gets as `params`, and run in order through `spark.sql` on the job's compute, so no SQL warehouse is needed. `${schema}` or `$schema` is replaced by the parameter's value, as text: quote it in the SQL where it is a string, as in `DATE'${run_date}'`. Write `$$` for a literal `$`.
+- `job()` and `task()` raise `LakeflowError` before anything is created when a `${name}` is neither declared by the job nor a key of their `params`, when a `$` is neither a placeholder nor `$$`, or when the argument is a bare string rather than a list.
+- The task's output is `{"statements": <count>}`. Statements return no rows to the test: assert on the tables they write through `lakeflow.ws`, or read them in a function teardown and return what it finds.
+- A `Path` is resolved against the pytest rootdir and must be a `.py` file; a missing file or another suffix raises `LakeflowError`. Its text is the notebook, with the `# Databricks notebook source` line added when it lacks one. It has `spark` and `dbutils` like any notebook, reads the job parameters from its widgets with `dbutils.widgets.get("schema")`, and calls `dbutils.notebook.exit(...)` itself if the test should see an output.
+
+Both forms are uploaded once per session under the same `setup_<hash>` and `teardown_<hash>` names, so tests that share a list share one notebook. A `.sql` file is not accepted, because splitting a file into statements on `;` breaks on string literals and comments; put the statements in a list, or run them from a `.py` file with `spark.sql`.
 
 ## Share one run between tests
 
