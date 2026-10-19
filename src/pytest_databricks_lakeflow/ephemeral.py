@@ -37,6 +37,7 @@ from pytest_databricks_lakeflow.settings import (
     check_references,
     create_kwargs,
     job_timeout_seconds,
+    name_lifecycle_params,
     pipeline_params,
     require_task,
     select,
@@ -152,6 +153,7 @@ class EphemeralJob:
         item = session.current_item()
         if self.lakeflow.modify_settings is not None:
             self.lakeflow.modify_settings(self.settings, item)
+            name_lifecycle_params(self.settings, self.params)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         check_compute(self.settings)
         acl = self.lakeflow.access_control_list()

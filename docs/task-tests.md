@@ -25,7 +25,7 @@ with lakeflow.task(
 - `task_params` overrides the task's parameters as for [job tests](job-tests.md#make-a-job), such as `task_params={"transform": {"limit": "10"}}`. It is applied before the stubs are added, so only the task under test can be named, and a value that refers to `{{tasks.<key>.values.<name>}}` needs a stub for `<key>` like the task's own settings do.
 - `task_overrides` sets the task's timeout and retry fields as for job tests, see [Retries and timeouts](job-tests.md#retries-and-timeouts). It can name only the task under test, as `{"<task_key>": {...}}`; any other key raises `LakeflowError`.
 
-`setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data). The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
+`setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data) and take the same three forms: a function, a list of SQL statements or a `Path` to a `.py` file. The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
 
 ```python
 with lakeflow.schema() as schema:

@@ -19,6 +19,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import bundle, helpers, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
+from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, JobRun, NotebookExport
 from pytest_databricks_lakeflow.settings import (
     SIDE_EFFECTS,
@@ -27,6 +28,7 @@ from pytest_databricks_lakeflow.settings import (
     SideEffects,
     add_dependencies,
     apply_task_params,
+    check_lifecycle_params,
     check_params,
     check_task_params,
     disable_tasks,
@@ -50,6 +52,8 @@ Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
 Children = Literal["warn", "refuse"]
 CHILDREN: tuple[str, ...] = get_args(Children)
+# A setup or teardown notebook's source, and the job parameters its statements read.
+Notebook = tuple[str, frozenset[str]]
 UNVERSIONED_ARTIFACTS = (
     "Artifacts {names} have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt wheel with "
     "the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
@@ -257,8 +261,8 @@ class Lakeflow:
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         force_conditions: Mapping[str, bool] | None = None,
         children: Children = "warn",
-        setup: Callable[..., object] | None = None,
-        teardown: Callable[..., object] | None = None,
+        setup: LifecycleStep | None = None,
+        teardown: LifecycleStep | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -266,14 +270,20 @@ class Lakeflow:
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
-        `setup` and `teardown` are plain functions that run on the job's compute, as notebook tasks of the copy. Each
-        takes any of `spark`, `dbutils` and `params`, a dict of the parameters the job declares with their values for
-        the run, as strings. Only declared parameters reach it, because the names are fixed when `job()` is called:
-        one passed under `allow_undeclared_params=True`, or declared by `modify_settings`, is not in `params`. The
-        setup task runs before every other task on every run, and the teardown task after every other task, whether
-        they passed or failed.
-        A function must be self-contained: it is shipped as source, so imports go inside it and it cannot use
-        variables of an enclosing function. A value it returns becomes the task's `output` as JSON.
+        `setup` and `teardown` run on the job's compute, as notebook tasks of the copy. The setup task runs before
+        every other task on every run, and the teardown task after every other task, whether they passed or failed.
+        Each is one of three forms:
+
+        - A plain function taking any of `spark`, `dbutils` and `params`, a dict of the job's parameters with their
+          values for the run, as strings: those it declares, those `modify_settings` declares and those passed
+          under `allow_undeclared_params=True`. It must be self-contained: it is shipped as source, so imports go
+          inside it and it cannot use variables of an enclosing function. A value it returns becomes the task's
+          `output` as JSON.
+        - A list of SQL statements, each rendered with `string.Template` from the same parameters (`${name}`, and
+          `$$` for a literal dollar) and run in order through `spark.sql`. The output is `{"statements": <count>}`.
+          A `${name}` must be a parameter the job declares or a key of `params`.
+        - A `pathlib.Path` to a `.py` file, relative to the pytest rootdir, uploaded as the notebook. It reads the
+          parameters from its widgets and calls `dbutils.notebook.exit` itself for an output.
 
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
@@ -297,10 +307,11 @@ class Lakeflow:
                 child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
                 inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
                 created.
-            setup: Runs first, as the task `__pytest_setup`, which every task without `depends_on` comes to depend
-                on. Its outcome is `JobRun.setup`.
-            teardown: Runs last, as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no
-                other task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning.
+            setup: A function, a list of SQL statements or a `.py` file to run first, as the task `__pytest_setup`,
+                which every task without `depends_on` comes to depend on. Its outcome is `JobRun.setup`.
+            teardown: A function, a list of SQL statements or a `.py` file to run last, as the task
+                `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no other task depends on. Its
+                outcome is `JobRun.teardown`, and a failure is logged as a warning.
             extra_dependencies: Test-only dependencies for the copy, as PyPI requirements, workspace or Volumes
                 paths of wheels, or local wheels as paths relative to the bundle root that start with `./` or `../`,
                 such as `./dist/*.whl[test]`. A local path is pointed at the copy of each matching file that the last
@@ -342,7 +353,9 @@ class Lakeflow:
                 serverless environment does not take, sets both `environment_version` and `base_environment` on one
                 environment, or brings the job past 10 environments, or `setup` or `teardown` is not a plain function
                 with its source in a file, uses variables of an enclosing function, takes a parameter other than
-                `spark`, `dbutils` and `params`, or has a decorator.
+                `spark`, `dbutils` and `params`, or has a decorator. Also if `setup` or `teardown` is a string, a
+                statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither declared nor
+                in `params`, or a path is missing or not a `.py` file.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
@@ -354,6 +367,7 @@ class Lakeflow:
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
+        _check_lifecycle_params(key, settings, params or {}, notebooks)
         check_task_params(key, settings, task_params or {}, params or {})
         apply_task_params(key, settings, task_params or {})
         disable_tasks(settings, disable or [])
@@ -362,7 +376,7 @@ class Lakeflow:
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        self._inject_lifecycle(settings, notebooks)
+        self._inject_lifecycle(settings, notebooks, params or {})
         return self._ephemeral(
             item,
             key,
@@ -388,8 +402,8 @@ class Lakeflow:
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         upstream_from: JobRun | None = None,
         children: Children = "warn",
-        setup: Callable[..., object] | None = None,
-        teardown: Callable[..., object] | None = None,
+        setup: LifecycleStep | None = None,
+        teardown: LifecycleStep | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -443,6 +457,7 @@ class Lakeflow:
         # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
+        _check_lifecycle_params(job_key, settings, params or {}, notebooks)
         check_task_params(job_key, settings, task_params or {}, params or {})
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
         others = sorted(set(task_overrides or {}) - {task_key})
@@ -456,7 +471,7 @@ class Lakeflow:
         upstream.update(explicit)
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         override_tasks(settings, task_overrides or {})
-        self._inject_lifecycle(settings, notebooks)
+        self._inject_lifecycle(settings, notebooks, params or {})
         capture: dict[str, list[str]] = {}
         if capture_task_values:
             capture = {task_key: list(capture_task_values)}
@@ -585,15 +600,17 @@ class Lakeflow:
             job_cluster_key=self.helpers_compute,
         )
 
-    def _inject_lifecycle(self, settings: jobs.JobSettings, notebooks: Mapping[str, str]) -> None:
+    def _inject_lifecycle(
+        self, settings: jobs.JobSettings, notebooks: Mapping[str, Notebook], params: Mapping[str, str]
+    ) -> None:
         if not notebooks:
             return
         folder = session.folder_of_helpers(self._state())
         uploaded = session.current().uploaded_notebooks
         paths: dict[str, str] = {}
-        for role, source in notebooks.items():
+        for role, (source, _) in notebooks.items():
             paths[role] = helpers.upload_lifecycle(self.ws, folder, role, source, uploaded)
-        inject_lifecycle(settings, paths.get("setup"), paths.get("teardown"), self._helpers())
+        inject_lifecycle(settings, paths.get("setup"), paths.get("teardown"), self._helpers(), params)
 
     def _ephemeral(
         self,
@@ -675,13 +692,16 @@ def _flag_name(flag: str) -> str:
     return name[:2]
 
 
-def _lifecycle_notebooks(setup: Callable[..., object] | None, teardown: Callable[..., object] | None) -> dict[str, str]:
+def _lifecycle_notebooks(setup: LifecycleStep | None, teardown: LifecycleStep | None) -> dict[str, Notebook]:
     """Build the setup and teardown notebooks that were asked for, by role, checking both before anything else."""
-    notebooks: dict[str, str] = {}
+    notebooks: dict[str, Notebook] = {}
+    if setup is None and teardown is None:
+        return notebooks
+    rootpath = session.current().rootpath
     if setup is not None:
-        notebooks["setup"] = helpers.lifecycle_notebook(setup, "setup")
+        notebooks["setup"] = helpers.lifecycle_source(setup, rootpath, "setup")
     if teardown is not None:
-        notebooks["teardown"] = helpers.lifecycle_notebook(teardown, "teardown")
+        notebooks["teardown"] = helpers.lifecycle_source(teardown, rootpath, "teardown")
     return notebooks
 
 
@@ -690,6 +710,13 @@ def _stale_message(stale: Sequence[str], target: str) -> str:
     if len(stale) == 1:
         return f"{stale[0]} was built after its uploaded copy. {deploy}"
     return f"{', '.join(stale)} were built after their uploaded copies. {deploy}"
+
+
+def _check_lifecycle_params(
+    job_key: str, settings: jobs.JobSettings, params: Mapping[str, str], notebooks: Mapping[str, Notebook]
+) -> None:
+    for role, (_, names) in notebooks.items():
+        check_lifecycle_params(job_key, settings, params, role, names)
 
 
 def _check_children(children: str) -> None:

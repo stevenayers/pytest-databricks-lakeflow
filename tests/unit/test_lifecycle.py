@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import json
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,15 +11,28 @@ import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.helpers import PARAMS_WIDGET, lifecycle_notebook
+from pytest_databricks_lakeflow.helpers import PARAMS_WIDGET, LifecycleStep, lifecycle_source
+from pytest_databricks_lakeflow.settings import check_lifecycle_params
 
-from .fakes import FakeDbutils, FakeWorkspaceClient, make_run, run_notebook
+from .conftest import configure_lakeflow
+from .fakes import FakeDbutils, FakeSpark, FakeWorkspaceClient, example_settings, make_run, run_notebook
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
 HELPERS_FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow"
 JOB_TASKS = ["__pytest_setup", "extract", "transform", "load", "classic", "__pytest_teardown"]
 WIDGETS = {PARAMS_WIDGET: json.dumps(["param1", "schema"]), "param1": "hello", "schema": "dev.s"}
+MARKER = "# Databricks notebook source"
+SEED_STATEMENT = "CREATE OR REPLACE TABLE ${schema}.t AS SELECT 1"
+RUN_DATE_STEPS = """params={"run_date": "2026-10-19"}, teardown=["DELETE FROM ${schema}.t WHERE day = '${run_date}'"]"""
+DECLARE_RUN_DATE = """
+
+from databricks.sdk.service import jobs
+
+
+def declare_run_date(settings, item):
+    settings.parameters = [*(settings.parameters or []), jobs.JobParameterDefinition(name="run_date", default="d")]
+"""
 
 LIFECYCLE_FUNCTIONS = """
 def seed(spark, dbutils, params):
@@ -80,6 +94,10 @@ def takes_anything(*args):
     pass
 
 
+def notebook(step: LifecycleStep, argument: str = "setup") -> str:
+    return lifecycle_source(step, Path("/nowhere"), argument)[0]
+
+
 def run_tests(pytester: pytest.Pytester, source: str, *args: str) -> pytest.RunResult:
     pytester.makepyfile(test_jobs=LIFECYCLE_FUNCTIONS + source)
     return pytester.runpytest(*args)
@@ -98,7 +116,7 @@ class TestNotebookSource:
     """The generated notebook passes the declared arguments and exits with the return value as JSON."""
 
     def test_declared_arguments_only(self) -> None:
-        source = lifecycle_notebook(seed, "setup")
+        source = notebook(seed, "setup")
         assert source.startswith("# Databricks notebook source\n")
         assert "def seed(spark, params):" in source
         assert "seed(spark=spark, params=" in source
@@ -108,13 +126,27 @@ class TestNotebookSource:
         assert output is not None and json.loads(output) == {"rows": 1, "schema": "dev.s"}
         assert spark == ["dev.s"]
 
-    def test_params_are_the_named_job_parameters_as_strings(self) -> None:
-        widgets = {PARAMS_WIDGET: json.dumps(["count", "schema"]), "count": "3", "schema": "dev.s", "other": "x"}
-        output = run_notebook(lifecycle_notebook(reads_params, "setup"), widgets)
-        assert output is not None and json.loads(output) == {"count": "3", "schema": "dev.s"}
+    @pytest.mark.parametrize(
+        ("get_all", "expected"),
+        [
+            pytest.param(True, {"count": "3", "schema": "dev.s", "run_date": "2026-10-19"}, id="every_job_parameter"),
+            pytest.param(False, {"count": "3", "schema": "dev.s"}, id="named_without_getAll"),
+        ],
+    )
+    def test_params_are_the_job_parameters_as_strings(self, get_all: bool, expected: dict[str, str]) -> None:
+        # run_date stands for a parameter passed only to run(params=...), which the platform still makes a widget.
+        widgets = {
+            PARAMS_WIDGET: json.dumps(["count", "schema"]),
+            "__pytest_test_id": "t.py::t",
+            "count": "3",
+            "schema": "dev.s",
+            "run_date": "2026-10-19",
+        }
+        output = run_notebook(notebook(reads_params, "setup"), widgets, get_all=get_all)
+        assert output is not None and json.loads(output) == expected
 
     def test_none_returned_exits_without_output(self) -> None:
-        assert run_notebook(lifecycle_notebook(quiet, "teardown"), WIDGETS) is None
+        assert run_notebook(notebook(quiet, "teardown"), WIDGETS) is None
 
     def test_values_json_cannot_encode_become_strings(self) -> None:
         def returns_a_date(params):
@@ -122,11 +154,11 @@ class TestNotebookSource:
 
             return {"day": datetime.date(2026, 10, 19)}
 
-        output = run_notebook(lifecycle_notebook(returns_a_date, "setup"), WIDGETS)
+        output = run_notebook(notebook(returns_a_date, "setup"), WIDGETS)
         assert output == '{"day": "2026-10-19"}'
 
     def test_annotations_naming_what_the_notebook_does_not_import(self) -> None:
-        source = lifecycle_notebook(annotated, "setup")
+        source = notebook(annotated, "setup")
         output = run_notebook(source, WIDGETS)
         assert output is not None and json.loads(output) == {"param1": "hello", "schema": "dev.s"}
         assert source.startswith("# Databricks notebook source\nfrom __future__ import annotations\n")
@@ -135,9 +167,77 @@ class TestNotebookSource:
         def nested(spark):
             return "nested"
 
-        source = lifecycle_notebook(nested, "setup")
+        source = notebook(nested, "setup")
         assert "\ndef nested(spark):\n" in source
         assert run_notebook(source, WIDGETS) == '"nested"'
+
+
+class TestSqlStatements:
+    """A list of SQL statements runs through spark.sql in order, rendered from the job parameters."""
+
+    @pytest.mark.parametrize(
+        ("statement", "rendered", "names"),
+        [
+            pytest.param(SEED_STATEMENT, "CREATE OR REPLACE TABLE dev.s.t AS SELECT 1", {"schema"}, id="placeholder"),
+            pytest.param("SELECT '$$1' AS price, $param1", "SELECT '$1' AS price, hello", {"param1"}, id="dollars"),
+            pytest.param(
+                "SELECT \"a\\b\", '''{{x}}'''\n-- ${schema}",
+                "SELECT \"a\\b\", '''{{x}}'''\n-- dev.s",
+                {"schema"},
+                id="quotes_braces_and_newlines",
+            ),
+        ],
+    )
+    def test_renders_and_runs(self, statement: str, rendered: str, names: set[str]) -> None:
+        source, read = lifecycle_source([statement, "SELECT 2"], Path("/nowhere"), "setup")
+        assert "spark.sql(" in source
+        assert repr(statement) in source, "statements are shipped unrendered"
+        assert read == frozenset(names)
+        spark = FakeSpark()
+        output = run_notebook(source, WIDGETS, spark=spark)
+        assert spark.statements == [rendered, "SELECT 2"]
+        assert output is not None and json.loads(output) == {"statements": 2}
+
+    def test_unknown_placeholder_is_refused(self) -> None:
+        names = lifecycle_source(["SELECT ${nope}, ${schema}"], Path("/nowhere"), "teardown")[1]
+        with pytest.raises(LakeflowError, match=r"teardown= reads \['nope'\].*Declared: \['param1', 'schema'\]"):
+            check_lifecycle_params("my_job", example_settings(), {}, "teardown", names)
+        check_lifecycle_params("my_job", example_settings(), {"nope": "x"}, "teardown", names)
+
+
+class TestNotebookFiles:
+    """A .py file, resolved against the rootdir, becomes the notebook, with the notebook marker added if missing."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param("dbutils.notebook.exit('x')\n", f"{MARKER}\ndbutils.notebook.exit('x')\n", id="no_marker"),
+            pytest.param(f"{MARKER}\nprint(1)\n", f"{MARKER}\nprint(1)\n", id="marker"),
+        ],
+    )
+    def test_file_text_becomes_the_notebook(self, tmp_path: Path, text: str, expected: str) -> None:
+        (tmp_path / "fixtures").mkdir()
+        (tmp_path / "fixtures" / "seed.py").write_text(text)
+        assert lifecycle_source(Path("fixtures/seed.py"), tmp_path, "setup") == (expected, frozenset())
+
+
+class TestRejectedSteps:
+    """Statements and files that cannot run are refused with a message that says what to do."""
+
+    @pytest.mark.parametrize(
+        ("step", "message"),
+        [
+            pytest.param(SEED_STATEMENT, r"setup= takes a list of SQL statements, not a string", id="bare_string"),
+            pytest.param([SEED_STATEMENT, 1], r"setup= statement 2 is not a string: 1", id="not_a_string"),
+            pytest.param(["SELECT '$1'"], r"setup= statement 1 has an invalid placeholder.*\$\$", id="bad_dollar"),
+            pytest.param(Path("missing.py"), r"setup= file .*missing\.py does not exist", id="missing"),
+            pytest.param(Path("seed.sql"), r"setup= must be a \.py file, got seed\.sql", id="sql_file"),
+        ],
+    )
+    def test_rejects(self, tmp_path: Path, step: LifecycleStep, message: str) -> None:
+        (tmp_path / "seed.sql").write_text("SELECT 1")
+        with pytest.raises(LakeflowError, match=message):
+            lifecycle_source(step, tmp_path, "setup")
 
 
 class TestRejectedFunctions:
@@ -167,12 +267,15 @@ class TestRejectedFunctions:
     )
     def test_rejects(self, fn: Callable[..., object], message: str) -> None:
         with pytest.raises(LakeflowError, match=message):
-            lifecycle_notebook(fn, "setup")
+            notebook(fn, "setup")
 
     def test_rejected_before_anything_is_created(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        pytester.makefile(".sql", seed="SELECT 1")
         result = run_tests(
             pytester,
             """
+from pathlib import Path
+
 import pytest
 
 from pytest_databricks_lakeflow import LakeflowError
@@ -183,6 +286,16 @@ def test_job(lakeflow):
         lakeflow.job("my_job", setup=seed, teardown=lambda dbutils: None)
     with pytest.raises(LakeflowError, match="setup= cannot be a lambda"):
         lakeflow.task("my_job.load", setup=lambda spark: None)
+    with pytest.raises(LakeflowError, match="nope"):
+        lakeflow.job("my_job", params={"schema": "s"}, setup=["SELECT ${schema}"], teardown=["DROP ${nope}"])
+    with pytest.raises(LakeflowError, match="nope"):
+        lakeflow.task("my_job.load", setup=["SELECT ${nope}"])
+    with pytest.raises(LakeflowError, match="not a string"):
+        lakeflow.job("my_job", setup="SELECT 1")
+    with pytest.raises(LakeflowError, match="does not exist"):
+        lakeflow.job("my_job", teardown=Path("missing.py"))
+    with pytest.raises(LakeflowError, match=r"\\.py file"):
+        lakeflow.job("my_job", setup=Path("seed.sql"))
 """,
         )
         result.assert_outcomes(passed=1)
@@ -265,6 +378,71 @@ def test_b(lakeflow):
         assert len(uploads) == 2
         assert sorted(path.rsplit("/", 1)[-1].split("_")[0] for path in uploads) == ["setup", "teardown"]
         assert len(fake_ws.jobs.created) == 3
+
+    def test_sql_setup_uploads_once_per_session(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            """
+SEED = ["CREATE OR REPLACE TABLE ${schema}.orders AS SELECT 1"]
+
+
+def test_a(lakeflow):
+    lakeflow.job("my_job", params={"schema": "s"}, setup=SEED).create()
+
+
+def test_b(lakeflow):
+    lakeflow.job("my_job", params={"schema": "s"}, setup=list(SEED)).create()
+""",
+        )
+        result.assert_outcomes(passed=2)
+        [path] = lifecycle_uploads(fake_ws)
+        assert path.startswith(f"{HELPERS_FOLDER}/setup_")
+        assert "spark.sql(" in fake_ws.workspace.uploads[path]["content"]
+        assert "${schema}.orders" in fake_ws.workspace.uploads[path]["content"]
+        setup = fake_ws.jobs.created[0]["tasks"][0]
+        assert setup.task_key == "__pytest_setup"
+        assert setup.notebook_task.base_parameters == {PARAMS_WIDGET: '["param1", "schema"]'}
+
+    def test_file_setup_is_read_from_the_rootdir(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        pytester.mkdir("fixtures")
+        pytester.path.joinpath("fixtures", "seed.py").write_text("spark.sql('SELECT 1')\n")
+        result = run_tests(
+            pytester,
+            """
+from pathlib import Path
+
+
+def test_job(lakeflow):
+    lakeflow.job("my_job", setup=Path("fixtures/seed.py")).create()
+""",
+        )
+        result.assert_outcomes(passed=1)
+        [path] = lifecycle_uploads(fake_ws)
+        assert fake_ws.workspace.uploads[path]["content"] == f"{MARKER}\nspark.sql('SELECT 1')\n"
+
+    @pytest.mark.parametrize(
+        ("arguments", "extra", "job_arguments"),
+        [
+            pytest.param("modify_settings=declare_run_date", DECLARE_RUN_DATE, RUN_DATE_STEPS, id="modify_settings"),
+            pytest.param("allow_undeclared_params=True", "", RUN_DATE_STEPS, id="allow_undeclared_params"),
+            pytest.param(
+                "modify_settings=declare_run_date", DECLARE_RUN_DATE, "teardown=cleanup", id="declared_after_job()"
+            ),
+        ],
+    )
+    def test_params_widget_names_parameters_the_job_gets_later(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str, extra: str, job_arguments: str
+    ) -> None:
+        configure_lakeflow(pytester, arguments, extra)
+        result = run_tests(
+            pytester, f'def test_job(lakeflow):\n    lakeflow.job("my_job", setup=seed, {job_arguments}).create()\n'
+        )
+        result.assert_outcomes(passed=1)
+        tasks = created_tasks(fake_ws)
+        for key in ("__pytest_setup", "__pytest_teardown"):
+            notebook_task = tasks[key].notebook_task
+            assert notebook_task is not None and notebook_task.base_parameters is not None
+            assert json.loads(notebook_task.base_parameters[PARAMS_WIDGET]) == ["param1", "schema", "run_date"]
 
     def test_neither_argument_changes_nothing(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run(only=["load"])\n')
