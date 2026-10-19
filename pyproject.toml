@@ -65,7 +65,7 @@ build-backend = "hatchling.build"
 packages = ["src/pytest_databricks_lakeflow"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+include = ["src", "tests", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 120
@@ -80,10 +80,12 @@ ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/bundle/src/notebooks/*.py" = ["F821"]
+"tests/integration/bundles/*/src/notebooks/*.py" = ["F821"]
 
 [tool.ty.src]
 include = ["src", "tests"]
+# Notebooks use platform globals such as dbutils and spark.
+exclude = ["tests/integration/bundles"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -34,7 +34,7 @@ targets:
       root_path: ~/.bundle/${bundle.name}/test
 ```
 
-Write a test. This one runs `my_example_job` from [`examples/bundle`](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/examples/bundle); swap in your own job and task keys:
+Write a test. This one runs `my_example_job` from [the example bundle](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/tests/integration/bundles/example); swap in your own job and task keys:
 
 ```python
 from pytest_databricks_lakeflow import Lakeflow

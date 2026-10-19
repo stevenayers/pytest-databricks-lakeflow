@@ -124,9 +124,9 @@ jobs:
       - run: uv export --all-groups --all-extras --no-emit-project --format requirements.txt -o requirements.txt
       - run: uv run --only-group audit pip-audit --disable-pip --require-hashes --strict -r requirements.txt
 
-  # Runs the acceptance tests against examples/bundle in a real workspace. It needs the repository variables
-  # DATABRICKS_HOST and LAKEFLOW_CATALOG and, in the `integration` environment, the secrets DATABRICKS_CLIENT_ID and
-  # DATABRICKS_CLIENT_SECRET for a service principal. It is skipped until DATABRICKS_HOST is set.
+  # Runs the integration tests against the bundles under tests/integration/bundles in a real workspace. It needs the
+  # repository variables DATABRICKS_HOST and LAKEFLOW_CATALOG and, in the `integration` environment, the secrets
+  # DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET for a service principal. It is skipped until DATABRICKS_HOST is set.
   integration:
     name: Integration tests
     needs: [lint, typecheck, test]
@@ -137,7 +137,7 @@ jobs:
       contents: read
     # The service principal's secrets live in this environment, not at repository level.
     environment: integration
-    # One deployment of examples/bundle at a time: runs share the service principal's bundle root_path.
+    # One deployment of each integration bundle at a time: runs share the service principal's bundle root_path.
     concurrency:
       group: integration
       cancel-in-progress: false
