@@ -107,7 +107,7 @@ def test_with_test_helpers(lakeflow: Lakeflow) -> None:
         assert job.run().succeeded
 ```
 
-Each entry is a PyPI requirement, or the `/Workspace` or `/Volumes` path of a wheel. It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
+Each entry is a PyPI requirement, or the `/Workspace` or `/Volumes` path of a wheel. It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else, a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
 
 Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged; install the package with `%pip install` in the notebook, or give the task an environment in the bundle. Local paths such as `./dist/*.whl[test]` are not supported yet and raise `LakeflowError` before anything is created. Declare a local wheel in the bundle job instead, where `sync="deploy"` maps it to the uploaded file.
 
@@ -214,10 +214,10 @@ Each `TaskRun` has:
 - `notebook`, a `NotebookView` of a notebook task that ran and did not succeed, read from the rendered notebook, or `None`. See [Read what a notebook printed](#read-what-a-notebook-printed).
 - `error`, a `TaskError` with `type`, `message`, `trace`, `root_cause` and `code`, or `None`.
 - `task_values` and `missing_task_values`, task values captured by a probe.
-- `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. The platform gives job parameters precedence over task parameters with the same key, and the value here shows the job parameter's.
+- `parameters`, what the task received after job parameters and `{{...}}` references were resolved. It is a dict for notebook (`base_parameters`), SQL, run-job (`job_parameters`) and Python wheel tasks with named parameters, a list for Python wheel tasks with positional parameters, Python script, JAR and spark-submit tasks and dbt tasks (`commands`), and `None` for other task types or when the platform reported none. The platform gives job parameters precedence over task parameters with the same key, and the value here shows the job parameter's. A SQL file task's dict holds every job parameter as well as its own, also when it declares none, because the platform adds them to the parameters of each SQL file task, so compare the entries you set rather than the whole dict.
 - `duration`, `attempt` and `run_url`.
 - `timing`, a `Timing` with the `queue`, `setup`, `execution` and `cleanup` durations the platform reported and their `total`, and `effective_performance_target`, `STANDARD` or `PERFORMANCE_OPTIMIZED`. `JobRun` has both as well; a run with several tasks reports zero durations on the parent run, so read them on the tasks. A duration the platform did not report is zero, and a performance target it did not report is `None`.
-- `attempts`, one `TaskRun` per attempt in attempt order, when the platform retried the task. The task itself describes the last attempt, and `attempts[-1]` equals it apart from `attempts`. Each element has its own `run_id`, `error` and `output`, and an empty `attempts`.
+- `attempts`, one `TaskRun` per attempt in attempt order, when the platform retried the task. The task itself describes the last attempt, and `attempts[-1]` equals it apart from `attempts`. Each element has its own `run_id`, `error` and `output`, and an empty `attempts`. Only the last attempt is exported, so the earlier ones have `notebook` `None`.
 
 A test of a job with a SQL query, an alert and a run-job task reads like this:
 
@@ -365,7 +365,7 @@ A `NotebookView` has:
 - `failed_cell`, the first cell that raised, or `None`. Cells skipped after it have no error.
 - `html`, the exported HTML, unchanged, and `save(path)`, which writes it to a file that opens in a browser like the run page.
 
-The output comes from the rendered notebook, so it is complete only once the task has terminated, which it has by the time `run()` returns. The export format is not documented, so the plugin parses it best effort: when the notebook model cannot be found in the HTML, `cells` is empty, `html` keeps the export and a `UserWarning` names the missing `__DATABRICKS_NOTEBOOK_MODEL` marker. When `export_run` fails, `notebook` is `None` and a warning with the task key and run URL is logged; the run's outcome is unchanged.
+The output comes from the rendered notebook, so it is complete only once the task has terminated, which it has by the time `run()` returns. The export format is not documented, so the plugin parses it best effort: when the notebook model cannot be found in the HTML, `cells` is empty, `html` keeps the export and a `UserWarning` names the missing `__DATABRICKS_NOTEBOOK_MODEL` marker. The warning is emitted once per test, however many of its notebooks cannot be read, and again in each later test that exports one. When `export_run` fails, `notebook` is `None` and a warning with the task key and run URL is logged; the run's outcome is unchanged.
 
 `Lakeflow(notebook_export=...)` chooses the tasks: `"failed"` (the default) exports the notebook tasks that ran and did not succeed, `"always"` every notebook task that ran, so that tests can assert on what a passing notebook printed, and `"never"` none. Only notebook tasks are exported, never Python script, wheel, JAR or SQL tasks or the plugin's stubs and probes, and only the last attempt of a retried task. When a test fails, its `lakeflow` report section shows, for each failing task with a notebook, the first code line of the cell that failed and the last 50 lines of `stdout`:
 
@@ -494,6 +494,19 @@ def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> 
 
 The function runs on the cluster, not in the test process, so it must be self-contained. The plugin ships its source as a notebook, uploaded once per session to `helpers_path` as `setup_<hash>` or `teardown_<hash>`, and runs it on the [helper compute](task-tests.md#helper-compute). Put imports inside the function, and define any helper it calls inside it too, or install it on the compute: a `NameError` there comes back as `run.setup.error`. `lakeflow.job()` raises `LakeflowError` before creating anything when the function is a lambda or not a plain function defined with `def`, when its source cannot be read because it was defined in a REPL, when it uses variables of an enclosing function, which would not exist on the cluster, when it takes a parameter other than `spark`, `dbutils` and `params`, or when it has a decorator, whose line would be shipped with the source and fail on the cluster. Pass values as job parameters instead and read them from `params`. Type annotations are fine: the notebook does not evaluate them, so `spark: SparkSession` works without importing `SparkSession` inside the function.
 
+On serverless helper compute the functions run with `Lakeflow`'s `helpers_environment_version`, the same for every job, and `environments=` cannot change the helper environment `__pytest_serverless`. When one job's setup needs a newer runtime, derive a `Lakeflow` for that job. It shares the session's deploy:
+
+```python
+import dataclasses
+
+
+def test_setup_on_a_newer_runtime(lakeflow: Lakeflow) -> None:
+    newer = dataclasses.replace(lakeflow, helpers_environment_version="5")
+    with lakeflow.schema() as schema:
+        with newer.job("my_example_job", params={"schema": schema, "mode": "incremental"}, setup=seed_orders) as job:
+            assert job.run().setup.succeeded
+```
+
 The teardown runs inside the same job run, after the job's tasks and before the test's assertions. Use it for side effects the test does not assert on: files under a volume, checkpoints, tables outside the temporary schema, rows written to a source table. Tables the test asserts on belong in [`lakeflow.schema()`](#temporary-schemas), which drops them after the test, so most tests need `setup=` only. Make the functions idempotent: the setup runs on every run, including every run of a job shared by several tests, hence `CREATE OR REPLACE TABLE`.
 
 ## Share one run between tests
@@ -540,7 +553,7 @@ One worker deploys the bundle and loads the templates while the others wait, the
 - `--lakeflow-keep` keeps every job and schema of the run.
 - `--no-lakeflow-keep-failed` deletes jobs even when their test fails, for CI.
 - `--lakeflow-sweep` deletes the jobs you kept earlier, once they are older than `sweep_hours`.
-- `--lakeflow-keep-ttl=48h` (or `7d`) tags every job with `pytest_expires`, 48 hours ahead in UTC. The sweep keeps a tagged job until then, however old it is, and deletes it as soon as that time has passed, so `pytest --lakeflow-keep --lakeflow-keep-ttl=7d` keeps a run's jobs for a week of debugging.
+- `--lakeflow-keep-ttl=48h` (or `7d`) tags every job with `pytest_expires`, 48 hours ahead in UTC. The sweep keeps a tagged job until then, however old it is, and deletes it as soon as that time has passed, so `pytest --lakeflow-keep --lakeflow-keep-ttl=7d` keeps a run's jobs for a week of debugging. `--lakeflow-sweep-notebooks` ignores the tag and still deletes the setup and teardown notebooks of those jobs once they are older than `sweep_hours`.
 
 A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pytest_git_sha` tags, and the test node id and CI run URL in its description.
 

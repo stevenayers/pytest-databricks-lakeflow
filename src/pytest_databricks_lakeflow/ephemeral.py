@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
@@ -30,10 +29,10 @@ from pytest_databricks_lakeflow.results import (
     task_outcome,
 )
 from pytest_databricks_lakeflow.settings import (
-    TIMEOUT_GRACE_SECONDS,
     check_compute,
     check_params,
     create_kwargs,
+    job_timeout_seconds,
     pipeline_params,
     select,
 )
@@ -276,7 +275,7 @@ class EphemeralJob:
     def _raise_timeout(self, timeout: timedelta) -> None:
         """Raise the job's `timeout_seconds` to `timeout` plus the grace period when it is shorter."""
         limit = self.settings.timeout_seconds
-        needed = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+        needed = job_timeout_seconds(timeout)
         if not limit or needed <= limit:
             return
         assert self.job_id is not None
@@ -285,10 +284,10 @@ class EphemeralJob:
         # changes only the job's.
         changes = jobs.JobSettings(timeout_seconds=needed, tasks=self.settings.tasks)
         self.lakeflow.ws.jobs.update(self.job_id, new_settings=changes)
-        mirrored = math.ceil(self.lakeflow.timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
         level = logging.INFO
         source = ""
-        if limit < mirrored and not self._timeout_raised:
+        # Any other value than the one Lakeflow's timeout sets came from the template or modify_settings.
+        if limit != job_timeout_seconds(self.lakeflow.timeout) and not self._timeout_raised:
             level = logging.WARNING
             source = ", which the template or modify_settings set,"
         log.log(
@@ -313,9 +312,14 @@ class EphemeralJob:
             )
 
     def _wait(
-        self, run_id: int, timeout: timedelta, item: pytest.Item, first: jobs.Run | None = None
+        self,
+        run_id: int,
+        timeout: timedelta,
+        item: pytest.Item,
+        first: jobs.Run | None = None,
+        first_at: float = 0.0,
     ) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
-        """Poll the run until it terminates, starting from `first`, the poll that `start()` made, when given."""
+        """Poll the run until it terminates, starting from `first`, the poll that `start()` made at `first_at`."""
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
         interval = POLL_SECONDS
@@ -327,19 +331,28 @@ class EphemeralJob:
         run = first
         if run is None:
             run = ws.jobs.get_run(run_id)
+        # A snapshot older than one poll interval is polled again at once, without a sleep or the deadline check, so
+        # a wait() long after start() neither sleeps on it nor times out a run that has finished since.
+        stale = first is not None and time.monotonic() - first_at >= interval
         while True:
             self._record_url(run_id, run, item)
             self._log_progress(run, logged, outputs, progress)
             if _terminated(run):
                 return run, outputs
-            if time.monotonic() >= deadline:
-                self._cancel(run_id)
-                raise LakeflowTimeout(
-                    f"Run {run_id} of {self.job_key!r} did not finish within {timeout} and was cancelled: "
-                    f"{run.run_page_url}\nTasks when cancelled: {_task_states(run)}"
-                )
-            time.sleep(interval)
+            if not stale:
+                self._check_deadline(run_id, run, timeout, deadline)
+                time.sleep(interval)
+            stale = False
             run = ws.jobs.get_run(run_id)
+
+    def _check_deadline(self, run_id: int, run: jobs.Run, timeout: timedelta, deadline: float) -> None:
+        if time.monotonic() < deadline:
+            return
+        self._cancel(run_id)
+        raise LakeflowTimeout(
+            f"Run {run_id} of {self.job_key!r} did not finish within {timeout} and was cancelled: "
+            f"{run.run_page_url}\nTasks when cancelled: {_task_states(run)}"
+        )
 
     def _record_url(self, run_id: int, run: jobs.Run, item: pytest.Item) -> None:
         if run_id in self._run_urls or not run.run_page_url:
@@ -423,6 +436,7 @@ class RunHandle:
         self.run_id = run_id
         self._item = item
         self._first = first
+        self._first_at = time.monotonic()
         self._result: JobRun | None = None
 
     @property
@@ -459,7 +473,7 @@ class RunHandle:
             job._check_timeout(timeout)
         first = self._first
         self._first = None
-        run, outputs = job._wait(self.run_id, timeout, self._item, first)
+        run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at)
         job._forget(self.run_id)
         assert job.job_id is not None
         disabled = {task.task_key for task in job.settings.tasks or [] if task.disabled and task.task_key}
