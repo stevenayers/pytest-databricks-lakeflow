@@ -38,11 +38,15 @@ log = logging.getLogger("pytest_databricks_lakeflow")
 POLL_SECONDS = 2.0
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
+TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.TERMINATED,
     jobs.RunLifeCycleState.SKIPPED,
     jobs.RunLifeCycleState.INTERNAL_ERROR,
 )
+
+# The last state logged for each task attempt, keyed by task key and attempt number, and whether it had terminated.
+LoggedStates = dict[tuple[str, int], tuple[str, bool]]
 
 
 class EphemeralJob:
@@ -88,7 +92,9 @@ class EphemeralJob:
     @property
     def url(self) -> str | None:
         """The job's page in the workspace, or `None` before it is created."""
-        return None if self.job_id is None else f"{self.lakeflow.ws.config.host}/jobs/{self.job_id}"
+        if self.job_id is None:
+            return None
+        return f"{self.lakeflow.ws.config.host}/jobs/{self.job_id}"
 
     def __enter__(self) -> EphemeralJob:
         self.create()
@@ -98,8 +104,8 @@ class EphemeralJob:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        skipped = exc_type is not None and issubclass(exc_type, (pytest.skip.Exception, pytest.xfail.Exception))
-        self.close(failed=exc_type is not None and not skipped)
+        failed = exc_type is not None and not issubclass(exc_type, (pytest.skip.Exception, pytest.xfail.Exception))
+        self.close(failed=failed)
 
     def create(self) -> None:
         """Create the job if it does not exist yet.
@@ -170,16 +176,19 @@ class EphemeralJob:
         self.create()
         assert self.job_id is not None
         item = session.current_item()
-        check_params(self.job_key, self.settings, params or {}, self.lakeflow.allow_undeclared_params)
+        run_params = dict(params or {})
+        check_params(self.job_key, self.settings, run_params, self.lakeflow.allow_undeclared_params)
         refresh = pipeline_params(
             self.settings,
             full_refresh=full_refresh,
             full_refresh_selection=full_refresh_selection,
             refresh_selection=refresh_selection,
         )
-        if timeout is not None:
+        if timeout is None:
+            timeout = self.lakeflow.timeout
+        else:
             self._check_timeout(timeout)
-        merged = {**self.params, **(params or {})}
+        merged = {**self.params, **run_params}
         selected = select(self.settings, only, self.stubs) if only else None
         ws = self.lakeflow.ws
         token = uuid.uuid4().hex
@@ -198,8 +207,9 @@ class EphemeralJob:
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
         log.debug("Run %s was started with idempotency token %s", run_id, token)
-        run, outputs = self._wait(run_id, self.lakeflow.timeout if timeout is None else timeout, item)
+        run, outputs = self._wait(run_id, timeout, item)
         self._forget(run_id)
+        disabled = {task.task_key for task in self.settings.tasks or [] if task.disabled and task.task_key}
         result = build_job_run(
             ws,
             run,
@@ -207,25 +217,12 @@ class EphemeralJob:
             job_id=self.job_id,
             stubs=self.stubs,
             capture_task_values=self.capture_task_values,
-            disabled={t.task_key for t in self.settings.tasks or [] if t.disabled and t.task_key},
+            disabled=disabled,
             outputs=outputs,
             job_keys=self.lakeflow._job_keys(),
         )
         self.runs.append(result)
-        item.user_properties.extend(
-            [
-                ("lakeflow_run_id", result.run_id),
-                ("lakeflow_result_state", result.result_state),
-                ("lakeflow_duration", f"{result.duration.total_seconds():.3f}"),
-            ]
-        )
-        if result.failed:
-            item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
-            if run_params := format_parameters(result.parameters):
-                item.user_properties.append(("lakeflow_params", run_params))
-            if task_params := failing_parameters(result):
-                shown = {key: json.loads(text) for key, text in task_params.items()}
-                item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
+        _record_outcome(item, result)
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)
@@ -243,7 +240,7 @@ class EphemeralJob:
     def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
-        seen: dict[tuple[str, int], str | None] = {}
+        logged: LoggedStates = {}
         outputs: dict[int, jobs.RunOutput] = {}
         progress = item.stash.setdefault(PROGRESS, [])
         while True:
@@ -251,7 +248,7 @@ class EphemeralJob:
             if run_id not in self._run_urls and run.run_page_url:
                 self._run_urls[run_id] = run.run_page_url
                 item.user_properties.append(("lakeflow_run_url", run.run_page_url))
-            self._log_progress(run, seen, outputs, progress)
+            self._log_progress(run, logged, outputs, progress)
             if _terminated(run):
                 return run, outputs
             if time.monotonic() >= deadline:
@@ -263,31 +260,28 @@ class EphemeralJob:
             time.sleep(POLL_SECONDS)
 
     def _log_progress(
-        self,
-        run: jobs.Run,
-        seen: dict[tuple[str, int], str | None],
-        outputs: dict[int, jobs.RunOutput],
-        progress: list[str],
+        self, run: jobs.Run, logged: LoggedStates, outputs: dict[int, jobs.RunOutput], progress: list[str]
     ) -> None:
         """Log each task run whose state changed since the last poll, reading the output of those that finished.
 
-        `seen` holds the last state logged for each task attempt, or `None` once it has been logged as terminated, so
-        a result state that appears on a later poll does not log a second line.
+        A task attempt that was logged as terminated is not logged again, so a result state that appears on a later
+        poll does not log a second line.
         """
-        states = [(task, *_task_state(task)) for task in run.tasks or []]
-        finished = [
-            task
-            for task, _, done in states
-            if done and task.run_id is not None and task.run_id not in outputs and has_output(task)
-        ]
+        states: list[tuple[jobs.RunTask, str | None, bool]] = []
+        finished: list[jobs.RunTask] = []
+        for task in run.tasks or []:
+            state, done = _task_state(task)
+            states.append((task, state, done))
+            if done and task.run_id is not None and task.run_id not in outputs and has_output(task):
+                finished.append(task)
         outputs.update(fetch_outputs(self.lakeflow.ws, finished))
         for task, state, done in states:
             key = (task.task_key or "", task.attempt_number or 0)
-            previous = seen.get(key, "")
-            if state is None or previous is None or previous == state:
+            previous, was_done = logged.get(key, (None, False))
+            if state is None or was_done or previous == state:
                 continue
-            line = _transition(task, previous, state, outputs.get(task.run_id or 0) if done else None, done)
-            seen[key] = None if done else state
+            line = _transition(task, previous, state, outputs.get(task.run_id or 0), done)
+            logged[key] = (state, done)
             log.info("%s", line)
             progress.append(line)
 
@@ -336,9 +330,30 @@ def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
         log.warning("Could not cancel run %s: %s", run_id, e)
 
 
+def _record_outcome(item: pytest.Item, result: JobRun) -> None:
+    """Record the run's outcome in the test's user properties, with its resolved parameters when it failed."""
+    item.user_properties.extend(
+        [
+            ("lakeflow_run_id", result.run_id),
+            ("lakeflow_result_state", result.result_state),
+            ("lakeflow_duration", f"{result.duration.total_seconds():.3f}"),
+        ]
+    )
+    if not result.failed:
+        return
+    item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
+    run_params = format_parameters(result.parameters)
+    if run_params:
+        item.user_properties.append(("lakeflow_params", run_params))
+    task_params = failing_parameters(result)
+    if task_params:
+        shown = {key: json.loads(text) for key, text in task_params.items()}
+        item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
+
+
 def _terminated(run: jobs.Run) -> bool:
     if run.status and run.status.state:
-        return run.status.state == jobs.RunLifecycleStateV2State.TERMINATED
+        return run.status.state == TERMINATED
     state = run.state.life_cycle_state if run.state else None
     return state in TERMINAL_LIFE_CYCLE
 
@@ -350,17 +365,19 @@ def _task_state(task: jobs.RunTask) -> tuple[str | None, bool]:
     state when the run has no V2 status. Any field may be missing.
     """
     result = task.state.result_state.value if task.state and task.state.result_state else None
-    status = task.status.state if task.status else None
-    if status is not None:
-        if status != jobs.RunLifecycleStateV2State.TERMINATED:
+    if task.status is not None and task.status.state is not None:
+        status = task.status.state
+        if status != TERMINATED:
             return status.value, False
-        details = task.status.termination_details if task.status else None
+        details = task.status.termination_details
         code = details.code.value if details and details.code else None
         return result or code or status.value, True
     life_cycle = task.state.life_cycle_state if task.state else None
     if life_cycle in TERMINAL_LIFE_CYCLE:
         return result or life_cycle.value, True
-    return (life_cycle.value if life_cycle else None), False
+    if life_cycle is None:
+        return None, False
+    return life_cycle.value, False
 
 
 def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jobs.RunOutput | None, done: bool) -> str:
@@ -368,14 +385,18 @@ def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jo
     label = task.task_key or "?"
     if task.attempt_number:
         label = f"{label} (attempt {task.attempt_number})"
-    line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
+    line = f"{label}: {state}"
+    if previous:
+        line = f"{label}: {previous} -> {state}"
     if not done:
         return line
     elapsed = duration(task.start_time, task.end_time)
     if elapsed:
-        line = f"{line} in {timedelta(seconds=elapsed // timedelta(seconds=1))}"
+        line = f"{line} in {timedelta(seconds=int(elapsed.total_seconds()))}"
     error = error_line(task, output)
-    return f"{line} {error}" if error else line
+    if error:
+        line = f"{line} {error}"
+    return line
 
 
 def item_failed(stash: pytest.Stash) -> bool:
