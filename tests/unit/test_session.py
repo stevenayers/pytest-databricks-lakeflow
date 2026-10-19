@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +26,10 @@ UNVERSIONED_MESSAGE = (
     "Artifacts ['lakeflow_example'] have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt "
     "wheel with the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
 )
+WHEEL = "pkg-0.1-py3-none-any.whl"
+ARTIFACT_PATH = "/Workspace/b/artifacts"
+UPLOADED_WHEEL = f"{ARTIFACT_PATH}/.internal/{WHEEL}"
+STALE_MESSAGE = f"dist/{WHEEL} was built after its uploaded copy. Run `databricks bundle deploy -t test`."
 STAGING_FIXTURE = """
 
 @pytest.fixture(scope="session")
@@ -105,6 +110,25 @@ def bundle_key(root: Path, **overrides: Any) -> session.BundleKey:
 
 def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
     return cast(WorkspaceClient, ws)
+
+
+def stale_wheel(ws: FakeWorkspaceClient, cli: FakeCli, root: Path, uploaded_after_build: int = -120) -> None:
+    """Build dist/<WHEEL> under `root`, upload it `uploaded_after_build` seconds later, and validate a job using it."""
+    (root / "dist").mkdir(exist_ok=True)
+    built = 1_700_000_000
+    wheel = root / "dist" / WHEEL
+    wheel.write_text("")
+    os.utime(wheel, (built, built))
+    ws.workspace.objects.add(UPLOADED_WHEEL)
+    ws.workspace.modified[UPLOADED_WHEEL] = (built + uploaded_after_build) * 1000
+    spec = {"environment_version": "4", "dependencies": ["./dist/*.whl"]}
+    task = {
+        "task_key": "t",
+        "environment_key": "default",
+        "python_wheel_task": {"package_name": "pkg", "entry_point": "m"},
+    }
+    job = {"name": "j", "environments": [{"environment_key": "default", "spec": spec}], "tasks": [task]}
+    cli.validate = {"workspace": {"artifact_path": ARTIFACT_PATH}, "resources": {"jobs": {"my_job": job}}}
 
 
 def make_xdist_conftest(pytester: pytest.Pytester, extra: str = "") -> Path:
@@ -475,6 +499,9 @@ class TestSetup:
             "user": "someone@example.com",
             "job_ids": {"my_job": fake_cli.deployed["my_job"]},
             "unversioned_artifacts": [],
+            "artifact_path": "",
+            "root": str(bundle_dir),
+            "stale_uploads": [],
         }
         assert set(fake_ws.workspace.uploads) == {f"{folder}/set_values", f"{folder}/get_values"}
         assert all(upload["overwrite"] for upload in fake_ws.workspace.uploads.values())
@@ -490,6 +517,17 @@ class TestSetup:
         assert state["templates"] == {"other": {"name": "o", "tasks": [{"task_key": "t"}]}}
         assert state["helpers"]["get_values"] == "/Shared/helpers/get_values"
         assert state["job_ids"] == {}
+
+    @pytest.mark.parametrize(("sync", "stale"), [("none", [f"dist/{WHEEL}"]), ("deploy", [])])
+    def test_setup_records_artifact_path_and_stale_uploads(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str, stale: list[str]
+    ) -> None:
+        stale_wheel(fake_ws, fake_cli, bundle_dir)
+        fake_cli.summary = {"workspace": {"artifact_path": ARTIFACT_PATH}}
+        state = session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
+        assert state["artifact_path"] == ARTIFACT_PATH
+        assert state["root"] == str(bundle_dir)
+        assert state["stale_uploads"] == stale
 
     def test_setup_with_sync_syncs_first(
         self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
@@ -864,6 +902,76 @@ class TestUnversionedArtifacts:
         assert result.stdout.str().count(f"LakeflowError: {UNVERSIONED_MESSAGE}") == 2
         assert fake_cli.calls.count(DEPLOY) == 1
         assert fake_ws.jobs.created == []
+
+
+class TestStaleUploads:
+    """Under `sync="none"`, a local wheel built after its uploaded copy warns once, or fails with `strict_artifacts`."""
+
+    @pytest.mark.parametrize(("uploaded_after_build", "warnings"), [(-120, 1), (5, 0)], ids=["stale", "fresh"])
+    def test_stale_upload_warns_once(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        bundle_dir: Path,
+        uploaded_after_build: int,
+        warnings: int,
+    ) -> None:
+        stale_wheel(fake_ws, fake_cli, bundle_dir, uploaded_after_build)
+        configure_lakeflow(pytester, 'sync="none"')
+        pytester.makepyfile(
+            """
+            import dataclasses
+
+            def test_one(lakeflow):
+                lakeflow.template("my_job")
+                lakeflow.template("my_job")
+
+            def test_two(lakeflow):
+                dataclasses.replace(lakeflow, catalog="other").template("my_job")
+            """
+        )
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=2, warnings=warnings)
+        assert result.stdout.str().count(f"UserWarning: {STALE_MESSAGE}") == warnings
+
+    def test_strict_artifacts_fails_on_a_stale_upload(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        stale_wheel(fake_ws, fake_cli, bundle_dir)
+        configure_lakeflow(pytester, 'sync="none", strict_artifacts=True')
+        pytester.makepyfile('def test_one(lakeflow):\n    lakeflow.job("my_job")\n')
+        result = pytester.runpytest("-rN")
+        result.assert_outcomes(failed=1, warnings=0)
+        assert f"LakeflowError: {STALE_MESSAGE}" in result.stdout.str()
+        assert fake_ws.jobs.created == []
+
+    def test_several_stale_wheels_share_one_warning(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        stale_wheel(fake_ws, fake_cli, bundle_dir)
+        other = "other-0.2-py3-none-any.whl"
+        (bundle_dir / "dist" / other).write_text("")
+        fake_ws.workspace.objects.add(f"{ARTIFACT_PATH}/.internal/{other}")
+        fake_ws.workspace.modified[f"{ARTIFACT_PATH}/.internal/{other}"] = 0
+        configure_lakeflow(pytester, 'sync="none"')
+        pytester.makepyfile('def test_one(lakeflow):\n    lakeflow.template("my_job")\n')
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines(
+            [
+                f"*UserWarning: dist/{other}, dist/{WHEEL} were built after their uploaded copies. "
+                "Run `databricks bundle deploy -t test`."
+            ]
+        )
+
+    @pytest.mark.parametrize("folder", ["/Workspace/b/artifacts/.internal", "/Volumes/c/s/v"])
+    def test_modified_at_reads_workspace_and_volumes_paths(self, fake_ws: FakeWorkspaceClient, folder: str) -> None:
+        path = f"{folder}/{WHEEL}"
+        fake_ws.workspace.objects.add(path)
+        fake_ws.workspace.modified[path] = 1_700_000_000_000
+        assert session.modified_at(as_client(fake_ws), path) == 1_700_000_000_000
+        assert session.modified_at(as_client(fake_ws), f"{folder}/missing.whl") is None
 
 
 class TestHelperNotebooks:

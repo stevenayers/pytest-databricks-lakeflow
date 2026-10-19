@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -259,3 +260,65 @@ class TestTemplatesFromValidate:
         assert sorted(templates) == ["notebooks"]
         assert "uses local libraries (dist/*.whl, ./dist/*.whl)" in errors["wheels"]
         assert 'Use Lakeflow(sync="deploy")' in errors["wheels"]
+
+
+class TestLocalWheels:
+    """Local wheel patterns with extras, and local wheels built after the copies a deploy uploaded."""
+
+    WHEEL = "pkg-0.1-py3-none-any.whl"
+    UPLOADED = "/Workspace/b/artifacts/.internal/pkg-0.1-py3-none-any.whl"
+
+    @pytest.mark.parametrize(
+        ("dependency", "expected"),
+        [
+            ("./dist/*.whl[test]", ("./dist/*.whl", "[test]")),
+            ("../dist/pkg-0.1-py3-none-any.whl[test,dev]", ("../dist/pkg-0.1-py3-none-any.whl", "[test,dev]")),
+            ("/Workspace/b/pkg.whl[test]", ("/Workspace/b/pkg.whl", "[test]")),
+            ("./dist/*.whl", ("./dist/*.whl", "")),
+            ("rich[all]>=13", ("rich[all]>=13", "")),
+            (
+                "pkg[extra]@https://host/pkg-1.0-py3-none-any.whl",
+                ("pkg[extra]@https://host/pkg-1.0-py3-none-any.whl", ""),
+            ),
+        ],
+        ids=["glob", "file with two extras", "remote path", "no extras", "pypi with extras", "direct reference"],
+    )
+    def test_split_extras(self, dependency: str, expected: tuple[str, str]) -> None:
+        assert bundle.split_extras(dependency) == expected
+
+    def test_uploaded_keeps_extras_after_globbing(self, tmp_path: Path) -> None:
+        (tmp_path / "dist").mkdir()
+        (tmp_path / "dist" / self.WHEEL).write_text("")
+        checked: list[str] = []
+
+        def exists(path: str) -> bool:
+            checked.append(path)
+            return True
+
+        uploaded = bundle.uploaded("./dist/*.whl[test]", tmp_path, "/Workspace/b/artifacts", exists)
+        assert uploaded == [f"{self.UPLOADED}[test]"]
+        assert checked == [self.UPLOADED]
+
+    @pytest.mark.parametrize(
+        ("uploaded_after_build", "stale"),
+        [(-120, ["dist/pkg-0.1-py3-none-any.whl"]), (-30, []), (5, []), (None, [])],
+        ids=["built after upload", "within clock skew", "uploaded after build", "not uploaded"],
+    )
+    def test_templates_from_validate_reports_stale_uploads(
+        self, tmp_path: Path, uploaded_after_build: int | None, stale: list[str]
+    ) -> None:
+        (tmp_path / "dist").mkdir()
+        wheel = tmp_path / "dist" / self.WHEEL
+        wheel.write_text("")
+        built = 1_700_000_000
+        os.utime(wheel, (built, built))
+        checked: list[str] = []
+
+        def modified_at(path: str) -> int | None:
+            checked.append(path)
+            if uploaded_after_build is None:
+                return None
+            return (built + uploaded_after_build) * 1000
+
+        assert bundle.stale_uploads(validate_output(), tmp_path, modified_at) == stale
+        assert checked == [self.UPLOADED], "each uploaded copy is looked up once"
