@@ -69,7 +69,26 @@ Before `bundle deploy`, the plugin reads the `run_as` of the target and of each 
 
 ### Why did the CLI fail with `exit status 45` under xdist?
 
-Several processes refreshed a user-to-machine (`databricks-cli`) OAuth token at the same time. The plugin retries building its client, but the CLI call that hit the race fails. Use a service principal with OAuth machine-to-machine credentials or a token in CI.
+Each xdist worker builds its own `WorkspaceClient`. On a user-to-machine profile (`auth_type = databricks-cli`, from `databricks auth login`), databricks-sdk runs `databricks auth token --force-refresh` to get the token, so every worker refreshes the same cached token at the start of the session. When two refreshes update the CLI's token cache at the same moment, one of them fails with `cannot get access token: Error: forced token refresh: cache update: exit status 45`. The plugin retries building the client up to four times, logging `Retrying workspace client after: ...` at INFO each time, and waits a random time before each retry (2 to 4 seconds, then 4 to 8, then 8 to 16) so that workers that collided do not collide again. A test still fails if every attempt collides.
+
+If you still see it, run with fewer workers, or use a profile that does not refresh through the CLI for parallel runs: a service principal with OAuth machine-to-machine credentials (`client_id` and `client_secret`) or a personal access token (`token`). For example, keep the `databricks-cli` profile `dev` for everyday runs and choose a machine-to-machine profile `dev-sp` for parallel runs through an environment variable:
+
+```python
+import os
+
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(target="test", profile=os.environ.get("LAKEFLOW_PROFILE", "dev"))
+```
+
+```bash
+LAKEFLOW_PROFILE=dev-sp uv run pytest tests -n 4
+```
 
 ### Does it work alongside databricks-labs-pytester?
 

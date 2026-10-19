@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import posixpath
+import random
 import re
 import secrets
 import subprocess
@@ -347,7 +348,10 @@ def make_workspace_client(profile: str | None) -> WorkspaceClient:
             if "cannot get access token" not in str(e) or attempt == CLIENT_ATTEMPTS:
                 raise
             log.info("Retrying workspace client after: %s", e)
-            time.sleep(2**attempt)
+            # Every worker whose forced refresh collided would retry at the same moment and collide again: the CLI
+            # fails a forced refresh with "cache update: exit status 45" when another process updates its token cache
+            # at the same time (six of eight concurrent `databricks auth token --force-refresh` calls failed, #140).
+            time.sleep(2**attempt + random.uniform(0, 2**attempt))
 
 
 def resolve_run_id() -> str:
