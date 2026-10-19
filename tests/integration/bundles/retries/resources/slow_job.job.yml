@@ -8,6 +8,6 @@ resources:
           default: "0"
       tasks:
         - task_key: sleep
-          timeout_seconds: 60
+          timeout_seconds: 30
           notebook_task:
             notebook_path: ../src/notebooks/sleep.py
