@@ -1378,15 +1378,17 @@ class TestRunOptions:
                 with lakeflow.job("pipeline_job") as job:
                     job.run(refresh_selection=["bronze"])
                     job.run(full_refresh_selection=["silver"], only=["refresh"])
+                    job.run(refresh_flow_selection=["bronze_flow"], reset_checkpoint_selection=["bronze"])
             """,
         )
         result.assert_outcomes(passed=1)
         assert [c["pipeline_params"] for c in fake_ws.jobs.run_now_calls] == [
             jobs.PipelineParams(refresh_selection=["bronze"]),
             jobs.PipelineParams(full_refresh_selection=["silver"]),
+            jobs.PipelineParams(refresh_flow_selection=["bronze_flow"], reset_checkpoint_selection=["bronze"]),
         ]
-        assert [c["only"] for c in fake_ws.jobs.run_now_calls] == [None, ["refresh"]]
-        assert [c["job_parameters"] for c in fake_ws.jobs.run_now_calls] == [None, None]
+        assert [c["only"] for c in fake_ws.jobs.run_now_calls] == [None, ["refresh"], None]
+        assert [c["job_parameters"] for c in fake_ws.jobs.run_now_calls] == [None, None, None]
 
     def test_pipeline_refresh_options_need_a_pipeline_task(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
@@ -2469,6 +2471,7 @@ class TestPublicApi:
             "LakeflowTimeout",
             "LakeflowRunFailed",
             "RunHandle",
+            "PipelineUpdate",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__
@@ -2477,5 +2480,11 @@ class TestPublicApi:
     @pytest.mark.parametrize("method", ["run", "start"])
     def test_pipeline_refresh_options_are_keyword_only(self, method: str) -> None:
         parameters = inspect.signature(getattr(EphemeralJob, method)).parameters
-        names = ("full_refresh", "full_refresh_selection", "refresh_selection")
+        names = (
+            "full_refresh",
+            "full_refresh_selection",
+            "refresh_selection",
+            "refresh_flow_selection",
+            "reset_checkpoint_selection",
+        )
         assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY for name in names)

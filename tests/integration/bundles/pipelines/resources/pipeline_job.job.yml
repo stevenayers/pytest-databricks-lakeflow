@@ -1,0 +1,9 @@
+resources:
+  jobs:
+    pipeline_job:
+      name: pipeline_job
+      description: Pipeline task job for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: refresh
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.numbers.id}

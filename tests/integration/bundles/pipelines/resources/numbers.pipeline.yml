@@ -1,0 +1,10 @@
+resources:
+  pipelines:
+    numbers:
+      name: numbers
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.pipeline_tables.name}
+      serverless: true
+      libraries:
+        - file:
+            path: ../src/pipelines/numbers.sql
