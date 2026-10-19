@@ -113,6 +113,20 @@ In CI, the `Integration tests` job runs on pushes to `main` once these settings 
 - Update `README.md` and `docs/` when behaviour changes. Every snippet must use the real public API; the README is included in the docs site verbatim.
 - Run the checks above before opening a pull request.
 
+### Code style
+
+- Clarity over brevity. Use a plain loop where a comprehension would filter and transform at once or need a walrus, `if`/`elif` where a conditional expression would nest or trail a return, and early returns instead of nested blocks.
+- Name the stages of a long function with local variables, or move them into small private helpers placed just below their only caller. One helper per repeated shape; never two copies of the same logic.
+- Drop comments that restate the code. Keep every comment that records platform behaviour the code works around, such as the fields the Jobs API leaves null and the tag, name and environment limits. They are the record of what was learnt against the real API.
+- A refactor changes no public name, signature, default or user-visible string: error messages, warnings, log lines and report lines are quoted by the docs and the integration tests. Prove it by running the previous versions of the affected unit test modules against the new code (`git show main:tests/unit/test_x.py > tests/unit/old_test_x.py`, run them, delete them) and say so in the pull request.
+
+### Tests
+
+- Unit tests are grouped in `class Test<Behaviour>:` suites with a one-line docstring saying what the group covers, for example `class TestKeepRules:` with the docstring "Which jobs survive the test that made them." Methods are `test_<behaviour>(self, <fixtures>)`. Shared helpers, constants and fixtures stay at module level or in `tests/unit/conftest.py` and `tests/unit/fakes.py`; extend the fakes rather than mocking around them.
+- Prefer one parametrised test to near-duplicates, and fewer sharp tests to many shallow ones. Do not add a test to raise coverage or to pin a trivial default; coverage is reported, not enforced.
+- Keep every test that guards a regression or a finding against the real API, and every test an issue names under "Tests to write first". When a pull request removes or merges a test, it lists each one with the test that still covers the behaviour.
+- The unit suite runs in about ten seconds with pytester and the fakes and never touches the network. Integration tests are plain functions, one module per bundle, as described above.
+
 ## Commit messages
 
 Commits on `main` follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). release-please reads them to choose the next version and to write `CHANGELOG.md`:
