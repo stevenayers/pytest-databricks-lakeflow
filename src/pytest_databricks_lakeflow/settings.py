@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+import warnings
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import timedelta
@@ -55,6 +56,23 @@ SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.pro
 SINGLE_NODE_TAGS = {"ResourceClass": "SingleNode"}
 SHARED_ACCESS_MODES = frozenset(
     {compute.DataSecurityMode.USER_ISOLATION, compute.DataSecurityMode.DATA_SECURITY_MODE_STANDARD}
+)
+# The field that holds each task type's parameters, for task_params given as a mapping, which is merged, and as a
+# list, which replaces it. A Python wheel task takes either.
+MAPPING_PARAMS = {"notebook_task": "base_parameters", "python_wheel_task": "named_parameters", "sql_task": "parameters"}
+LIST_PARAMS = {
+    "spark_python_task": "parameters",
+    "spark_jar_task": "parameters",
+    "python_wheel_task": "parameters",
+    "dbt_task": "commands",
+}
+TASK_PARAMS_KINDS = (
+    "notebook_task",
+    "spark_python_task",
+    "spark_jar_task",
+    "python_wheel_task",
+    "sql_task",
+    "dbt_task",
 )
 
 
@@ -583,6 +601,136 @@ def check_params(job_key: str, settings: jobs.JobSettings, params: Mapping[str, 
             f"Job {job_key!r} does not declare the parameters {undeclared}. Declared: {sorted(declared)}. "
             "Pass allow_undeclared_params=True to Lakeflow to pass them anyway."
         )
+
+
+def check_task_params(
+    job_key: str,
+    settings: jobs.JobSettings,
+    task_params: Mapping[str, Mapping[str, str] | Sequence[str]],
+    params: Mapping[str, str],
+) -> None:
+    """Check the parameter names of `task_params`, and warn about each one that is also a job parameter.
+
+    A job parameter is pushed to every task that takes named parameters and wins over a task parameter of the same
+    name, so such a task parameter has no effect. It may be declared on purpose, so this warns rather than raises.
+    Lists have no names to check.
+
+    Args:
+        job_key: The bundle resource key of the job, for the messages.
+        settings: The job's settings.
+        task_params: The task parameters, by task key.
+        params: The job parameters passed for every run.
+
+    Raises:
+        LakeflowError: If a parameter name starts with `__pytest_`.
+    """
+    named: list[tuple[str, str]] = []
+    for task_key, value in task_params.items():
+        if not isinstance(value, Mapping):
+            continue
+        for name in value:
+            # apply_task_params rejects a name that is not a string, naming the shape the task takes.
+            if isinstance(name, str):
+                named.append((task_key, name))
+    reserved = sorted(name for _, name in named if name.startswith(PREFIX))
+    if reserved:
+        raise LakeflowError(f"Parameter names starting with {PREFIX!r} are reserved for the plugin: {reserved}")
+    job_parameters = set(params) | {p.name for p in settings.parameters or []}
+    for task_key, name in named:
+        if name in job_parameters:
+            warnings.warn(
+                f"task_params for {task_key!r} sets {name!r}, also a job parameter of {job_key!r}. The job value wins.",
+                stacklevel=3,
+            )
+
+
+def apply_task_params(
+    job_key: str,
+    settings: jobs.JobSettings,
+    task_params: Mapping[str, Mapping[str, str] | Sequence[str]],
+    *,
+    allowed: Collection[str] | None = None,
+) -> jobs.JobSettings:
+    """Set the parameters of the named tasks, in the shape each task type takes.
+
+    A mapping is merged into the task's named parameters, so the template's `{{tasks.<key>.values.<name>}}`
+    references survive. A list replaces the task's positional parameters, which have no names to merge on. A mapping
+    for a Python wheel task clears its positional parameters and a list clears its named parameters, because the
+    Jobs API takes one or the other. Values are passed through unchanged.
+
+    Args:
+        job_key: The bundle resource key of the job, for the messages.
+        settings: The job's settings. They are changed in place.
+        task_params: A mapping of names to strings or a list of strings, by task key.
+        allowed: The task keys that `task_params` may name. Defaults to every task of the job.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not an allowed task of the job, starts with `__pytest_`, names a task that is not a
+            notebook, Python script, JAR, Python wheel, SQL or dbt task, or has a value that does not fit the task's
+            type. Nothing is changed then.
+    """
+    if not task_params:
+        return settings
+    tasks: dict[str, jobs.Task] = {}
+    for task in settings.tasks or []:
+        if task.task_key.startswith(PREFIX):
+            continue
+        if allowed is not None and task.task_key not in allowed:
+            continue
+        tasks[task.task_key] = task
+    for key in task_params:
+        if key not in tasks:
+            raise LakeflowError(f"Unknown task {key!r} in task_params of job {job_key!r}. Available: {sorted(tasks)}")
+    kinds: dict[str, str] = {}
+    for key, value in task_params.items():
+        kinds[key] = _task_params_kind(tasks[key], value)
+    for key, value in task_params.items():
+        _set_task_params(getattr(tasks[key], kinds[key]), kinds[key], value)
+    return settings
+
+
+def _task_params_kind(task: jobs.Task, value: object) -> str:
+    """Get the field of the task type that `value` edits, checking that `value` fits it."""
+    kind = ""
+    for candidate in TASK_PARAMS_KINDS:
+        if getattr(task, candidate) is not None:
+            kind = candidate
+            break
+    if not kind:
+        raise LakeflowError(
+            f"task_params cannot set the parameters of task {task.task_key!r}: it is not a notebook, Python script, "
+            "JAR, Python wheel, SQL or dbt task. Change it with modify_settings instead."
+        )
+    fits = False
+    if isinstance(value, Mapping):
+        fits = kind in MAPPING_PARAMS and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    elif isinstance(value, Sequence) and not isinstance(value, str):
+        fits = kind in LIST_PARAMS and all(isinstance(item, str) for item in value)
+    if not fits:
+        shapes: list[str] = []
+        if kind in MAPPING_PARAMS:
+            shapes.append(f"a mapping of names to strings, merged into {kind}.{MAPPING_PARAMS[kind]}")
+        if kind in LIST_PARAMS:
+            shapes.append(f"a list of strings, which replaces {kind}.{LIST_PARAMS[kind]}")
+        raise LakeflowError(
+            f"task_params[{task.task_key!r}] must be {', or '.join(shapes)}, for task {task.task_key!r}; got {value!r}"
+        )
+    return kind
+
+
+def _set_task_params(code: Any, kind: str, value: Mapping[str, str] | Sequence[str]) -> None:
+    if isinstance(value, Mapping):
+        field = MAPPING_PARAMS[kind]
+        setattr(code, field, {**(getattr(code, field) or {}), **value})
+        if kind == "python_wheel_task":
+            code.parameters = None
+        return
+    setattr(code, LIST_PARAMS[kind], list(value))
+    if kind == "python_wheel_task":
+        code.named_parameters = None
 
 
 def check_compute(settings: jobs.JobSettings) -> None:
