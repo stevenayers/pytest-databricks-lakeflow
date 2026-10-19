@@ -60,7 +60,7 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
         resolution: [highest]
         include:
-          # The oldest supported versions: Python 3.11, pytest 8, databricks-sdk 0.66, filelock 3.
+          # The oldest supported versions: Python 3.11, pytest 8, databricks-sdk 0.100, filelock 3.
           - python: "3.11"
             resolution: lowest-direct
     env:

@@ -4,7 +4,7 @@ This page takes you from an installed plugin to a passing job test. It assumes y
 
 ## Prerequisites
 
-- Python 3.11 or later. pytest 8 or later, `databricks-sdk` 0.66 or later and `filelock` are installed as dependencies.
+- Python 3.11 or later. pytest 8 or later, `databricks-sdk` 0.100 or later and `filelock` are installed as dependencies.
 - The [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install) v1.7.0 or later on `PATH`. The plugin shells out to it for `bundle deploy`, `bundle summary`, `bundle validate`, `bundle sync` and `bundle destroy`, and checks the version before the first command.
 - Credentials that both the CLI and the SDK can use: a profile in `~/.databrickscfg`, or the standard `DATABRICKS_*` environment variables. `DATABRICKS_CONFIG_PROFILE` works for both.
 - Serverless jobs in the workspace. The stub and probe tasks that task tests add run on serverless by default. Without serverless, point them at a job cluster with `helpers_compute`, see [helper compute](task-tests.md#helper-compute).
