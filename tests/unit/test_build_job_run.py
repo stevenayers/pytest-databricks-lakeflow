@@ -218,6 +218,40 @@ class TestSkippedAndDisabledTasks:
         assert sorted(run.injected_tasks) == ["__pytest_probe__transform", "extract"]
 
 
+class TestLifecycleTasks:
+    """The setup and teardown tasks are injected tasks, and a failed setup is named before the tasks it held up."""
+
+    def test_setup_and_teardown_come_from_injected_tasks(self) -> None:
+        ws = FakeWorkspaceClient()
+        run = make_run(1, {"__pytest_setup": "SUCCESS", "a": "SUCCESS", "__pytest_teardown": "FAILED"})
+        ws.jobs.outputs[run_id_of(run, "__pytest_setup")] = jobs.RunOutput(
+            notebook_output=jobs.NotebookOutput(result='{"rows": 1}')
+        )
+        built = build_from(ws, run)
+        assert built.succeeded
+        assert sorted(built.tasks) == ["a"]
+        assert built.setup is built.injected_tasks["__pytest_setup"]
+        assert built.setup.output_json == {"rows": 1}
+        assert built.teardown is built.injected_tasks["__pytest_teardown"]
+        assert built.teardown.result_state == "FAILED"
+        assert repr(built) == f"JobRun('my_job', SUCCESS, {built.run_url}, failing=[])"
+        without = build_from(FakeWorkspaceClient(), make_run(2, {"a": "SUCCESS"}))
+        assert (without.setup, without.teardown) == (None, None)
+
+    def test_failed_setup_is_named_first(self) -> None:
+        ws = FakeWorkspaceClient()
+        run = make_run(1, {"__pytest_setup": "FAILED", "a": "UPSTREAM_FAILED", "b": "UPSTREAM_FAILED"}, "FAILED")
+        ws.jobs.outputs[run_id_of(run, "__pytest_setup")] = jobs.RunOutput(error="NameError: name 'x' is not defined")
+        built = build_from(ws, run)
+        assert built.failed
+        assert repr(built).startswith(f"JobRun('my_job', FAILED, {built.run_url}, failing=[")
+        assert repr(built).endswith(
+            "failing=[\"setup: NameError: name 'x' is not defined\", 'a: UPSTREAM_FAILED', 'b: UPSTREAM_FAILED'])"
+        )
+        cancelled = make_run(2, {"__pytest_setup": "CANCELED", "a": "UPSTREAM_FAILED"}, "CANCELED")
+        assert "failing=['setup: CANCELED', 'a: UPSTREAM_FAILED']" in repr(build_from(ws, cancelled))
+
+
 class TestOutputs:
     """Task outputs are read once, failures to read them are logged, and truncation warns."""
 

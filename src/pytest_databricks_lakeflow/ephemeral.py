@@ -25,6 +25,7 @@ from pytest_databricks_lakeflow.results import (
     fetch_outputs,
     format_parameters,
     has_output,
+    task_outcome,
 )
 from pytest_databricks_lakeflow.settings import check_compute, check_params, create_kwargs, pipeline_params, select
 
@@ -224,6 +225,7 @@ class EphemeralJob:
         self.runs.append(result)
         _record_outcome(item, result)
         log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
+        _warn_on_failed_teardown(result)
         if self.lakeflow.run_finished is not None:
             self.lakeflow.run_finished(result, item)
         return result
@@ -349,6 +351,14 @@ def _record_outcome(item: pytest.Item, result: JobRun) -> None:
     if task_params:
         shown = {key: json.loads(text) for key, text in task_params.items()}
         item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
+
+
+def _warn_on_failed_teardown(result: JobRun) -> None:
+    """Log a failed teardown task, which leaves `succeeded` as it was, so that it does not pass unnoticed."""
+    teardown = result.teardown
+    if teardown is None or teardown.succeeded:
+        return
+    log.warning("The teardown task of run %s failed: %s %s", result.run_id, task_outcome(teardown), teardown.run_url)
 
 
 def _terminated(run: jobs.Run) -> bool:

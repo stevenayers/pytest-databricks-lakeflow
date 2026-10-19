@@ -7,6 +7,7 @@
 - **SQL query rows are not fetched.** `TaskRun.sql_output` is what `runs/get-output` returns: the warehouse, the SQL and an `output_link`, but no rows. Query a table the job wrote instead.
 - **Alert tasks succeed whether or not the alert triggered.** Databricks marks an alert task succeeded when the alert was evaluated, so `succeeded` says nothing about the alert. Assert on `TaskRun.alert_state`. `TaskRun.alert_output` needs a databricks-sdk release that knows the alert task; with an older one it is `None` and `alert_state` reads only legacy SQL alert tasks.
 - **Pipeline tasks run the deployed pipeline.** An ephemeral job copies the job, not the pipelines its pipeline tasks point at, so every test updates the same pipeline and its tables. `full_refresh`, `full_refresh_selection` and `refresh_selection` on `job.run()` apply to every pipeline task in the run.
+- **`setup=` and `teardown=` functions ship as source.** They run as notebooks on the job's compute, so they must be self-contained: imports inside the function, no helper functions defined elsewhere in the test module, no variables of an enclosing function. Lambdas, closures and functions defined in a REPL are refused with `LakeflowError`. Each costs one extra task start per run, like a stub.
 - **Task values need probes.** Task values are not available through the Jobs API, so they are read by probe tasks. Each probe costs 7 to 30 seconds of serverless compute, even when its task did not run.
 - **Concurrent sessions sharing one target.** Sessions that deploy the same target share one deployment, so a deploy from one session replaces the wheels that another session's jobs are still running, and those jobs fail. `deploy_flags=["--fail-on-active-runs"]` does not prevent this, because it only sees runs of the deployed jobs, not the ephemeral copies. Use the recipe in [isolating test deployments](how-it-works.md#isolating-test-deployments).
 - **Job code must read catalog and schema from job parameters.** Bundle variables are fixed at deploy time, and the plugin deploys each target once per session for each set of `variables`.
@@ -47,7 +48,7 @@ Ephemeral jobs are tagged `pytest` and `pytest_run_id`, and, when they can be fo
 
 ### What does the plugin leave in my workspace?
 
-The deployed test target, the two helper notebooks under `helpers_path`, and any jobs kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
+The deployed test target, the two helper notebooks under `helpers_path` with the `setup_<hash>` and `teardown_<hash>` notebooks of any `setup=` and `teardown=` functions, and any jobs kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
 
 ### Why does setup fail with "Bundle target 'test' deploys to ... but the workspace client is for ..."?
 

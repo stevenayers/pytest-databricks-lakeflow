@@ -89,6 +89,7 @@ class SessionState:
         kept_schemas: The full name of each temporary schema that was kept.
         cancelled_runs: The number of runs cancelled at session end.
         worker_dir: On the xdist controller, the directory that it shares with the workers.
+        uploaded_notebooks: The workspace paths of the setup and teardown notebooks this process uploaded.
     """
 
     rootpath: Path
@@ -108,6 +109,7 @@ class SessionState:
     kept_schemas: list[str] = field(default_factory=list)
     cancelled_runs: int = 0
     worker_dir: Path | None = None
+    uploaded_notebooks: set[str] = field(default_factory=set)
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.

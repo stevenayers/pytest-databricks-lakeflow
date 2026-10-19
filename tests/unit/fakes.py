@@ -156,6 +156,7 @@ class FakeWorkspace:
         self.objects: set[str] = set()
         self.folders: list[str] = []
         self.uploads: dict[str, dict[str, Any]] = {}
+        self.upload_calls: list[str] = []
 
     def mkdirs(self, path: str) -> None:
         self.folders.append(path)
@@ -164,6 +165,7 @@ class FakeWorkspace:
         parent = path.rsplit("/", 1)[0]
         if parent not in self.folders:
             raise NotFound(f"The parent folder ({parent}) does not exist.")
+        self.upload_calls.append(path)
         self.uploads[path] = {"content": content.decode(), **kwargs}
         self.objects.add(path)
 
@@ -213,6 +215,36 @@ class FakeWorkspaceClient:
         self.current_user = FakeCurrentUser()
         self.config = SimpleNamespace(host=HOST, profile=None)
         self.profiles: list[str | None] = []
+
+
+class NotebookExit(Exception):
+    """Raised by `FakeDbutils.notebook.exit`, which ends a notebook like the real one does."""
+
+    def __init__(self, value: str) -> None:
+        super().__init__(value)
+        self.value = value
+
+
+class FakeDbutils:
+    """Stands in for the `dbutils` of a notebook task: widgets from a mapping, and a `notebook.exit` that stops."""
+
+    def __init__(self, widgets: Mapping[str, str]) -> None:
+        self.widgets = SimpleNamespace(get=lambda name: widgets[name])
+        self.notebook = SimpleNamespace(exit=self._exit)
+
+    @staticmethod
+    def _exit(value: str) -> None:
+        raise NotebookExit(value)
+
+
+def run_notebook(source: str, widgets: Mapping[str, str], spark: object = None) -> str | None:
+    """Run a generated notebook's source with `spark` and a `FakeDbutils`, and return its exit value or `None`."""
+    namespace = {"spark": spark, "dbutils": FakeDbutils(widgets)}
+    try:
+        exec(compile(source, "<notebook>", "exec"), namespace)
+    except NotebookExit as e:
+        return e.value
+    return None
 
 
 def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:

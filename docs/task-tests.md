@@ -21,6 +21,20 @@ with lakeflow.task(
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
 - `run_as` chooses who the job runs as: `None` by default, which runs it as you, `"keep"` for the template's `run_as`, a user's email, a service principal's application id, or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity).
 
+`setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data). The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
+
+```python
+with lakeflow.schema() as schema:
+    with lakeflow.task(
+        "my_example_job.transform",
+        params={"schema": schema, "mode": "incremental"},
+        upstream_task_values={"extract": {"row_count": 2, "source_path": "/Volumes/x/y/z"}},
+        setup=seed_orders,
+        teardown=remove_landing_file,
+    ) as task:
+        assert task.run().succeeded
+```
+
 The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. `run()`, `only`, the keep rules and the result objects all work the same way, and `with` is optional.
 
 ## How stubs resolve
@@ -86,7 +100,7 @@ The stub is in `run.injected_tasks`, not `run.tasks`, so `executed_tasks` lists 
 
 ## Helper compute
 
-Stubs and probes are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`, and overwritten on each upload.
+Stubs, probes and the setup and teardown tasks are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`, and overwritten on each upload.
 
 By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its environment version. The default version is `"4"`.
 
@@ -129,4 +143,4 @@ def test_single_task(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
 
 ## Running a subset of a task job
 
-`only` works on task jobs too. The plugin adds the stubs that the selected tasks depend on and the probes on them, so `run(only=["transform"])` still runs the stubs first and the probe afterwards.
+`only` works on task jobs too. The plugin adds the stubs that the selected tasks depend on, the probes on them and the setup and teardown tasks, so `run(only=["transform"])` still runs the stubs first and the probe afterwards.
