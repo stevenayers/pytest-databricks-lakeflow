@@ -94,7 +94,9 @@ class Lakeflow:
             reads `DATABRICKS_CONFIG_PROFILE` and the other `DATABRICKS_*` variables.
         workspace_client: A client to use instead of making one from `profile`. The CLI still uses `profile`, or
             else the client's profile.
-        sync: How to prepare the bundle: `deploy`, `sync` or `none`.
+        sync: How to prepare the bundle: `deploy`, `sync` or `none`. Before `deploy`, `bundle validate` reads the
+            run_as of the target and of each job, and the setup fails with `LakeflowBundleError` if one names another
+            user, or a service principal on which you do not have the Service Principal User role.
         variables: Bundle variables, passed as `--var name=value` to every `bundle` command, `bundle destroy`
             included. Instances with different variables set the target up separately.
         deploy_flags: Extra flags for `databricks bundle deploy`, added at the end of the command, such as
@@ -146,7 +148,8 @@ class Lakeflow:
             unchanged version may not be picked up.
         permissions: The `access_control_list` applied to every ephemeral job when it is created, so that people
             other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as
-            `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`.
+            `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. `IS_OWNER` raises `ValueError`, because
+            the creator owns every ephemeral job; use `CAN_MANAGE`.
         modify_settings: Called with each ephemeral job's settings and the test, just before the job is created.
             Change the settings in place.
         run_finished: Called with the outcome of each run and the test, after the run finishes.
@@ -199,6 +202,7 @@ class Lakeflow:
         if self.poll_interval is not None and self.poll_interval <= timedelta(0):
             raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
         _check_deploy_flags(self.deploy_flags)
+        _check_permissions(self.access_control_list())
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -296,7 +300,9 @@ class Lakeflow:
             name: Replaces the test node id in the job name.
             run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
                 the template's. A string with `@` names a user, any other string names a service principal by its
-                application id, and a `jobs.JobRunAs` is used as given.
+                application id, and a `jobs.JobRunAs` is used as given. A service principal needs you to have the
+                Service Principal User role on it, which is checked before the copy is created when the workspace
+                client knows its account id.
             disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
             task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
                 mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
@@ -695,6 +701,14 @@ def _check_deploy_flags(deploy_flags: Sequence[str]) -> None:
         name = _flag_name(flag)
         if name in PLUGIN_DEPLOY_FLAGS:
             raise ValueError(f"deploy_flags cannot contain {name}. {PLUGIN_DEPLOY_FLAGS[name]}.")
+
+
+def _check_permissions(requests: Sequence[jobs.JobAccessControlRequest] | None) -> None:
+    for request in requests or []:
+        if request.permission_level == jobs.JobPermissionLevel.IS_OWNER:
+            raise ValueError(
+                "permissions cannot grant IS_OWNER: the creator owns every ephemeral job. Use CAN_MANAGE instead."
+            )
 
 
 def _flag_name(flag: str) -> str:

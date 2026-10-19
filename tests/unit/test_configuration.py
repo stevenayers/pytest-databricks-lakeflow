@@ -127,6 +127,20 @@ class TestLakeflowArguments:
         assert Lakeflow(permissions=[entry]).access_control_list() == [expected]
 
     @pytest.mark.parametrize(
+        "entry",
+        [
+            pytest.param({"user_name": "x", "permission_level": "IS_OWNER"}, id="dict"),
+            pytest.param(
+                jobs.JobAccessControlRequest(user_name="x", permission_level=jobs.JobPermissionLevel.IS_OWNER),
+                id="sdk_object",
+            ),
+        ],
+    )
+    def test_is_owner_is_rejected_at_construction(self, entry: dict[str, str] | jobs.JobAccessControlRequest) -> None:
+        with pytest.raises(ValueError, match=r"IS_OWNER.*CAN_MANAGE"):
+            Lakeflow(permissions=[{"group_name": "data-eng", "permission_level": "CAN_VIEW"}, entry])
+
+    @pytest.mark.parametrize(
         ("arguments", "message"),
         [
             ({"sync": "upload"}, "sync must be one of deploy, sync, none, got 'upload'"),

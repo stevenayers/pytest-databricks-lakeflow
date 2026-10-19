@@ -11,6 +11,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
 
@@ -56,6 +57,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 
 POLL_SECONDS = 2.0
+ROLE_FIX = (
+    "Ask a manager of that service principal to grant you the role, or leave run_as out to run the copy as yourself."
+)
 REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
 PROGRESS = pytest.StashKey[list[str]]()
 NOTEBOOKS = pytest.StashKey[list[str]]()
@@ -147,6 +151,9 @@ class EphemeralJob:
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
                 declare after `modify_settings` has run, or a serverless task that needs an environment has none.
+                Also if the job runs as a service principal and you do not have the Service Principal User role on
+                it, or `jobs.create` refuses the job with `PERMISSION_DENIED`, with the platform's error as its
+                cause. Without a service principal in `run_as`, errors from `jobs.create` are raised unchanged.
         """
         if self._closed:
             raise LakeflowError(f"The ephemeral job for {self.job_key!r} has already been closed")
@@ -158,11 +165,36 @@ class EphemeralJob:
             name_lifecycle_params(self.settings, self.params)
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         check_compute(self.settings)
-        acl = self.lakeflow.access_control_list()
-        self.job_id = self.lakeflow.ws.jobs.create(**create_kwargs(self.settings), access_control_list=acl).job_id
+        self.job_id = self._create_job()
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
         item.user_properties.append(("lakeflow_job_id", self.job_id))
+
+    def _create_job(self) -> int | None:
+        """Create the job, checking first that its creator may make it run as the service principal it names."""
+        ws = self.lakeflow.ws
+        acl = self.lakeflow.access_control_list()
+        application_id = None
+        if self.settings.run_as is not None:
+            application_id = self.settings.run_as.service_principal_name
+        if application_id and session.check_sp_user_role(ws, application_id) is False:
+            raise LakeflowError(
+                f"{self._creator()} does not have the Service Principal User role on {application_id}, so the copy "
+                f"of {self.job_key!r} cannot run as it. {ROLE_FIX}"
+            )
+        try:
+            return ws.jobs.create(**create_kwargs(self.settings), access_control_list=acl).job_id
+        except PermissionDenied as e:
+            if not application_id:
+                raise
+            raise LakeflowError(
+                f"Creating the copy of {self.job_key!r} with run_as {application_id} was refused: {e} To create a "
+                f"job that runs as a service principal, {self._creator()} needs the Service Principal User role on "
+                f"it. {ROLE_FIX}"
+            ) from e
+
+    def _creator(self) -> str:
+        return self.lakeflow._state()["user"]
 
     def run(
         self,

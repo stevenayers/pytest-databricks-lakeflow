@@ -17,12 +17,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from databricks.sdk.errors import InvalidParameterValue, NotFound
+from databricks.sdk.errors import BadRequest, InvalidParameterValue, NotFound
 from databricks.sdk.service import catalog, iam, jobs, pipelines, workspace
 
 DATA = Path(__file__).parent / "data"
 HOST = "https://example.cloud.databricks.com"
 HOUR_MS = 3_600_000
+ACCOUNT_ID = "a1"
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 # The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
 # "Invalid filter expression"; the value must be in single quotes.
@@ -387,10 +388,42 @@ class FakePipelines:
 class FakeCurrentUser:
     def __init__(self) -> None:
         self.me_calls = 0
+        self.user_name = "someone@example.com"
+        self.groups: list[str] = []
 
     def me(self) -> iam.User:
         self.me_calls += 1
-        return iam.User(user_name="someone@example.com")
+        groups = [iam.ComplexValue(display=name, type="direct") for name in self.groups]
+        return iam.User(user_name=self.user_name, groups=groups or None)
+
+
+class FakeAccountAccessControlProxy:
+    """Serves service principal rule sets from `rule_sets`, by rule set name."""
+
+    def __init__(self) -> None:
+        self.rule_sets: dict[str, iam.RuleSetResponse | Exception] = {}
+        self.names: list[str] = []
+
+    def grant(self, application_id: str, role: str, *principals: str) -> None:
+        """Add a rule granting `role` on the service principal `application_id` to `principals`."""
+        name = sp_rule_set(application_id)
+        rule_set = self.rule_sets.setdefault(name, iam.RuleSetResponse(name=name, etag="e", grant_rules=[]))
+        assert isinstance(rule_set, iam.RuleSetResponse) and rule_set.grant_rules is not None
+        rule_set.grant_rules.append(iam.GrantRule(role=role, principals=list(principals)))
+
+    def get_rule_set(self, name: str, etag: str) -> iam.RuleSetResponse:
+        """Like the platform, an unknown service principal is a `BadRequest`, not a `NotFound`."""
+        self.names.append(name)
+        if name not in self.rule_sets:
+            raise BadRequest(f"ServicePrincipal {name.split('/')[3]} not found")
+        rule_set = self.rule_sets[name]
+        if isinstance(rule_set, Exception):
+            raise rule_set
+        return rule_set
+
+
+def sp_rule_set(application_id: str) -> str:
+    return f"accounts/{ACCOUNT_ID}/servicePrincipals/{application_id}/ruleSets/default"
 
 
 class FakeWorkspaceClient:
@@ -402,7 +435,8 @@ class FakeWorkspaceClient:
         self.schemas = FakeSchemas()
         self.pipelines = FakePipelines()
         self.current_user = FakeCurrentUser()
-        self.config = SimpleNamespace(host=HOST, profile=None)
+        self.account_access_control_proxy = FakeAccountAccessControlProxy()
+        self.config = SimpleNamespace(host=HOST, profile=None, account_id=ACCOUNT_ID)
         self.profiles: list[str | None] = []
 
 

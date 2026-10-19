@@ -63,6 +63,10 @@ The deployed test target, the two helper notebooks under `helpers_path` with the
 
 The CLI and the SDK resolved different workspaces. The CLI takes the host from the target's `workspace.host` in `databricks.yml`, while the plugin's `WorkspaceClient` takes it from `profile` or the `DATABRICKS_*` variables. Without this check, every `jobs.get` would look in the wrong workspace and the jobs would be reported as stale. Make the two agree: pass `profile=` to `Lakeflow` for a profile whose host is the target's, set `DATABRICKS_HOST` and `DATABRICKS_CONFIG_PROFILE` to match the target, or run pytest through the CLI with `databricks bundle run -t test -- uv run pytest`, which gives it the target's credentials. A target without `workspace.host` is not checked.
 
+### Why does setup fail with "Target 'test' sets run_as ..."?
+
+Before `bundle deploy`, the plugin reads the `run_as` of the target and of each job from `bundle validate` and compares it with the identity that deploys. A deploy with another user's `run_as`, or a service principal on which you do not have the Service Principal User role, would either fail inside the CLI after a long deploy or leave jobs that run as someone else. Set the test target's `run_as` to `user_name: ${workspace.current_user.userName}`, so that each identity deploys jobs that run as itself, deploy as that principal, for example from CI, or ask a manager of the service principal to grant you the role. To keep a `run_as` you cannot deploy, deploy the bundle yourself as the right identity and pass `sync="none"` to `Lakeflow`. Giving each identity its own deployment is described in [Isolating test deployments](how-it-works.md#isolating-test-deployments).
+
 ### Why did the CLI fail with `exit status 45` under xdist?
 
 Several processes refreshed a user-to-machine (`databricks-cli`) OAuth token at the same time. The plugin retries building its client, but the CLI call that hit the race fails. Use a service principal with OAuth machine-to-machine credentials or a token in CI.
