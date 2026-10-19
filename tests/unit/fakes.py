@@ -9,6 +9,8 @@ import time
 import urllib.parse
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -256,6 +258,7 @@ class FakeWorkspace:
         self.upload_calls: list[str] = []
         self.listed: list[workspace.ObjectInfo] = []
         self.deleted: list[str] = []
+        self.modified: dict[str, int] = {}
 
     def mkdirs(self, path: str) -> None:
         self.folders.append(path)
@@ -271,7 +274,7 @@ class FakeWorkspace:
     def get_status(self, path: str) -> SimpleNamespace:
         if path not in self.objects:
             raise NotFound(f"Path ({path}) doesn't exist.")
-        return SimpleNamespace(path=path)
+        return SimpleNamespace(path=path, modified_at=self.modified.get(path))
 
     def list(self, path: str, **kwargs: Any) -> Iterator[workspace.ObjectInfo]:
         """List the objects in `listed` directly inside the folder `path`."""
@@ -288,7 +291,12 @@ class FakeFiles:
         self.workspace = workspace
 
     def get_metadata(self, path: str) -> SimpleNamespace:
-        return self.workspace.get_status(path)
+        """Report `FakeWorkspace.modified` as the HTTP date the Files API returns in its last-modified header."""
+        modified_at = self.workspace.get_status(path).modified_at
+        if modified_at is None:
+            return SimpleNamespace(last_modified=None)
+        when = datetime.fromtimestamp(modified_at / 1000, tz=UTC)
+        return SimpleNamespace(last_modified=format_datetime(when, usegmt=True))
 
 
 class FakeSchemas:

@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
@@ -163,6 +164,8 @@ class SessionState:
         kept_schemas: The full name of each temporary schema that was kept.
         cancelled_runs: The number of runs cancelled at session end.
         warned_artifacts: The bundle targets whose wheel artifacts without `dynamic_version` have been warned about.
+        warned_uploads: The bundle targets whose local libraries built after their uploaded copies have been warned
+            about.
         worker_dir: On the xdist controller, the directory that it shares with the workers.
         uploaded_notebooks: The workspace paths of the setup and teardown notebooks this process uploaded.
         report_dir: Where `--lakeflow-report-dir` writes each test's runs, resolved against the invocation
@@ -189,6 +192,7 @@ class SessionState:
     kept_schemas: list[str] = field(default_factory=list)
     cancelled_runs: int = 0
     warned_artifacts: set[BundleKey] = field(default_factory=set)
+    warned_uploads: set[BundleKey] = field(default_factory=set)
     worker_dir: Path | None = None
     uploaded_notebooks: set[str] = field(default_factory=set)
     report_dir: Path | None = None
@@ -220,7 +224,8 @@ class SessionState:
 
         Returns:
             The target's state: its job templates, the errors of jobs that cannot be used, the job ids by bundle key,
-                the helper paths, the workspace user, and the wheel artifacts without `dynamic_version`.
+                the helper paths, the workspace user, the wheel artifacts without `dynamic_version`, the bundle root
+                and artifact path, and the local libraries built after their uploaded copies.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -478,6 +483,8 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         templates, errors = templates_from_summary(ws, bundle_summary)
         job_ids, _ = bundle.job_ids(bundle_summary)
         unversioned = bundle.unversioned_wheel_artifacts(bundle_summary)
+        artifact_path = bundle.artifact_path_of(bundle_summary)
+        stale: list[str] = []
     else:
         if key.sync == "sync":
             bundle.sync(root, key.target, key.profile, variables)
@@ -486,6 +493,10 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
         job_ids = {}
         unversioned = bundle.unversioned_wheel_artifacts(config)
+        artifact_path = bundle.artifact_path_of(config)
+        stale = []
+        if key.sync == "none":
+            stale = bundle.stale_uploads(config, root, lambda path: modified_at(ws, path))
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
     helper_paths = helpers.upload(ws, folder)
@@ -497,6 +508,9 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         "user": user,
         "job_ids": job_ids,
         "unversioned_artifacts": unversioned,
+        "artifact_path": artifact_path,
+        "root": str(root),
+        "stale_uploads": stale,
     }
 
 
@@ -569,13 +583,36 @@ def templates_from_summary(
 
 def exists(ws: WorkspaceClient, path: str) -> bool:
     try:
-        if path.startswith("/Volumes/"):
-            ws.files.get_metadata(path)
-        else:
-            ws.workspace.get_status(path)
+        _modified_at(ws, path)
     except NotFound:
         return False
     return True
+
+
+def modified_at(ws: WorkspaceClient, path: str) -> int | None:
+    """Get the time a workspace or Volumes file was last modified.
+
+    Args:
+        ws: The workspace client.
+        path: A `/Workspace` or `/Volumes` path.
+
+    Returns:
+        The time in epoch milliseconds, or `None` if the path does not exist or the API reports no time.
+    """
+    try:
+        return _modified_at(ws, path)
+    except NotFound:
+        return None
+
+
+def _modified_at(ws: WorkspaceClient, path: str) -> int | None:
+    if not path.startswith("/Volumes/"):
+        return ws.workspace.get_status(path).modified_at
+    # The Files API reports the time only as an HTTP date in its last-modified header.
+    last_modified = ws.files.get_metadata(path).last_modified
+    if last_modified is None:
+        return None
+    return int(parsedate_to_datetime(last_modified).timestamp() * 1000)
 
 
 def sweep(

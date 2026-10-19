@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Wheel task for the pytest-databricks-lakeflow example bundle."
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+# Installed only by test_local_wheel_extras_are_installed, through extra_dependencies=["./dist/*.whl[test]"].
+test = ["inflection==0.5.1"]
+
 [project.scripts]
 main = "lakeflow_example.main:main"
 

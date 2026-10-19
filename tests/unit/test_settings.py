@@ -57,6 +57,7 @@ ATTRIBUTION = {
 }
 SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
+WHEEL_WITH_EXTRAS = "/Workspace/b/artifacts/.internal/pkg-0.1-py3-none-any.whl[test]"
 
 
 def sanitised(
@@ -956,13 +957,26 @@ class TestAddDependencies:
         assert default.spec is not None and default.spec.dependencies == [dependency]
         assert task(settings, "classic").libraries == [library]
 
-    @pytest.mark.parametrize("dependency", ["./dist/*.whl[test]", "../dist/pkg-0.1-py3-none-any.whl", "dist/pkg.whl"])
+    @pytest.mark.parametrize("dependency", ["dist/pkg.whl", "dist/*.whl[test]", "pkg-0.1-py3-none-any.whl"])
     def test_add_dependencies_rejects_local_paths(self, dependency: str) -> None:
         settings = example_settings()
-        with pytest.raises(LakeflowError, match=r"Local paths are not yet supported in extra_dependencies") as e:
+        with pytest.raises(LakeflowError, match=r"Local paths in extra_dependencies must start with \./ or \.\./") as e:
             add_dependencies(settings, ["pytest", dependency])
         assert repr(dependency) in str(e.value)
-        assert 'sync="deploy"' in str(e.value)
+        assert settings == example_settings(), "nothing changes before the error"
+
+    def test_wheel_extras_reach_environments_as_they_are(self) -> None:
+        settings = example_settings()
+        settings.tasks = [t for t in settings.tasks or [] if t.task_key != "classic"]
+        add_dependencies(settings, [WHEEL_WITH_EXTRAS, "rich[all]>=13"])
+        [default] = settings.environments or []
+        assert default.spec is not None and default.spec.dependencies == [WHEEL_WITH_EXTRAS, "rich[all]>=13"]
+
+    def test_wheel_extras_are_refused_for_cluster_tasks(self) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=r"Tasks \['classic'\] run on a cluster") as e:
+            add_dependencies(settings, ["pytest", WHEEL_WITH_EXTRAS])
+        assert repr(WHEEL_WITH_EXTRAS) in str(e.value)
         assert settings == example_settings(), "nothing changes before the error"
 
 

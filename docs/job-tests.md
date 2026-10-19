@@ -108,9 +108,23 @@ def test_with_test_helpers(lakeflow: Lakeflow) -> None:
         assert job.run().succeeded
 ```
 
-Each entry is a PyPI requirement, or the `/Workspace` or `/Volumes` path of a wheel. It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else, a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
+Each entry is a PyPI requirement, the `/Workspace` or `/Volumes` path of a wheel, or a local wheel (see below). It is appended to the `dependencies` of every environment the copy takes from the template (not to one that `environments=` adds), and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else, a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
 
-Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged; install the package with `%pip install` in the notebook, or give the task an environment in the bundle. Local paths such as `./dist/*.whl[test]` are not supported yet and raise `LakeflowError` before anything is created. Declare a local wheel in the bundle job instead, where `sync="deploy"` maps it to the uploaded file.
+Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged; install the package with `%pip install` in the notebook, or give the task an environment in the bundle.
+
+#### Local wheels and extras
+
+A path that starts with `./` or `../` is a local wheel, relative to the bundle root, and can be a glob. Add extras after it to install the test-only packages your own wheel declares, for example `[project.optional-dependencies] test = ["chispa>=0.10"]` in its `pyproject.toml`:
+
+```python
+def test_with_the_test_extra(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", extra_dependencies=["./dist/*.whl[test]"]) as job:
+        assert job.run().succeeded
+```
+
+The extras are split off before globbing, each matching file is pointed at the copy that the last `bundle deploy` uploaded, `<workspace.artifact_path>/.internal/<file name>`, and the extras are added back, so the environment gains `/Workspace/.../.internal/pkg-0.1-py3-none-any.whl[test]`. The file must be built and deployed: with `sync="deploy"` the session's own deploy uploads the bundle's artifacts, with `sync="none"` an earlier deploy must have, and `sync="sync"` uploads no wheels, so a local path raises `LakeflowError` naming `Lakeflow(sync="deploy")`. A pattern that matches no file, or a file without an uploaded copy, raises `LakeflowError` too. Every error is raised before anything is created.
+
+A wheel with extras reaches only the environments. The `whl` library of a task on a cluster takes no extras, and installing the wheel without them would leave out the packages the test needs, so a wheel with extras raises `LakeflowError` when the copy has a notebook, Python script or Python wheel task on a cluster. Pass the packages the extras add as PyPI requirements instead. Local paths that do not start with `./` or `../`, such as `dist/pkg.whl`, are refused.
 
 The copy's settings can be changed further with [`modify_settings`](#change-the-settings-before-the-job-is-created). Two recipes that come up with dependencies, pinning the branch of a job that runs from Git and replacing the libraries of one task:
 
