@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
-from databricks.sdk.service import jobs
+from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
@@ -455,6 +455,41 @@ class TestCreateSettings:
         [created] = fake_ws.jobs.created
         assert created["performance_target"] == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
         assert not any(task.disable_auto_optimization for task in created["tasks"])
+
+    def test_extra_dependencies_reach_the_created_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job", extra_dependencies=["pytest>=8"], capture_task_values={"load": ["k"]}):
+                    pass
+
+            def test_task(lakeflow):
+                with lakeflow.task("my_job.classic", extra_dependencies=["/Volumes/c/s/v/helpers.whl"]):
+                    pass
+
+            def test_local_path(lakeflow):
+                with pytest.raises(LakeflowError, match="Local paths are not yet supported"):
+                    lakeflow.job("my_job", extra_dependencies=["./dist/*.whl[test]"])
+            """,
+        )
+        result.assert_outcomes(passed=3)
+        job, single = fake_ws.jobs.created
+        default, helper = job["environments"]
+        assert default.spec.dependencies == ["pytest>=8"]
+        assert (helper.environment_key, helper.spec.dependencies) == ("__pytest_serverless", None)
+        libraries = {t.task_key: t.libraries for t in job["tasks"]}
+        assert libraries["classic"] == [compute.Library(pypi=compute.PythonPyPiLibrary(package="pytest>=8"))]
+        assert not libraries["extract"]
+        assert not libraries["__pytest_probe__load"]
+        [classic] = single["tasks"]
+        assert classic.libraries == [compute.Library(whl="/Volumes/c/s/v/helpers.whl")]
 
 
 class TestDisabledTasks:

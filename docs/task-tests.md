@@ -20,6 +20,7 @@ with lakeflow.task(
 - `upstream_task_values` maps upstream task keys to the task values their stubs set. Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
 - `run_as` chooses who the job runs as: `None` by default, which runs it as you, `"keep"` for the template's `run_as`, a user's email, a service principal's application id, or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity).
+- `children` and `extra_dependencies` work as for job tests, see [Jobs that run other jobs](job-tests.md#jobs-that-run-other-jobs) and [Test-only dependencies](job-tests.md#test-only-dependencies). The stub and probe tasks never get the dependencies.
 
 `setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data). The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
 

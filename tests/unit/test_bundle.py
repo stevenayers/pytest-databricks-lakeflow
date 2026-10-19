@@ -193,6 +193,28 @@ class TestJobIds:
         assert bundle.job_ids({"resources": {}}) == ({}, {})
 
 
+class TestUnversionedWheelArtifacts:
+    """Finding the wheel artifacts that serverless may run a cached build of, from `bundle summary` or `validate`."""
+
+    WHEEL = {"type": "whl", "build": "uv build --wheel", "path": "/b", "files": [{"source": "/b/dist/*.whl"}]}
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param({}, [], id="no_artifacts"),
+            pytest.param({"artifacts": None}, [], id="null_artifacts"),
+            pytest.param({"artifacts": {"pkg": WHEEL}}, ["pkg"], id="whl"),
+            pytest.param({"artifacts": {"pkg": {**WHEEL, "dynamic_version": True}}}, [], id="dynamic_version"),
+            pytest.param({"artifacts": {"pkg": {**WHEEL, "dynamic_version": False}}}, ["pkg"], id="dynamic_false"),
+            pytest.param({"artifacts": {"pkg": {"build": "make", "path": "/b"}}}, ["pkg"], id="untyped_build"),
+            pytest.param({"artifacts": {"lib": {"type": "jar", "build": "sbt package"}}}, [], id="jar"),
+            pytest.param({"artifacts": {"b": WHEEL, "a": WHEEL}}, ["a", "b"], id="sorted"),
+        ],
+    )
+    def test_unversioned_wheel_artifacts(self, config: dict[str, Any], expected: list[str]) -> None:
+        assert bundle.unversioned_wheel_artifacts(config) == expected
+
+
 class TestTemplatesFromValidate:
     """Building templates from `bundle validate` for the sync and none strategies, and their local libraries."""
 
