@@ -1,0 +1,19 @@
+resources:
+  jobs:
+    parent_job:
+      name: parent_job
+      description: Parent job with a run_job task for the pytest-databricks-lakeflow integration tests.
+      parameters:
+        - name: greeting
+          default: hi
+      tasks:
+        - task_key: prepare
+          notebook_task:
+            notebook_path: ../src/notebooks/prepare.py
+        - task_key: trigger_child
+          depends_on:
+            - task_key: prepare
+          run_job_task:
+            job_id: ${resources.jobs.child_job.id}
+            job_parameters:
+              greeting: "{{job.parameters.greeting}}"
