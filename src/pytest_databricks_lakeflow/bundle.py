@@ -43,7 +43,9 @@ def _has_bundle(path: Path) -> bool:
 def run_cli(args: list[str], root: Path, profile: str | None = None) -> str:
     if not root.is_dir():
         raise LakeflowBundleError(f"Bundle root {root} does not exist")
-    cmd = ["databricks", *args, *(["--profile", profile] if profile else [])]
+    cmd = ["databricks", *args]
+    if profile:
+        cmd += ["--profile", profile]
     try:
         result = subprocess.run(cmd, cwd=root, check=True, capture_output=True, text=True)
     except FileNotFoundError:
@@ -56,8 +58,13 @@ def run_cli(args: list[str], root: Path, profile: str | None = None) -> str:
 def check_cli_version(root: Path) -> None:
     out = run_cli(["--version"], root)
     match = VERSION.search(out)
-    version = tuple(int(part) for part in match.groups()) if match else None
-    if version and (0, 0, 0) < version < MIN_CLI_VERSION:
+    if match is None:
+        return
+    version = tuple(int(part) for part in match.groups())
+    if version == (0, 0, 0):
+        # A CLI built from source reports v0.0.0-dev, which is accepted.
+        return
+    if version < MIN_CLI_VERSION:
         minimum = ".".join(map(str, MIN_CLI_VERSION))
         raise LakeflowBundleError(f"pytest-databricks-lakeflow needs Databricks CLI v{minimum} or later: {out.strip()}")
 
@@ -95,7 +102,10 @@ def destroy(root: Path, target: str, profile: str | None, variables: Mapping[str
 
 
 def _var_args(variables: Mapping[str, str] | None) -> list[str]:
-    return [arg for name, value in sorted((variables or {}).items()) for arg in ("--var", f"{name}={value}")]
+    args: list[str] = []
+    for name, value in sorted((variables or {}).items()):
+        args += ["--var", f"{name}={value}"]
+    return args
 
 
 def _json_command(
@@ -204,26 +214,59 @@ def _local_libraries(job: Mapping[str, Any]) -> list[str]:
 def _map_libraries(job: Mapping[str, Any], fn: Callable[[str], list[str]]) -> dict[str, Any]:
     """Copy a job, replacing each local library path with the paths `fn` returns for it."""
     copied: dict[str, Any] = copy.deepcopy(dict(job))
-    tasks = [*copied.get("tasks", [])]
-    tasks += [t["for_each_task"]["task"] for t in tasks if "task" in t.get("for_each_task", {})]
-    for task in tasks:
-        if "libraries" not in task:
-            continue
-        libraries = []
-        for library in task["libraries"]:
-            kind = next((k for k in ("whl", "jar") if _is_local(library.get(k))), None)
-            libraries += [{kind: path} for path in fn(library[kind])] if kind else [library]
-        task["libraries"] = libraries
+    for task in _all_tasks(copied):
+        if "libraries" in task:
+            task["libraries"] = _map_task_libraries(task["libraries"], fn)
     for env in copied.get("environments", []):
         spec = env.get("spec", {})
         if "dependencies" in spec:
-            spec["dependencies"] = [path for dep in spec["dependencies"] for path in _dependency(dep, fn)]
+            spec["dependencies"] = _map_dependencies(spec["dependencies"], fn)
     return copied
 
 
-def _dependency(dep: str, fn: Callable[[str], list[str]]) -> list[str]:
-    local = dep.startswith(("./", "../")) or (dep.endswith((".whl", ".jar")) and _is_local(dep))
-    return fn(dep) if local else [dep]
+def _all_tasks(job: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The job's tasks, followed by the task that each for_each_task repeats."""
+    tasks = list(job.get("tasks", []))
+    for task in list(tasks):
+        for_each = task.get("for_each_task", {})
+        if "task" in for_each:
+            tasks.append(for_each["task"])
+    return tasks
+
+
+def _map_task_libraries(libraries: list[dict[str, Any]], fn: Callable[[str], list[str]]) -> list[dict[str, Any]]:
+    mapped: list[dict[str, Any]] = []
+    for library in libraries:
+        kind = _local_library_kind(library)
+        if kind is None:
+            mapped.append(library)
+            continue
+        for path in fn(library[kind]):
+            mapped.append({kind: path})
+    return mapped
+
+
+def _local_library_kind(library: Mapping[str, Any]) -> str | None:
+    for kind in ("whl", "jar"):
+        if _is_local(library.get(kind)):
+            return kind
+    return None
+
+
+def _map_dependencies(dependencies: list[str], fn: Callable[[str], list[str]]) -> list[str]:
+    mapped: list[str] = []
+    for dep in dependencies:
+        if _is_local_dependency(dep):
+            mapped.extend(fn(dep))
+        else:
+            mapped.append(dep)
+    return mapped
+
+
+def _is_local_dependency(dep: str) -> bool:
+    if dep.startswith(("./", "../")):
+        return True
+    return dep.endswith((".whl", ".jar")) and _is_local(dep)
 
 
 def _is_local(path: object) -> bool:
