@@ -153,7 +153,7 @@
   "original_attempt_run_id": 176437751794568,
   "run_duration": 42702,
   "run_id": 176437751794568,
-  "run_name": "[pytest] tests/integration/test_zz_record_tmp.py::test_record",
+  "run_name": "[pytest] tests/integration/test_alerts.py::test_alert_task_reports_its_state[fires-TRIGGERED]",
   "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/40956743764917/run/176437751794568",
   "run_type": "JOB_RUN",
   "setup_duration": 0,

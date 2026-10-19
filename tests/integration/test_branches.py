@@ -5,7 +5,7 @@ parameter, the condition task ``check`` compares it with ``> 0``, and ``on_true`
 two outcomes. Run the tests with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_branches.py -n 4 --dist loadgroup --lakeflow-sweep
+        uv run pytest tests/integration/test_branches.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations
