@@ -1,0 +1,31 @@
+resources:
+  jobs:
+    branching_job:
+      name: branching_job
+      description: If/else branching job for the pytest-databricks-lakeflow integration tests.
+      parameters:
+        - name: rows
+          default: "0"
+      tasks:
+        - task_key: check_input
+          notebook_task:
+            notebook_path: ../src/notebooks/check_input.py
+        - task_key: check
+          depends_on:
+            - task_key: check_input
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.check_input.values.rows}}"
+            right: "0"
+        - task_key: on_true
+          depends_on:
+            - task_key: check
+              outcome: "true"
+          notebook_task:
+            notebook_path: ../src/notebooks/on_true.py
+        - task_key: on_false
+          depends_on:
+            - task_key: check
+              outcome: "false"
+          notebook_task:
+            notebook_path: ../src/notebooks/on_false.py
