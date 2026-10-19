@@ -24,6 +24,7 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 | `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete in the terminal summary. |
 | `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
+| `--lakeflow-debug-notebook` | When a test fails, write a notebook for each notebook task that failed in the last run of each of its jobs, which replays the task's resolved parameters. See [Reproduce a failed notebook task](job-tests.md#reproduce-a-failed-notebook-task). |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](configuration.md#report-directory). |
 
 ## `Lakeflow`
@@ -73,6 +74,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 ## `NotebookCell`
 
 ::: pytest_databricks_lakeflow.NotebookCell
+
+## `DebugNotebook`
+
+::: pytest_databricks_lakeflow.DebugNotebook
 
 ## `serialise`
 
