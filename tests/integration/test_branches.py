@@ -42,6 +42,22 @@ def test_if_else_branch(lakeflow: Lakeflow, rows: str, expected: bool, taken: st
             run.branch_taken("check_input")
 
 
+@pytest.mark.parametrize(
+    ("forced", "rows", "taken", "untaken"),
+    [(True, "0", "on_true", "on_false"), (False, "5", "on_false", "on_true")],
+)
+def test_forced_branch(lakeflow: Lakeflow, forced: bool, rows: str, taken: str, untaken: str) -> None:
+    # The data says one branch and force_conditions takes the other.
+    with lakeflow.job("branching_job", params={"rows": rows}, force_conditions={"check": forced}) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.branch_taken("check") is forced
+        assert run.task("check_input").ran
+        assert run.task(taken).ran
+        assert run.task(untaken).excluded
+        assert run.executed_tasks == ["check", "check_input", taken]
+
+
 @pytest.mark.parametrize(("rows", "expected"), [(0, False), (5, True)])
 def test_condition_task_on_its_own(lakeflow: Lakeflow, rows: int, expected: bool) -> None:
     # The condition task is the task under test; a stub replaces check_input and sets the value it compares.
