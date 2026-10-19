@@ -174,6 +174,8 @@ class EphemeralJob:
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
+        # Converted before the job is created, so an unknown target never leaves a job behind.
+        target = _performance_target(performance_target)
         self.create()
         if timeout is not None:
             # Checked before the run starts, so a timeout that is too long never leaves a run behind.
@@ -181,7 +183,7 @@ class EphemeralJob:
         handle = self.start(
             params,
             only,
-            performance_target=performance_target,
+            performance_target=target,
             queue=queue,
             full_refresh=full_refresh,
             full_refresh_selection=full_refresh_selection,
@@ -224,7 +226,7 @@ class EphemeralJob:
                 the installed databricks-sdk cannot send it.
             ValueError: If `performance_target` is not a known performance target.
         """
-        target = None if performance_target is None else jobs.PerformanceTarget(performance_target)
+        target = _performance_target(performance_target)
         queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
         assert self.job_id is not None
@@ -451,6 +453,12 @@ def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
         log.info("Cancelled run %s", run_id)
     except DatabricksError as e:
         log.warning("Could not cancel run %s: %s", run_id, e)
+
+
+def _performance_target(value: jobs.PerformanceTarget | str | None) -> jobs.PerformanceTarget | None:
+    if value is None:
+        return None
+    return jobs.PerformanceTarget(value)
 
 
 def _record_outcome(item: pytest.Item, result: JobRun) -> None:

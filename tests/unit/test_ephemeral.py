@@ -1057,22 +1057,23 @@ class TestRunOptions:
         assert call["queue"] == queue
         assert "performance_target" not in fake_ws.jobs.created[0]
 
-    def test_run_rejects_an_unknown_performance_target(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    @pytest.mark.parametrize("method", ["run", "start"])
+    def test_an_unknown_performance_target_is_rejected_before_the_job_is_created(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, method: str
     ) -> None:
         result = run_tests(
             pytester,
-            """
+            f"""
             import pytest
 
             def test_job(lakeflow):
-                with lakeflow.job("my_job") as job:
-                    with pytest.raises(ValueError, match="bogus"):
-                        job.run(performance_target="bogus")
+                job = lakeflow.job("my_job")
+                with pytest.raises(ValueError, match="bogus"):
+                    job.{method}(performance_target="bogus")
             """,
         )
         result.assert_outcomes(passed=1)
-        assert fake_ws.jobs.run_now_calls == []
+        assert (fake_ws.jobs.created, fake_ws.jobs.run_now_calls) == ([], [])
 
     def test_run_passes_full_refresh(
         self, pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient

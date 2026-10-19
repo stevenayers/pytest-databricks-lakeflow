@@ -129,6 +129,11 @@ class TestLakeflowArguments:
         with pytest.raises(ValueError, match=message):
             Lakeflow(**arguments)
 
+    @pytest.mark.parametrize("poll_interval", [timedelta(0), timedelta(seconds=-1)], ids=["zero", "negative"])
+    def test_rejects_a_poll_interval_that_is_not_positive(self, poll_interval: timedelta) -> None:
+        with pytest.raises(ValueError, match=r"poll_interval must be longer than zero, got datetime\.timedelta"):
+            Lakeflow(poll_interval=poll_interval)
+
 
 class TestDeployFlags:
     """`deploy_flags` takes extra `bundle deploy` flags, but not the ones the plugin sets itself."""

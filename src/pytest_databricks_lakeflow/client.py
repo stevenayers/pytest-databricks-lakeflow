@@ -94,6 +94,7 @@ class Lakeflow:
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
         poll_interval: How long to wait between two polls of a run that has not finished. Defaults to two seconds.
+            Zero or less raises `ValueError`.
         catalog: The catalog in which `schema()` creates temporary schemas.
         helpers_path: The workspace folder for the helper notebooks. Defaults to
             `/Users/<you>/.pytest-databricks-lakeflow`.
@@ -182,6 +183,8 @@ class Lakeflow:
             raise ValueError(
                 f"notebook_export must be one of {', '.join(NOTEBOOK_EXPORTS)}, got {self.notebook_export!r}"
             )
+        if self.poll_interval is not None and self.poll_interval <= timedelta(0):
+            raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
         _check_deploy_flags(self.deploy_flags)
 
     @property
@@ -283,12 +286,14 @@ class Lakeflow:
             teardown: Runs last, as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no
                 other task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning.
             extra_dependencies: Test-only dependencies for the copy, as PyPI requirements or workspace or Volumes
-                paths of wheels. They are appended to every environment and, as `pypi` or `whl` libraries, to every
-                notebook, Python script and Python wheel task on a cluster. The helper tasks do not get them.
+                paths of wheels. They are appended to every environment taken from the template and, as `pypi` or
+                `whl` libraries, to every notebook, Python script and Python wheel task on a cluster. The helper tasks
+                do not get them.
             environments: Fields of the copy's serverless environment specs, by `environment_key`, such as
                 `{"default": {"environment_version": "5"}}`. A field replaces the template's field, after
                 `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
-                A key the job does not have adds an environment, which a task can use through `modify_settings`.
+                A key the job does not have adds an environment holding only the fields passed, which a task can
+                use through `modify_settings`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -299,11 +304,11 @@ class Lakeflow:
                 the job, `force_conditions` names a task that is not a condition task, is disabled, or has an outcome
                 that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path,
                 `children` is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
-                `for_each_task`, `environments` names a key starting with `__pytest_` or a field that a serverless
-                environment does not take, sets both `environment_version` and `base_environment` on one environment,
-                or brings the job past 10 environments, or `setup` or `teardown` is not a plain function with its
-                source in a file, uses variables of an enclosing function, takes a parameter other than `spark`,
-                `dbutils` and `params`, or has a decorator.
+                `for_each_task`, `environments` names a key starting with `__pytest_`, holds an entry that is not a
+                mapping or a field that a serverless environment does not take, sets both `environment_version` and
+                `base_environment` on one environment, or brings the job past 10 environments, or `setup` or
+                `teardown` is not a plain function with its source in a file, uses variables of an enclosing
+                function, takes a parameter other than `spark`, `dbutils` and `params`, or has a decorator.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -375,9 +380,9 @@ class Lakeflow:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
                 task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
-                upstream task, a value is too large or not JSON-serialisable, an entry of
-                `extra_dependencies` is a local path, `environments` cannot apply, as for `job()`, `children` is
-                `"refuse"` and the task is a Run Job task, or `setup` or `teardown` cannot run, as for `job()`.
+                upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` is a
+                local path, or `children` is `"refuse"` and the task is a Run Job task. Also in the cases where
+                `job()` raises it because `environments` cannot be applied or `setup` or `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
