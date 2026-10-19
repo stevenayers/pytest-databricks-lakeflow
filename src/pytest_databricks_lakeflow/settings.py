@@ -344,8 +344,10 @@ def add_dependencies(settings: jobs.JobSettings, dependencies: Sequence[str]) ->
     included, gains a `whl` library for a wheel path ending in `.whl` and a `pypi` library for any other requirement,
     a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. A wheel path with extras, such
     as `/Workspace/.../pkg-0.1-py3-none-any.whl[test]`, reaches the environments as it is. Serverless tasks without an
-    `environment_key` cannot take dependencies from the job settings, so they are left alone. Call it before the
-    helper environment is added, so that helper tasks do not install them.
+    `environment_key` cannot take dependencies from the job settings, so they are left alone; the notebook tasks it
+    does not reach, after `environments` and `modify_settings`, are named in a warning when the job is created (see
+    `unreached_notebook_tasks`). Call it before the helper environment is added, so that helper tasks do not install
+    them.
 
     Args:
         settings: The job's settings. They are changed in place.
@@ -409,6 +411,54 @@ def _library(dependency: str) -> compute.Library:
     if dependency.endswith(".whl") and not _DIRECT_REFERENCE.match(dependency):
         return compute.Library(whl=dependency)
     return compute.Library(pypi=compute.PythonPyPiLibrary(package=dependency))
+
+
+def unreached_notebook_tasks(
+    settings: jobs.JobSettings, dependencies: Sequence[str], stubs: Collection[str] = ()
+) -> list[str]:
+    """Get the notebook tasks whose compute does not hold every one of `dependencies`.
+
+    It reads the settings as they are created, after `environments` and `modify_settings`. A notebook task on a
+    cluster needs each dependency in its `libraries`, and a serverless one in the `spec.dependencies` of the
+    environment its `environment_key` names. A serverless notebook task without an `environment_key` has neither.
+    Disabled tasks, tasks nested in a disabled `for_each_task`, notebook tasks on a SQL warehouse, which take no Python
+    packages, and the setup, teardown, probe and stub tasks are left out.
+
+    Args:
+        settings: The job's settings.
+        dependencies: The test-only dependencies, as `add_dependencies` took them.
+        stubs: Keys of the stub tasks.
+
+    Returns:
+        The keys of those tasks, in the order of `settings.tasks`, nested tasks last. Empty when `dependencies` is.
+    """
+    if not dependencies:
+        return []
+    environments: dict[str, list[str]] = {}
+    for env in settings.environments or []:
+        listed: list[str] = []
+        if env.spec is not None:
+            listed = env.spec.dependencies or []
+        environments[env.environment_key] = listed
+    unreached: list[str] = []
+    for task in _enabled_tasks(settings):
+        if task.task_key.startswith(PREFIX) or task.task_key in stubs:
+            continue
+        if task.notebook_task is None or task.notebook_task.warehouse_id:
+            continue
+        if not _holds_dependencies(task, environments, dependencies):
+            unreached.append(task.task_key)
+    return unreached
+
+
+def _holds_dependencies(task: jobs.Task, environments: Mapping[str, list[str]], dependencies: Sequence[str]) -> bool:
+    if _on_cluster(task):
+        libraries = task.libraries or []
+        return all(_library(dep) in libraries for dep in dependencies)
+    if task.environment_key:
+        listed = environments.get(task.environment_key, [])
+        return all(dep in listed for dep in dependencies)
+    return False
 
 
 def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Mapping[str, Any]]) -> jobs.JobSettings:
@@ -692,8 +742,13 @@ def run_job_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
     Returns:
         Every enabled task with a `run_job_task`, in the order of `settings.tasks`, nested tasks last.
     """
+    return [task for task in _enabled_tasks(settings) if task.run_job_task]
+
+
+def _enabled_tasks(settings: jobs.JobSettings) -> list[jobs.Task]:
+    """Get the tasks that are not disabled, nested tasks included unless they or their `for_each_task` are."""
     enabled = [task for task in settings.tasks or [] if not task.disabled]
-    return [task for task in _with_nested(enabled) if task.run_job_task and not task.disabled]
+    return [task for task in _with_nested(enabled) if not task.disabled]
 
 
 def create_kwargs(settings: jobs.JobSettings) -> dict[str, Any]:

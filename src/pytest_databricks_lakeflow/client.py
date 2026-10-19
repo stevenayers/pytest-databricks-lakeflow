@@ -329,7 +329,9 @@ class Lakeflow:
                 `bundle deploy` uploaded, its extras kept. They are appended to every environment taken from the
                 template and, as `pypi` or `whl` libraries, to every notebook, Python script and Python wheel task on
                 a cluster. A wheel with extras reaches only the environments, because `libraries[].whl` takes no
-                extras. The helper tasks do not get them.
+                extras. The helper tasks do not get them. The notebook tasks they do not reach, after `environments`
+                and `modify_settings`, such as a serverless notebook task without an `environment_key`, are named in
+                a `UserWarning` when the job is created.
             environments: Fields of the copy's serverless environment specs, by `environment_key`, such as
                 `{"default": {"environment_version": "5"}}`. A field replaces the template's field, after
                 `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
@@ -387,7 +389,8 @@ class Lakeflow:
         check_task_params(key, settings, task_params or {}, params or {})
         disable_tasks(settings, disable or [])
         force_condition_outcomes(settings, force_conditions or {})
-        add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
+        dependencies = self._resolve_local_wheels(extra_dependencies or [])
+        add_dependencies(settings, dependencies)
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
@@ -404,6 +407,7 @@ class Lakeflow:
             children=children,
             method="job",
             environments=environments,
+            extra_dependencies=dependencies,
         )
 
     def task(
@@ -483,7 +487,8 @@ class Lakeflow:
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
-        add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
+        dependencies = self._resolve_local_wheels(extra_dependencies or [])
+        add_dependencies(settings, dependencies)
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object] | Stub] = {}
         if upstream_from is not None:
@@ -507,6 +512,7 @@ class Lakeflow:
             children=children,
             method="task",
             environments=environments,
+            extra_dependencies=dependencies,
         )
 
     @contextmanager
@@ -646,6 +652,7 @@ class Lakeflow:
         children: Children,
         method: str,
         environments: Mapping[str, Mapping[str, Any]] | None,
+        extra_dependencies: Sequence[str],
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -688,7 +695,9 @@ class Lakeflow:
         merge_environments(settings, environments or {})
         if self.test_marker:
             inject_test_marker(settings, item.nodeid)
-        job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
+        job = EphemeralJob(
+            self, key, settings, params, capture_task_values, stubs, extra_dependencies=extra_dependencies
+        )
         item.addfinalizer(partial(job._teardown, item))
         return job
 
