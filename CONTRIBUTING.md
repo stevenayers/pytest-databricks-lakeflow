@@ -61,7 +61,7 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
-        sql/                     # name: lakeflow_sql, a SQL file task on the warehouse from LAKEFLOW_WAREHOUSE_ID
+        sql/                     # name: lakeflow_sql, SQL file tasks on the warehouse from LAKEFLOW_WAREHOUSE_ID
             databricks.yml
             resources/*.job.yml
             src/queries/*.sql
