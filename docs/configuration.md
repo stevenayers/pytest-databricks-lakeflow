@@ -33,9 +33,12 @@ All arguments are keyword-only.
 | `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
 | `keep` | `False` | Keep every ephemeral job and temporary schema. |
 | `keep_failed` | `True` | Keep the ephemeral job when its test fails. |
+| `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, instead of the `UserWarning` the plugin emits once per session. Later lookups fail with the same message. See [Limitations](limitations.md). |
 | `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. See [Permissions](#permissions). |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
 | `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes. |
+
+Test-only packages are set per test rather than on `Lakeflow`: pass `extra_dependencies` to `lakeflow.job()` or `lakeflow.task()`, see [Test-only dependencies](job-tests.md#test-only-dependencies).
 
 `Lakeflow` is a dataclass, so a `conftest.py` in a subdirectory can derive its own from the parent's:
 

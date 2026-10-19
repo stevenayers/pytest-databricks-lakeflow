@@ -27,6 +27,7 @@ from pytest_databricks_lakeflow.settings import (
     Helpers,
     RunAs,
     SideEffects,
+    add_dependencies,
     check_params,
     disable_tasks,
     inject_lifecycle,
@@ -43,6 +44,10 @@ Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
 Children = Literal["warn", "refuse"]
 CHILDREN: tuple[str, ...] = get_args(Children)
+UNVERSIONED_ARTIFACTS = (
+    "Artifacts {names} have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt wheel with "
+    "the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
+)
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
@@ -118,6 +123,9 @@ class Lakeflow:
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
             `--no-lakeflow-keep-failed` override it.
+        strict_artifacts: Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact
+            without `dynamic_version: true`, instead of the `UserWarning` emitted once per session. Serverless caches
+            wheels by file name, so a rebuilt wheel with an unchanged version may not be picked up.
         permissions: The `access_control_list` applied to every ephemeral job when it is created, so that people
             other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as
             `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`.
@@ -152,6 +160,7 @@ class Lakeflow:
     sweep_hours: float = 24
     keep: bool = False
     keep_failed: bool = True
+    strict_artifacts: bool = False
     permissions: Sequence[Mapping[str, str] | jobs.JobAccessControlRequest] | None = None
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
     run_finished: Callable[[JobRun, pytest.Item], None] | None = field(default=None, repr=False)
@@ -233,6 +242,7 @@ class Lakeflow:
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
+        extra_dependencies: Sequence[str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -259,6 +269,9 @@ class Lakeflow:
                 on. Its outcome is `JobRun.setup`.
             teardown: Runs last, as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no
                 other task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning.
+            extra_dependencies: Test-only dependencies for the copy, as PyPI requirements or workspace or Volumes
+                paths of wheels. They are appended to every environment and, as `pypi` or `whl` libraries, to every
+                notebook, Python script and Python wheel task on a cluster. The helper tasks do not get them.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -266,10 +279,10 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
-                the job, a parameter name is reserved, `children` is `"refuse"` and the copy has a Run Job task
-                that is not disabled nor inside a disabled `for_each_task`, or `setup` or `teardown` is not a plain
-                function with its source in a file, uses variables of an enclosing function, or takes a parameter
-                other than `spark`, `dbutils` and `params`.
+                the job, a parameter name is reserved, an entry of `extra_dependencies` is a local path, `children`
+                is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
+                `for_each_task`, or `setup` or `teardown` is not a plain function with its source in a file, uses
+                variables of an enclosing function, or takes a parameter other than `spark`, `dbutils` and `params`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -278,6 +291,7 @@ class Lakeflow:
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
+        add_dependencies(settings, extra_dependencies or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
         self._inject_lifecycle(settings, notebooks)
         return self._ephemeral(
@@ -304,6 +318,7 @@ class Lakeflow:
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
+        extra_dependencies: Sequence[str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -319,6 +334,7 @@ class Lakeflow:
             children: What to do when the task is a Run Job task, as for `job()`.
             setup: Runs first, before the stubs, as for `job()`.
             teardown: Runs last, after the task and its probe, as for `job()`.
+            extra_dependencies: Test-only dependencies for the job, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -326,8 +342,9 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed, a value is too large or not JSON-serialisable, `children` is `"refuse"`
-                and the task is a Run Job task, or `setup` or `teardown` cannot run, as for `job()`.
+                task that is not stubbed, a value is too large or not JSON-serialisable, an entry of
+                `extra_dependencies` is a local path, `children` is `"refuse"` and the task is a Run Job task, or
+                `setup` or `teardown` cannot run, as for `job()`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -338,6 +355,7 @@ class Lakeflow:
             raise LakeflowError(f"Expected 'job_key.task_key', got {ref!r}")
         settings = self.template(job_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
+        add_dependencies(settings, extra_dependencies or [])
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         self._inject_lifecycle(settings, notebooks)
@@ -412,9 +430,22 @@ class Lakeflow:
             deploy_flags=deploy_flags,
         )
         state = current.bundle_state(key, self.ws, self.sweep_hours)
+        self._check_artifacts(current, key, state)
         current.lakeflows.append(self)
         self._state_cache = (current, state)
         return state
+
+    def _check_artifacts(self, current: session.SessionState, key: session.BundleKey, state: dict[str, Any]) -> None:
+        names = state.get("unversioned_artifacts") or []
+        if not names:
+            return
+        message = UNVERSIONED_ARTIFACTS.format(names=names)
+        if self.strict_artifacts:
+            raise LakeflowError(message)
+        if key in current.warned_artifacts:
+            return
+        current.warned_artifacts.add(key)
+        warnings.warn(message, stacklevel=2)
 
     def _job_keys(self) -> dict[int, str]:
         return {job_id: key for key, job_id in self._state().get("job_ids", {}).items()}
