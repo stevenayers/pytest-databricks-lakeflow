@@ -84,6 +84,23 @@ def test_the_plugin_timeout_cancels_the_run_and_is_mirrored_on_the_job(lakeflow:
         assert state.result_state == jobs.RunResultState.CANCELED, state
 
 
+def test_a_longer_run_timeout_raises_the_job_timeout(lakeflow: Lakeflow) -> None:
+    # Lakeflow(timeout=20s) creates the copy with a job timeout_seconds of 80. The sleep task gets 240 seconds of its
+    # own and sleeps for 120, so it finishes only if run(timeout=5 min) raised the job's timeout_seconds first. On a
+    # one-task job like this one, an update without the tasks would have set the task's timeout instead.
+    quick = dataclasses.replace(lakeflow, timeout=timedelta(seconds=20))
+    overrides = {"sleep": {"timeout_seconds": 240}}
+    with quick.job("slow_job", params={"seconds": "120"}, task_overrides=overrides) as job:
+        run = job.run(timeout=timedelta(minutes=5))
+        assert job.job_id is not None
+        settings = quick.ws.jobs.get(job.job_id).settings
+        assert settings is not None
+        assert settings.timeout_seconds == 360
+        assert [t.timeout_seconds for t in settings.tasks or []] == [240]
+        assert run.succeeded, run
+        assert run.task("sleep").output == "slept 120 seconds"
+
+
 def _only_run_id(lakeflow: Lakeflow, job_id: int) -> int:
     runs = list(lakeflow.ws.jobs.list_runs(job_id=job_id))
     assert len(runs) == 1, runs

@@ -45,6 +45,8 @@ class FakeJobs:
         self.delete_log: Path | None = None
         self.list_calls = 0
         self.gets: list[int] = []
+        self.updated: list[tuple[int, jobs.JobSettings | None]] = []
+        self.run_timeouts: list[int | None] = []
         self._ids = itertools.count(1000)
 
     def start_ids_at(self, first: int) -> None:
@@ -66,6 +68,35 @@ class FakeJobs:
         self.acls.append(kwargs.pop("access_control_list", None))
         self.created.append(kwargs)
         return jobs.CreateResponse(job_id=self.add(jobs.JobSettings(**kwargs)))
+
+    def update(
+        self,
+        job_id: int,
+        *,
+        new_settings: jobs.JobSettings | None = None,
+        fields_to_remove: Sequence[str] | None = None,
+    ) -> None:
+        """Merge the fields `new_settings` sets into the job's settings, then clear `fields_to_remove`.
+
+        Like the platform, a body without `tasks` on a job with one task is read in the legacy single-task format:
+        its `timeout_seconds` lands on the task and the job's own is unchanged.
+        """
+        self.updated.append((job_id, new_settings))
+        if job_id not in self.settings:
+            raise NotFound(f"Job {job_id} does not exist.")
+        current = self.settings[job_id]
+        if new_settings is not None:
+            legacy = new_settings.tasks is None and len(current.tasks or []) == 1
+            for name in jobs.JobSettings.__dataclass_fields__:
+                value = getattr(new_settings, name)
+                if value is None:
+                    continue
+                if legacy and name == "timeout_seconds":
+                    current.tasks = [replace((current.tasks or [])[0], timeout_seconds=value)]
+                    continue
+                setattr(current, name, value)
+        for name in fields_to_remove or []:
+            setattr(current, name, None)
 
     def delete(self, job_id: int) -> None:
         if job_id in self.delete_errors:
@@ -122,6 +153,9 @@ class FakeJobs:
         )
         if idempotency_token is not None and idempotency_token in self.tokens:
             return SimpleNamespace(response=jobs.RunNowResponse(run_id=self.tokens[idempotency_token]))
+        # The job's timeout_seconds when the run starts, which is the one that binds the run.
+        job = self.settings.get(job_id)
+        self.run_timeouts.append(job.timeout_seconds if job else None)
         polls = self.queued.pop(0) if self.queued else [make_run(next(self._ids), {"task": "SUCCESS"})]
         run_id = polls[-1].run_id
         assert run_id is not None

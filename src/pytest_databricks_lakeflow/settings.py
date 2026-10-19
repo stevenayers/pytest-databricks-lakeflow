@@ -51,6 +51,7 @@ MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
 TIMEOUT_GRACE_SECONDS = 60
+TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
 SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
 SINGLE_NODE_TAGS = {"ResourceClass": "SingleNode"}
@@ -449,6 +450,35 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
             raise LakeflowError(f"Unknown task {key!r} in disable. Available: {sorted(tasks)}")
     for key in keys:
         tasks[key].disabled = True
+    return settings
+
+
+def override_tasks(settings: jobs.JobSettings, overrides: Mapping[str, Mapping[str, object]]) -> jobs.JobSettings:
+    """Set the timeout and retry fields in `TASK_OVERRIDES` on the named tasks.
+
+    Every entry is checked before any task is changed.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        overrides: The fields to set and their values, by task key.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not a task in the job, or a field is not in `TASK_OVERRIDES`.
+    """
+    tasks = {t.task_key: t for t in settings.tasks or []}
+    allowed = sorted(TASK_OVERRIDES)
+    for key, values in overrides.items():
+        if key not in tasks:
+            raise LakeflowError(f"Unknown task {key!r} in task_overrides. Available: {sorted(tasks)}")
+        for name in values:
+            if name not in TASK_OVERRIDES:
+                raise LakeflowError(f"Unknown field {name!r} in task_overrides[{key!r}]. Allowed: {allowed}")
+    for key, values in overrides.items():
+        for name, value in values.items():
+            setattr(tasks[key], name, value)
     return settings
 
 
