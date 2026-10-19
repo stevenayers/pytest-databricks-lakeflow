@@ -14,10 +14,11 @@ import pytest
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import session
+from pytest_databricks_lakeflow import helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
     PREFIX,
+    DebugNotebook,
     JobRun,
     build_job_run,
     describe_failing,
@@ -575,6 +576,90 @@ class EphemeralJob:
             log.info("%s", line)
             progress.append(line)
 
+    def debug_notebook(self, task_key: str, run: JobRun | None = None) -> DebugNotebook:
+        """Write a notebook that reproduces a notebook task of a run, to debug it interactively.
+
+        The notebook sets the task's resolved parameters as widgets and runs the task's notebook with `%run`. It is
+        written to `<helpers_path>/debug/<job_key>__<task_key>__<run_id>`, replacing any notebook of the same run,
+        and its URL is recorded in the test's report as `lakeflow_debug_notebook`. It replays the parameters only:
+        a notebook that reads upstream task values needs `debugValue=` in `dbutils.jobs.taskValues.get()`.
+
+        Args:
+            task_key: The notebook task to reproduce.
+            run: The run whose parameters to replay. Defaults to the job's last run.
+
+        Returns:
+            The notebook written.
+
+        Raises:
+            LakeflowError: If the job has no task `task_key`, the task is not a notebook task or runs its notebook
+                from Git, the job has not run, or the task has no resolved parameters in the run, as when it did not
+                run.
+            KeyError: If the task was not part of the run, as `JobRun.task()` raises.
+        """
+        notebook = self._notebook_task(task_key)
+        if run is None:
+            if not self.runs:
+                raise LakeflowError(
+                    f"Job {self.job_key!r} has not run yet, so there are no resolved parameters to replay"
+                )
+            run = self.runs[-1]
+        task = run.task(task_key)
+        if not task.ran:
+            raise LakeflowError(
+                f"Task {task_key!r} did not run in run {run.run_id} ({task.result_state}), so it has no resolved "
+                "parameters"
+            )
+        parameters = task.parameters
+        if not isinstance(parameters, dict):
+            raise LakeflowError(
+                f"Task {task_key!r} has no resolved parameters in run {run.run_id}: the platform returned none, or "
+                "the task run could not be read"
+            )
+        heading = (
+            f"Parameters of task {task_key!r} in run {run.run_id} of job {self.job_key!r} ({task.run_url}), as the "
+            "platform resolved them"
+        )
+        source = helpers.debug_notebook_source(notebook.notebook_path, parameters, heading=heading)
+        folder = session.folder_of_helpers(self.lakeflow._state())
+        path = f"{folder}/{helpers.DEBUG_FOLDER}/{self.job_key}__{task_key}__{run.run_id}"
+        url = helpers.upload_notebook(self.lakeflow.ws, path, source)
+        log.info("Wrote a debug notebook for task %r of run %s: %s", task_key, run.run_id, url)
+        state = session.current()
+        state.debug_notebooks.append(url)
+        if state.item is not None:
+            state.item.user_properties.append(("lakeflow_debug_notebook", url))
+        return DebugNotebook(task_key=task_key, run_id=run.run_id, path=path, url=url)
+
+    def _notebook_task(self, task_key: str) -> jobs.NotebookTask:
+        """The notebook task `task_key` of the job, which `%run` can reach."""
+        tasks = {}
+        for task in self.settings.tasks or []:
+            if not task.task_key.startswith(PREFIX):
+                tasks[task.task_key] = task
+        if task_key not in tasks:
+            raise LakeflowError(f"Job {self.job_key!r} has no task {task_key!r}. Available: {sorted(tasks)}")
+        notebook = tasks[task_key].notebook_task
+        if notebook is None or task_key in self.stubs:
+            notebook_tasks = []
+            for key, task in tasks.items():
+                if task.notebook_task is not None and key not in self.stubs:
+                    notebook_tasks.append(key)
+            raise LakeflowError(
+                f"Task {task_key!r} of {self.job_key!r} is not a notebook task, so there is no notebook to run. "
+                f"Notebook tasks: {sorted(notebook_tasks)}"
+            )
+        # A notebook task without a source reads from Git when the job has a git_source.
+        from_git = notebook.source == jobs.Source.GIT
+        if notebook.source is None and self.settings.git_source is not None:
+            from_git = True
+        if from_git:
+            raise LakeflowError(
+                f"Task {task_key!r} of {self.job_key!r} runs its notebook from Git ({notebook.notebook_path}), which "
+                "%run cannot reach"
+            )
+        return notebook
+
     def close(self, failed: bool = False) -> None:
         """Cancel active runs, then delete the job unless the keep rules say to keep it.
 
@@ -597,8 +682,26 @@ class EphemeralJob:
             if item is not None:
                 for run_id in cancelled:
                     self._report_cancelled(_Polling(run_id, item))
+            if failed and session.current().debug_notebook:
+                self._write_debug_notebooks()
         finally:
             self._delete_unless_kept(failed)
+
+    def _write_debug_notebooks(self) -> None:
+        """Write a debug notebook for each notebook task that failed in the last run. Errors are only logged."""
+        if not self.runs:
+            return
+        run = self.runs[-1]
+        for key, task in run.tasks.items():
+            if task.succeeded or not task.ran:
+                continue
+            if require_task(self.settings, key).notebook_task is None:
+                continue
+            # Teardown never fails because of a debugging aid.
+            try:
+                self.debug_notebook(key, run)
+            except (LakeflowError, DatabricksError) as e:
+                log.warning("Could not write a debug notebook for task %r of run %s: %s", key, run.run_id, e)
 
     def _delete_unless_kept(self, failed: bool) -> None:
         if self.job_id is None:

@@ -171,6 +171,8 @@ class SessionState:
         uploaded_notebooks: The workspace paths of the setup and teardown notebooks this process uploaded.
         report_dir: Where `--lakeflow-report-dir` writes each test's runs, resolved against the invocation
             directory, or `None` when the flag is not set.
+        debug_notebook: Whether `--lakeflow-debug-notebook` is set.
+        debug_notebooks: The URL of each debug notebook written, for the terminal summary.
     """
 
     rootpath: Path
@@ -197,6 +199,8 @@ class SessionState:
     worker_dir: Path | None = None
     uploaded_notebooks: set[str] = field(default_factory=set)
     report_dir: Path | None = None
+    debug_notebook: bool = False
+    debug_notebooks: list[str] = field(default_factory=list)
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.

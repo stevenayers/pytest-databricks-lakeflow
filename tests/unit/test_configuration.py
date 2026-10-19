@@ -66,6 +66,7 @@ class TestCommandLine:
                 "*--lakeflow-sweep-report=*",
                 "*--lakeflow-destroy*",
                 "*--lakeflow-report-dir*",
+                "*--lakeflow-debug-notebook*",
             ]
         )
         assert "--lakeflow-target" not in result.stdout.str()
