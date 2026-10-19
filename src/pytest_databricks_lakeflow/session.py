@@ -179,7 +179,8 @@ class SessionState:
         report_dir: Where `--lakeflow-report-dir` writes each test's runs, resolved against the invocation
             directory, or `None` when the flag is not set.
         debug_notebook: Whether `--lakeflow-debug-notebook` is set.
-        debug_notebooks: The URL of each debug notebook written, for the terminal summary.
+        debug_notebooks: One line per debug notebook written, its URL with the test, the task and any widgets cut
+            short, for the terminal summary.
         sp_user_roles: Whether an identity has the Service Principal User role on a service principal, as
             `check_sp_user_role` found it, by workspace host, identity and application id.
     """
@@ -501,9 +502,13 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     variables = dict(key.variables)
     bundle.check_cli_version(root)
     if key.sync == "deploy":
-        check_run_as(ws, bundle.validate(root, key.target, key.profile, variables), key.target)
+        validated = bundle.validate(root, key.target, key.profile, variables)
+        # Checked before anything reaches the workspace: the run_as check calls it, and a deploy writes to it.
+        check_host(key.target, _workspace_host(validated), ws.config.host)
+        check_run_as(ws, validated, key.target)
         bundle.deploy(root, key.target, key.profile, variables, flags=key.deploy_flags)
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
+        # Checked again, for a validate output that gave no host.
         check_host(key.target, _workspace_host(bundle_summary), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
         job_ids, _ = bundle.job_ids(bundle_summary)

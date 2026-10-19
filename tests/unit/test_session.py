@@ -640,6 +640,17 @@ class TestHostCheck:
         assert fake_ws.jobs.gets == []
         assert fake_ws.workspace.uploads == {}
 
+    def test_deploy_checks_the_validated_host_before_run_as_and_the_deploy(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        # A run_as that the run_as check refuses, so the host check must come first to be the error raised.
+        fake_cli.validate = {"workspace": {"host": OTHER_HOST}, "run_as": {"user_name": "other@example.com"}}
+        with pytest.raises(LakeflowError) as excinfo:
+            session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert f"'test' deploys to {OTHER_HOST} but the workspace client is for {HOST}" in str(excinfo.value)
+        assert [call[:2] for call in fake_cli.calls] == [["--version"], ["bundle", "validate"]]
+        assert fake_ws.current_user.me_calls == 0
+
     @pytest.mark.parametrize(
         ("bundle_host", "client_host"),
         [

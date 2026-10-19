@@ -11,9 +11,29 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs, pipelines
 
-from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run, serialise, serialise_with_files
+from pytest_databricks_lakeflow.results import (
+    JobRun,
+    TaskRun,
+    Timing,
+    build_job_run,
+    error_line,
+    serialise,
+    serialise_with_files,
+)
 
-from .fakes import ALL_DISABLED, DATA, HOST, FakeWorkspaceClient, make_run, recorded, skipped_run
+from .fakes import (
+    ALERT_FAILED,
+    ALL_DISABLED,
+    DATA,
+    HOST,
+    PIPELINE_LOGS,
+    FakeWorkspaceClient,
+    failed_alert_output,
+    failed_alert_run,
+    make_run,
+    recorded,
+    skipped_run,
+)
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
 RECORDED_RUNS = sorted(path.stem for path in (DATA / "runs").glob("*.json"))
@@ -883,6 +903,45 @@ class TestPipelineUpdates:
     def test_recorded_runs_never_call_the_pipelines_api(self, name: str) -> None:
         _, ws = build(name)
         assert ws.pipelines.calls == []
+
+
+class TestPlatformErrors:
+    """The error of a pipeline or alert task, where runs/get-output reports one that is wrong or none at all."""
+
+    @pytest.mark.parametrize(
+        ("state", "error"),
+        [("SUCCESS", None), ("FAILED", PIPELINE_LOGS)],
+    )
+    def test_pipeline_logs_error_only_on_a_failed_pipeline_task(self, state: str, error: str | None) -> None:
+        # Recorded on the pipelines bundle: runs/get-output of every pipeline task run carries this error, also when
+        # the task ended SUCCESS.
+        ws = FakeWorkspaceClient()
+        ws.pipelines.updates["abc"] = [pipeline_update("mine", 1_500)]
+        raw = make_run(1, {"refresh": state}, state, pipeline_tasks={"refresh": "abc"})
+        output = jobs.RunOutput(error=PIPELINE_LOGS)
+        ws.jobs.outputs[run_id_of(raw, "refresh")] = output
+        task = build_from(ws, raw).task("refresh")
+        assert (str(task.error) if task.error else None) == error
+        assert error_line(recorded_task_run(raw, "refresh"), output) == error
+
+    def test_failed_alert_task_reports_its_termination_message(self) -> None:
+        # Recorded on the alerts bundle: runs/get-output of an alert task whose query failed has no error, and only
+        # the task run's termination message says why.
+        ws = FakeWorkspaceClient()
+        raw = failed_alert_run(1)
+        ws.jobs.outputs[run_id_of(raw, "broken")] = failed_alert_output()
+        run = build_from(ws, raw)
+        task = run.task("broken")
+        assert task.error is not None
+        assert (task.error.type, task.error.message, task.error.trace) == (None, ALERT_FAILED, "")
+        assert task.alert_state == "ERROR"
+        assert f"broken: {ALERT_FAILED}" in repr(run)
+        assert error_line(recorded_task_run(raw, "broken"), failed_alert_output()) == ALERT_FAILED
+
+
+def recorded_task_run(run: jobs.Run, key: str) -> jobs.RunTask:
+    """The task run of `key` in `run`, as the poll that saw it terminate reports it."""
+    return next(task for task in run.tasks or [] if task.task_key == key)
 
 
 class TestChildRuns:
