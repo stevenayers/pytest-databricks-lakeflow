@@ -3,6 +3,21 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.6.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.5.0...v0.6.0) (2026-10-19)
+
+
+### Features
+
+* add --lakeflow-report-dir with a report.json per test, raw logs and notebooks ([#142](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/142)) ([6513ee2](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6513ee2d3a41a14dbd7dbc4dc0ffec263f31d6ce))
+* add task_overrides to job() and task() and lengthen the job timeout for long runs ([#145](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/145)) ([aa4f0fb](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/aa4f0fb3b8293b0732c9ee4356a2c0c2efa2b5ef))
+* add task_params to job() and task(), warning on job-parameter collisions ([#141](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/141)) ([84bb2f2](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/84bb2f2b111baf214c7d47516a49bbb06c885514))
+* widen --lakeflow-sweep to all creators, schemas, notebooks, a dry run, a report and a keep TTL ([#144](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/144)) ([9c172d7](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/9c172d73239b6bedebd5ab75efb73c8515bf3c5a))
+
+
+### Bug Fixes
+
+* land the wave 3 review notes and the small fixes from the wave 1 and 2 triage ([#147](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/147)) ([67727fe](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/67727fe133b1cab4113b88fdc873df3077fdd70d))
+
 ## [0.5.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.4.0...v0.5.0) (2026-10-19)
 
 
