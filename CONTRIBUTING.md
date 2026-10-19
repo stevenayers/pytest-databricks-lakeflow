@@ -145,7 +145,7 @@ Pull requests are squash-merged, so the pull request title becomes the commit me
 
 1. Branch from `main`, make the change, add tests and docs.
 2. Open a pull request. The template asks for a summary, the linked issue, the type of change and a checklist.
-3. CI must pass: lint, type check, unit tests on every supported Python version, the dependency audit, the docs build, zizmor and CodeQL.
+3. CI must pass: lint, type check, unit tests on every supported Python version, the dependency audit, the docs build and CodeQL.
 4. A maintainer reviews and squash-merges.
 
 ## Releases
