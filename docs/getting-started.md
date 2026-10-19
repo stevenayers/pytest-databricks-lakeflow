@@ -123,7 +123,7 @@ steps:
   - run: uv run pytest -n 4 --lakeflow-sweep
 ```
 
-The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. Several processes refreshing a user-to-machine (`databricks-cli`) token at once can fail with `exit status 45`, which is why CI should use a service principal.
+The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. On a user-to-machine (`databricks-cli`) profile, every xdist worker forces a refresh of the same token through `databricks auth token`, and two refreshes at once can fail with `exit status 45`. The plugin retries building its client, but CI should use a service principal, which has no CLI token to race on (see [the FAQ](limitations.md#why-did-the-cli-fail-with-exit-status-45-under-xdist)).
 
 A nightly job can clean up after every pipeline and developer that shares the workspace, as a principal allowed to delete their jobs and schemas. It needs a test that sets up the bundle, because the sweep runs at setup; dry-run it first and keep the report:
 
