@@ -676,6 +676,50 @@ class TestCreateSettings:
             "gpu": {"environment_version": "4"},
         }
 
+    def test_task_params_reach_the_created_job(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                task_params = {"transform": {"limit": "10"}, "load": ["--rows", "10"]}
+                with lakeflow.job("my_job", task_params=task_params, capture_task_values={"transform": ["k"]}):
+                    pass
+
+            def test_task(lakeflow):
+                with pytest.warns(UserWarning, match="sets 'schema', also a job parameter of 'my_job'") as record:
+                    task = lakeflow.task(
+                        "my_job.transform",
+                        upstream_task_values={"extract": {"row_count": 1}},
+                        task_params={"transform": {"schema": "s"}},
+                    )
+                assert record[0].filename == __file__
+                with task:
+                    pass
+
+            def test_task_rejects_other_tasks(lakeflow):
+                with pytest.raises(LakeflowError, match=r"Unknown task 'load' .*: \\['transform'\\]"):
+                    lakeflow.task("my_job.transform", task_params={"load": ["x"]})
+                with pytest.raises(LakeflowError, match=r"refers to task values of \\['extract'\\]"):
+                    lakeflow.task("my_job.load", task_params={"load": {"n": "{{tasks.extract.values.n}}"}})
+            """,
+        )
+        result.assert_outcomes(passed=3)
+        job, single = fake_ws.jobs.created
+        tasks = {t.task_key: t for t in job["tasks"]}
+        assert tasks["transform"].notebook_task.base_parameters == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "limit": "10",
+        }
+        assert tasks["load"].python_wheel_task.parameters == ["--rows", "10"]
+        assert tasks["__pytest_probe__transform"].notebook_task.base_parameters["__pytest_keys"] == '["k"]'
+        [stub, transform] = single["tasks"]
+        assert stub.task_key == "extract"
+        assert transform.notebook_task.base_parameters["schema"] == "s"
+
 
 class TestDisabledTasks:
     """Disabling tasks on the copy, and telling disabled tasks from those `only` left out."""
