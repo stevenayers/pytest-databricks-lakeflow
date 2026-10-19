@@ -223,23 +223,26 @@ def make_run(
 
     `condition_outcomes` makes the tasks it names condition tasks, with the given `outcome`, such as `"true"`.
     """
-    by_key = {key: [state] for key, state in states.items()} | {key: list(s) for key, s in (attempts or {}).items()}
-    numbered = itertools.count()
-    tasks = [
-        jobs.RunTask(
-            task_key=key,
-            run_id=(task_run_id := run_id * 100 + next(numbered)),
-            attempt_number=attempt,
-            state=jobs.RunState(result_state=jobs.RunResultState(state)),
-            status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
-            run_page_url=f"{HOST}/jobs/runs/{task_run_id}",
-            start_time=1_000,
-            end_time=3_000,
-            condition_task=_condition(condition_outcomes, key),
-        )
-        for key, key_states in by_key.items()
-        for attempt, state in enumerate(key_states)
-    ]
+    states_by_key = {key: [state] for key, state in states.items()}
+    for key, key_states in (attempts or {}).items():
+        states_by_key[key] = list(key_states)
+    tasks = []
+    for key, key_states in states_by_key.items():
+        for attempt, state in enumerate(key_states):
+            task_run_id = run_id * 100 + len(tasks)
+            tasks.append(
+                jobs.RunTask(
+                    task_key=key,
+                    run_id=task_run_id,
+                    attempt_number=attempt,
+                    state=jobs.RunState(result_state=jobs.RunResultState(state)),
+                    status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
+                    run_page_url=f"{HOST}/jobs/runs/{task_run_id}",
+                    start_time=1_000,
+                    end_time=3_000,
+                    condition_task=_condition(condition_outcomes, key),
+                )
+            )
     return jobs.Run(
         run_id=run_id,
         state=jobs.RunState(result_state=jobs.RunResultState(result_state)),

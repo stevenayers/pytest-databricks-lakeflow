@@ -126,25 +126,35 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     state = config.stash.get(STATE, None)
     if state is None:
         return
+    _cancel_active_runs(state)
+    if hasattr(config, "workerinput"):
+        _report_to_controller(cast(Any, config).workeroutput, state)
+    elif state.destroy:
+        _destroy_deployments(session, state)
+
+
+def _cancel_active_runs(state: SessionState) -> None:
     for used in state.lakeflows:
         for run_id in sorted(used.active_runs):
             cancel_run(used.ws, run_id)
         state.cancelled_runs += len(used.active_runs)
         used.active_runs.clear()
-    if hasattr(config, "workerinput"):
-        workeroutput = cast(Any, config).workeroutput
-        workeroutput["lakeflow_deployed"] = state.deployed
-        workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
-        workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
-        workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
-        return
-    if not state.destroy:
-        return
-    for root, target, profile, variables in dict.fromkeys(state.deployed):
+
+
+def _report_to_controller(workeroutput: dict[str, Any], state: SessionState) -> None:
+    workeroutput["lakeflow_deployed"] = state.deployed
+    workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
+    workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
+    workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
+
+
+def _destroy_deployments(session: pytest.Session, state: SessionState) -> None:
+    unique_deployments = dict.fromkeys(state.deployed)
+    for root, target, profile, variables in unique_deployments:
         try:
             bundle.destroy(Path(root), target, profile, dict(variables))
         except LakeflowBundleError as e:
-            reporter = config.pluginmanager.get_plugin("terminalreporter")
+            reporter = session.config.pluginmanager.get_plugin("terminalreporter")
             if reporter is not None:
                 reporter.write_sep("=", "lakeflow: bundle destroy failed", red=True)
                 reporter.write_line(str(e))
@@ -157,7 +167,7 @@ def pytest_testnodedown(node: Any, error: object) -> None:
     output = getattr(node, "workeroutput", {})
     state = node.config.stash[STATE]
     for root, target, profile, variables in output.get("lakeflow_deployed", []):
-        state.deployed.append((root, target, profile, tuple(map(tuple, variables))))
+        state.deployed.append((root, target, profile, tuple(tuple(pair) for pair in variables)))
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
