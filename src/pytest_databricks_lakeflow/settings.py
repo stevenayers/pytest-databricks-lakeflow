@@ -831,14 +831,9 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
         LakeflowError: If `only` names a task that is not in the job.
     """
     selected = selected_tasks(settings, only, stubs)
-    needed: set[str] = set()
-    stub_keys = set(stubs)
+    needed = _running_stubs(settings, selected, stubs)
     for task in settings.tasks or []:
         key = task.task_key
-        if key in selected:
-            for dependency in task.depends_on or []:
-                if dependency.task_key in stub_keys:
-                    needed.add(dependency.task_key)
         if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
             needed.add(key)
         if key in (SETUP_KEY, TEARDOWN_KEY):
@@ -885,12 +880,13 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
     Args:
         settings: The job's settings.
         selected: Keys of the tasks that `only` selects, as `selected_tasks` returns them.
-        stubs: Keys of the stub tasks, which always run when a selected task depends on them.
+        stubs: Keys of the stub tasks. `select` adds only those that a selected task depends on, so only they run.
 
     Raises:
-        LakeflowError: If a selected task that is not a stub refers to a task that is neither selected nor a stub.
+        LakeflowError: If a selected task that is not a stub refers to a task that is neither selected nor a stub
+            that runs.
     """
-    running = {*selected, *stubs}
+    running = {*selected, *_running_stubs(settings, selected, stubs)}
     for task in settings.tasks or []:
         if task.task_key not in selected or task.task_key in stubs:
             continue
@@ -902,6 +898,18 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
                 "could not resolve them. Select them in only, stub them with upstream_task_values on job(), or pass "
                 "replay to run()."
             )
+
+
+def _running_stubs(settings: jobs.JobSettings, selected: Collection[str], stubs: Collection[str]) -> set[str]:
+    """The stubs that run with the selected tasks: those a selected task depends on."""
+    running: set[str] = set()
+    for task in settings.tasks or []:
+        if task.task_key not in selected:
+            continue
+        for dependency in task.depends_on or []:
+            if dependency.task_key in stubs:
+                running.add(dependency.task_key)
+    return running
 
 
 def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
@@ -1145,18 +1153,47 @@ def inject_lifecycle(
                 task.depends_on = [jobs.TaskDependency(task_key=SETUP_KEY)]
         tasks.insert(0, _lifecycle_task(SETUP_KEY, setup, helpers))
     if teardown is not None:
-        upstream = {d.task_key for t in tasks for d in t.depends_on or []}
-        leaves: list[jobs.TaskDependency] = []
-        for task in tasks:
-            if task.task_key not in upstream:
-                leaves.append(jobs.TaskDependency(task_key=task.task_key))
         last = _lifecycle_task(TEARDOWN_KEY, teardown, helpers)
-        last.depends_on = leaves
+        last.depends_on = _leaves(tasks)
         last.run_if = jobs.RunIf.ALL_DONE
         tasks.append(last)
     settings.tasks = tasks
     name_lifecycle_params(settings, params)
     _add_helper_compute(settings, helpers)
+    return settings
+
+
+def _leaves(tasks: Sequence[jobs.Task]) -> list[jobs.TaskDependency]:
+    """A dependency on each of `tasks` that no other of them depends on, in order."""
+    upstream = {d.task_key for t in tasks for d in t.depends_on or []}
+    leaves: list[jobs.TaskDependency] = []
+    for task in tasks:
+        if task.task_key not in upstream:
+            leaves.append(jobs.TaskDependency(task_key=task.task_key))
+    return leaves
+
+
+def rewire_teardown(settings: jobs.JobSettings) -> jobs.JobSettings:
+    """Make the teardown task depend again on every task that no other task depends on.
+
+    For tasks replaced after `inject_lifecycle`, such as the stubs of `run(replay=...)`, which drop their
+    `depends_on` and so can leave the tasks upstream of them with no task after them.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+
+    Returns:
+        `settings`.
+    """
+    others: list[jobs.Task] = []
+    teardown = None
+    for task in settings.tasks or []:
+        if task.task_key == TEARDOWN_KEY:
+            teardown = task
+        else:
+            others.append(task)
+    if teardown is not None:
+        teardown.depends_on = _leaves(others)
     return settings
 
 
@@ -1190,8 +1227,7 @@ def name_lifecycle_params(settings: jobs.JobSettings, params: Collection[str]) -
 def lifecycle_params(settings: jobs.JobSettings, params: Collection[str]) -> list[str]:
     """The job parameters a setup or teardown step can read: those the job declares, then the others in `params`."""
     names: list[str] = []
-    declared = [parameter.name for parameter in settings.parameters or [] if parameter.name]
-    for name in [*declared, *params]:
+    for name in [*_declared_params(settings), *params]:
         if name not in names and not name.startswith(PREFIX):
             names.append(name)
     return names
@@ -1214,11 +1250,20 @@ def check_lifecycle_params(
     """
     unknown = sorted(set(names) - set(lifecycle_params(settings, params)))
     if unknown:
-        declared = sorted(p.name for p in settings.parameters or [] if p.name)
+        declared = sorted(_declared_params(settings))
         raise LakeflowError(
             f"{argument}= reads {unknown}, which job {job_key!r} does not declare and params does not hold. "
             f"Declared: {declared}. Pass them in params, or write $$ for a literal dollar."
         )
+
+
+def _declared_params(settings: jobs.JobSettings) -> list[str]:
+    """The names of the parameters the job declares, in order."""
+    names: list[str] = []
+    for parameter in settings.parameters or []:
+        if parameter.name:
+            names.append(parameter.name)
+    return names
 
 
 def _probe_task(target_key: str, keys: Sequence[str], helpers: Helpers) -> jobs.Task:

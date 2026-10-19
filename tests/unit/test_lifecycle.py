@@ -24,6 +24,7 @@ JOB_TASKS = ["__pytest_setup", "extract", "transform", "load", "classic", "__pyt
 WIDGETS = {PARAMS_WIDGET: json.dumps(["param1", "schema"]), "param1": "hello", "schema": "dev.s"}
 MARKER = "# Databricks notebook source"
 SEED_STATEMENT = "CREATE OR REPLACE TABLE ${schema}.t AS SELECT 1"
+PLAIN_FUNCTION_OR_LIST = r"setup= must be a plain function defined with def, a list of SQL statements or a Path"
 RUN_DATE_STEPS = """params={"run_date": "2026-10-19"}, teardown=["DELETE FROM ${schema}.t WHERE day = '${run_date}'"]"""
 DECLARE_RUN_DATE = """
 
@@ -229,6 +230,9 @@ class TestRejectedSteps:
         [
             pytest.param(SEED_STATEMENT, r"setup= takes a list of SQL statements, not a string", id="bare_string"),
             pytest.param([SEED_STATEMENT, 1], r"setup= statement 2 is not a string: 1", id="not_a_string"),
+            pytest.param([], r"setup= is an empty list of SQL statements", id="empty_list"),
+            pytest.param({SEED_STATEMENT}, PLAIN_FUNCTION_OR_LIST, id="set"),
+            pytest.param((s for s in [SEED_STATEMENT]), PLAIN_FUNCTION_OR_LIST, id="generator"),
             pytest.param(["SELECT '$1'"], r"setup= statement 1 has an invalid placeholder.*\$\$", id="bad_dollar"),
             pytest.param(Path("missing.py"), r"setup= file .*missing\.py does not exist", id="missing"),
             pytest.param(Path("seed.sql"), r"setup= must be a \.py file, got seed\.sql", id="sql_file"),

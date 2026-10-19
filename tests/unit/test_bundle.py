@@ -322,3 +322,22 @@ class TestLocalWheels:
 
         assert bundle.stale_uploads(validate_output(), tmp_path, modified_at) == stale
         assert checked == [self.UPLOADED], "each uploaded copy is looked up once"
+
+    @pytest.mark.parametrize("dependency", ["./dist/*.whl", "./dist/*.whl[test]"], ids=["plain", "extras"])
+    def test_stale_uploads_split_extras_before_globbing(self, tmp_path: Path, dependency: str) -> None:
+        (tmp_path / "dist").mkdir()
+        wheel = tmp_path / "dist" / self.WHEEL
+        wheel.write_text("")
+        built = 1_700_000_000
+        os.utime(wheel, (built, built))
+        spec = {"environment_version": "4", "dependencies": [dependency]}
+        job = {"name": "w", "environments": [{"environment_key": "default", "spec": spec}]}
+        config = {"workspace": {"artifact_path": "/Workspace/b/artifacts"}, "resources": {"jobs": {"w": job}}}
+        checked: list[str] = []
+
+        def modified_at(path: str) -> int:
+            checked.append(path)
+            return (built - 120) * 1000
+
+        assert bundle.stale_uploads(config, tmp_path, modified_at) == [f"dist/{self.WHEEL}"]
+        assert checked == [self.UPLOADED]

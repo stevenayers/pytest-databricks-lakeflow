@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from .fakes import (
     reporting_settings,
     running_run,
 )
+from .test_build_job_run import QUERY_FILE, SQL_FILE_OUTPUT
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow import Lakeflow
@@ -844,6 +846,49 @@ class TestCreateSettings:
         [stub, transform] = single["tasks"]
         assert stub.task_key == "extract"
         assert transform.notebook_task.base_parameters["schema"] == "s"
+
+    @pytest.mark.parametrize(
+        ("call", "error"),
+        [
+            pytest.param(
+                'lakeflow.job("my_job", task_params={"transform": {"schema": "s"}, "nope": {"x": "1"}})',
+                "Unknown task 'nope'",
+                id="job_unknown_task",
+            ),
+            pytest.param(
+                'lakeflow.job("my_job", task_params={"transform": {"schema": 1}})',
+                "must be a mapping of names to strings",
+                id="job_wrong_shape",
+            ),
+            pytest.param(
+                'lakeflow.task("my_job.transform", task_params={"transform": {"schema": 1}})',
+                "must be a mapping of names to strings",
+                id="task_wrong_shape",
+            ),
+        ],
+    )
+    def test_rejected_task_params_give_no_collision_warning(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str, error: str
+    ) -> None:
+        result = run_tests(
+            pytester,
+            f"""
+            import warnings
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    with pytest.raises(LakeflowError, match={error!r}):
+                        {call}
+                assert [str(w.message) for w in caught] == []
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
 
     def test_task_overrides_reach_the_created_job(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
@@ -1911,6 +1956,20 @@ def report_of(directory: Path, nodeid: str = "test_jobs.py::test_job") -> tuple[
     return test_dir, json.loads((test_dir / "report.json").read_text())
 
 
+def block_the_report_dir(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a file where `--lakeflow-report-dir=out` would make its directory under `path`."""
+    (path / "out").write_text("a file, not a directory")
+
+
+def break_serialise(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make serialising a run for the report raise an error that is not an `OSError`."""
+
+    def broken(run: object) -> None:
+        raise ValueError("cannot serialise")
+
+    monkeypatch.setattr("pytest_databricks_lakeflow.report.serialise_with_files", broken)
+
+
 class TestReportDir:
     """`--lakeflow-report-dir` writes a directory per test with a run: report.json, raw logs and exported notebooks."""
 
@@ -2001,14 +2060,109 @@ class TestReportDir:
         written = set(pytester.path.rglob("*")) - before
         assert not [path for path in written if path.name in ("report.json", "load.log")]
 
-    def test_report_errors_never_fail_the_test(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+    @pytest.mark.parametrize(
+        ("break_report", "error"),
+        [
+            pytest.param(block_the_report_dir, "*", id="unwritable"),
+            pytest.param(break_serialise, "*: cannot serialise", id="unserialisable"),
+        ],
+    )
+    def test_report_errors_never_fail_the_test(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        monkeypatch: pytest.MonkeyPatch,
+        break_report: Callable[[Path, pytest.MonkeyPatch], None],
+        error: str,
+    ) -> None:
         fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS"}))
-        (pytester.path / "out").write_text("a file, not a directory")
+        break_report(pytester.path, monkeypatch)
         result = run_tests(
             pytester, REPORTED_JOB, "--lakeflow-report-dir=out", "-o", "log_cli=true", "--log-cli-level=WARNING"
         )
         result.assert_outcomes(passed=2)
-        result.stdout.fnmatch_lines(["*Could not write the lakeflow report of test_jobs.py::test_job to *out*"])
+        assert result.ret == pytest.ExitCode.OK
+        result.stdout.fnmatch_lines([f"*Could not write the lakeflow report of test_jobs.py::test_job to *out{error}"])
+
+    def test_report_dir_drops_the_reports_of_earlier_sessions(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS"}))
+        out = pytester.path / "out"
+        for nodeid in ("test_jobs.py::test_job", "test_jobs.py::test_removed"):
+            earlier = out / directory_name(nodeid)
+            (earlier / "70").mkdir(parents=True)
+            (earlier / "70" / "load.log").write_text("from an earlier session")
+            (earlier / "report.json").write_text("{}")
+        (out / "notes.txt").write_text("not a report")
+        (out / "kept-0123abcd").mkdir()
+        run_tests(pytester, REPORTED_JOB, "--lakeflow-report-dir=out").assert_outcomes(passed=2)
+        test_dir, report = report_of(out)
+        assert [entry["run_id"] for entry in report["runs"]] == [77]
+        assert sorted(path.name for path in out.iterdir()) == sorted([test_dir.name, "notes.txt", "kept-0123abcd"])
+        assert not (test_dir / "70").exists()
+
+    def test_report_dir_serialises_sql_results(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"query": "SUCCESS"}, sql_files={"query": QUERY_FILE}))
+        fake_ws.jobs.raw_outputs[7700] = SQL_FILE_OUTPUT
+        run_tests(pytester, REPORTED_JOB, "--lakeflow-report-dir=out").assert_outcomes(passed=2)
+        _, report = report_of(pytester.path / "out")
+        assert report["runs"][0]["tasks"]["query"]["sql_result"] == {
+            "task_key": "query",
+            "columns": ["n"],
+            "types": ["int"],
+            "rows": [{"n": "1"}],
+            "truncated": False,
+            "warehouse_id": "0123456789abcdef",
+            "query_text": "SELECT 1 AS n\n",
+        }
+
+    def test_a_run_cancelled_at_fixture_teardown_is_reported_with_the_test_torn_down(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        source = """
+            import pytest
+
+            @pytest.fixture(scope="module")
+            def started(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.start()
+                    yield job
+
+            def test_first(started):
+                pass
+
+            def test_last(started):
+                pass
+            """
+        run_tests(pytester, source, "--lakeflow-report-dir=out").assert_outcomes(passed=2)
+        assert fake_ws.jobs.cancelled == [77]
+        out = pytester.path / "out"
+        test_dir, report = report_of(out, "test_jobs.py::test_last")
+        assert [path.name for path in out.iterdir()] == [test_dir.name]
+        [entry] = report["runs"]
+        assert (entry["run_id"], entry["result_state"], entry["succeeded"]) == (77, "CANCELED", False)
+
+    def test_an_interrupt_while_reading_a_cancelled_run_still_deletes_the_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        get_run = fake_ws.jobs.get_run
+
+        def interrupted_once_cancelled(run_id: int, **kwargs: Any) -> jobs.Run:
+            if fake_ws.jobs.cancelled:
+                raise KeyboardInterrupt
+            return get_run(run_id, **kwargs)
+
+        monkeypatch.setattr(fake_ws.jobs, "get_run", interrupted_once_cancelled)
+        pytester.makepyfile(
+            test_jobs='def test_job(lakeflow):\n    with lakeflow.job("my_job") as job:\n        job.start()\n'
+        )
+        result = pytester.runpytest("--lakeflow-report-dir=out", no_reraise_ctrlc=True)
+        assert result.ret == pytest.ExitCode.INTERRUPTED
+        assert fake_ws.jobs.cancelled == [77]
+        assert fake_ws.jobs.deleted == [1001]
 
     @pytest.mark.parametrize(("source", "polls"), CANCELLED_BY_THE_PLUGIN)
     def test_a_run_the_plugin_cancels_is_reported(

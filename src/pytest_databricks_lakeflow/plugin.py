@@ -14,6 +14,7 @@ from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.client import Lakeflow
 from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, cancel_run
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
+from pytest_databricks_lakeflow.report import clear as clear_reports
 from pytest_databricks_lakeflow.report import write as write_report
 from pytest_databricks_lakeflow.session import (
     SWEEP_SCOPES,
@@ -187,6 +188,16 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     deactivate(state)
     if state.worker_dir is not None:
         shutil.rmtree(state.worker_dir, ignore_errors=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    config = session.config
+    state = config.stash.get(STATE, None)
+    # On the xdist controller only, before it starts the workers, so no worker deletes what another has written.
+    if state is None or state.report_dir is None or hasattr(config, "workerinput"):
+        return
+    clear_reports(state.report_dir)
 
 
 @pytest.hookimpl(optionalhook=True)
