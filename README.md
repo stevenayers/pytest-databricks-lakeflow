@@ -78,7 +78,7 @@ To skip cluster start-up, pass `existing_cluster_id="<cluster id>"` to `Lakeflow
 
 ## Testing one task
 
-`lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_task_values` is replaced by a stub task that sets those task values, and `capture_task_values` adds a probe task that reports the values the task set, even when it failed. `upstream_from=run` takes the stub values from the task values a previous run of the job captured, so a task can be replayed against real upstream data.
+`lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_task_values` is replaced by a stub task that sets those task values, or by a `Stub` that also answers the task's `{{tasks.<key>.output.<path>}}` references with literals, and `capture_task_values` adds a probe task that reports the values the task set, even when it failed. `upstream_from=run` takes the stub values from the task values a previous run of the job captured, so a task can be replayed against real upstream data.
 
 ```python
 import pytest

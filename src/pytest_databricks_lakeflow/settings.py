@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import logging
@@ -56,6 +57,10 @@ TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
 # Of the references to a task that run_now(only=...) leaves out, only task values fail the run. The others resolve
 # against the task's DISABLED run: result_state to "disabled", error_code to "Disabled", run_id to its run id.
 TASK_VALUES_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.values\.")
+# A stub is a notebook task, which has no SQL, alert or clean room output, so these references are replaced by the
+# literals its outputs give. The platform's paths after `output.` include rows, first_row, first_row.<column>,
+# alert_state, catalog_name, schema_name and response.
+OUTPUT_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.output\.([\w.-]+)\s*\}\}")
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
@@ -74,6 +79,27 @@ LIST_PARAMS = {
     "dbt_task": "commands",
 }
 TASK_PARAMS_KINDS = tuple(sorted(MAPPING_PARAMS.keys() | LIST_PARAMS.keys()))
+
+
+@dataclass(frozen=True)
+class Stub:
+    """What a stub task stands in for: the task values it sets and the output references it answers.
+
+    A plain mapping in `upstream_task_values` is the same as `Stub(values=mapping)`.
+
+    Attributes:
+        values: The task values the stub sets, by key, as a plain mapping gives them.
+        outputs: Literals for the `{{tasks.<key>.output.<path>}}` references to the stubbed task, by the path after
+            `output.` exactly as the reference spells it, such as `"first_row.n"`, `"alert_state"` or `"rows"`. A
+            string is substituted verbatim and any other value as compact JSON, so `{"rows": [{"n": "3"}]}` gives
+            `[{"n":"3"}]`, the platform's own spelling.
+    """
+
+    values: Mapping[str, object] = dataclasses.field(default_factory=dict)
+    outputs: Mapping[str, object] = dataclasses.field(default_factory=dict)
+
+
+Upstream = Mapping[str, Mapping[str, object] | Stub]
 
 
 @dataclass(frozen=True)
@@ -931,26 +957,27 @@ def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
     return seen
 
 
-def stub_upstream(
-    settings: jobs.JobSettings, upstream_task_values: Mapping[str, Mapping[str, object]], helpers: Helpers
-) -> jobs.JobSettings:
+def stub_upstream(settings: jobs.JobSettings, upstream_task_values: Upstream, helpers: Helpers) -> jobs.JobSettings:
     """Replace the named tasks with stub tasks that set the given task values, each in its task's place.
 
     A stub keeps the key of the task it replaces, so `depends_on` entries and `{{tasks.<key>.values.<name>}}`
-    references to it resolve against the stub. It drops the task's `depends_on`, so the tasks upstream of it no
-    longer hold it back, but depends on the setup task when the job has one, as every task without `depends_on` does.
-    Every entry is checked before any task is replaced.
+    references to it resolve against it. Every other task's `{{tasks.<key>.output.<path>}}` references to it are
+    replaced by the stub's outputs. It drops the task's `depends_on`, so the tasks upstream of it no longer hold it
+    back, but depends on the setup task when the job has one, as every task without `depends_on` does. Every entry is
+    checked before any task is replaced.
 
     Args:
         settings: The job's settings. They are changed in place.
-        upstream_task_values: The task values each stub sets, by the key of the task it replaces.
+        upstream_task_values: The task values each stub sets, or a `Stub` with its values and outputs, by the key of
+            the task it replaces.
         helpers: Where the helper notebooks are and what they run on.
 
     Returns:
         `settings`.
 
     Raises:
-        LakeflowError: If a key is not a task in the job, or a value is too large or not JSON-serialisable.
+        LakeflowError: If a key is not a task in the job, a value is too large or not JSON-serialisable, an output
+            contains `{{` or is not JSON-serialisable, or a task refers to an output its stub does not give.
     """
     if not upstream_task_values:
         return settings
@@ -959,20 +986,84 @@ def stub_upstream(
         if key not in tasks:
             available = sorted(k for k in tasks if not k.startswith(PREFIX))
             raise LakeflowError(f"Unknown task {key!r} in upstream_task_values. Available: {available}")
-    for key, values in upstream_task_values.items():
-        check_values(key, values)
+    stubs = as_stubs(upstream_task_values)
     replaced: list[jobs.Task] = []
     for task in settings.tasks or []:
-        if task.task_key not in upstream_task_values:
-            replaced.append(task)
+        if task.task_key not in stubs:
+            replaced.append(_rewrite_outputs(task, stubs))
             continue
-        stub = _stub_task(task.task_key, upstream_task_values[task.task_key], helpers)
+        stub = _stub_task(task.task_key, stubs[task.task_key].values, helpers)
         if SETUP_KEY in tasks:
             stub.depends_on = [jobs.TaskDependency(task_key=SETUP_KEY)]
         replaced.append(stub)
     settings.tasks = replaced
     _add_helper_compute(settings, helpers)
     return settings
+
+
+def as_stubs(upstream_task_values: Upstream) -> dict[str, Stub]:
+    """Turn each plain mapping of task values into a `Stub`, and check every stub's values and outputs.
+
+    Raises:
+        LakeflowError: If a value is too large or not JSON-serialisable, or an output contains `{{` or is not
+            JSON-serialisable.
+    """
+    stubs: dict[str, Stub] = {}
+    for key, stub in upstream_task_values.items():
+        if not isinstance(stub, Stub):
+            stub = Stub(values=stub)
+        check_values(key, stub.values)
+        for path in stub.outputs:
+            _render_output(key, stub, path)
+        stubs[key] = stub
+    return stubs
+
+
+def _rewrite_outputs(task: jobs.Task, stubs: Mapping[str, Stub]) -> jobs.Task:
+    """Get the task with its output references to the stubbed tasks replaced by the stubs' outputs.
+
+    The task is not changed. It is returned as it is when it has no such reference.
+
+    Raises:
+        LakeflowError: If the task refers to an output that its stub does not give.
+    """
+
+    def replacement(match: re.Match[str]) -> str:
+        key, path = match[1], match[2]
+        if key not in stubs:
+            return match[0]
+        if path not in stubs[key].outputs:
+            raise LakeflowError(
+                f"Task {task.task_key!r} refers to {match[0]}, but the stub for {key!r} has no output {path!r}. "
+                f"Pass Stub(outputs={{{path!r}: ...}}) for {key!r} in upstream_task_values."
+            )
+        # The text is JSON, so the literal is JSON-string-escaped to keep its quotes and backslashes.
+        return json.dumps(_render_output(key, stubs[key], path))[1:-1]
+
+    text = json.dumps(task.as_dict())
+    rewritten = OUTPUT_REFERENCE.sub(replacement, text)
+    if rewritten == text:
+        return task
+    return jobs.Task.from_dict(json.loads(rewritten))
+
+
+def _render_output(key: str, stub: Stub, path: str) -> str:
+    value = stub.outputs[path]
+    if isinstance(value, str):
+        rendered = value
+    else:
+        try:
+            # Compact, as the platform spells rows and first_row: {"n":"1","m":""}.
+            rendered = json.dumps(value, separators=(",", ":"))
+        except (TypeError, ValueError) as e:
+            raise LakeflowError(f"Output {path!r} of stub {key!r} is not JSON-serialisable: {e}") from None
+    # The platform substitutes the literal and would then resolve a reference inside it.
+    if "{{" in rendered:
+        raise LakeflowError(
+            f"Output {path!r} of stub {key!r} contains '{{{{', which the platform would resolve as a reference: "
+            f"{rendered!r}. Stubbed outputs are literals."
+        )
+    return rendered
 
 
 def inject_probes(
@@ -1012,19 +1103,21 @@ def inject_probes(
 def wrap_task(
     settings: jobs.JobSettings,
     task_key: str,
-    upstream_task_values: Mapping[str, Mapping[str, object]],
+    upstream_task_values: Upstream,
     capture_task_values: Sequence[str],
     helpers: Helpers,
 ) -> jobs.JobSettings:
     """Reduce the job to one task, a stub task for each upstream task in `upstream_task_values`, and a probe.
 
     A stub has the key of the task it replaces, so the target's `{{tasks.<key>.values.<name>}}` references and
-    `taskValues.get` calls resolve against it.
+    `taskValues.get` calls resolve against it. The target's `{{tasks.<key>.output.<path>}}` references are replaced by
+    the stub's outputs.
 
     Args:
         settings: The job's settings. They are changed in place.
         task_key: The task to keep.
-        upstream_task_values: The task values each stub sets, by upstream task key.
+        upstream_task_values: The task values each stub sets, or a `Stub` with its values and outputs, by upstream
+            task key.
         capture_task_values: The task value keys to capture from the task. No probe is added if empty.
         helpers: Where the helper notebooks are and what they run on.
 
@@ -1033,7 +1126,8 @@ def wrap_task(
 
     Raises:
         LakeflowError: If the task is not in the job, the task refers to task values of a task that is not
-            stubbed, or a value is too large or not JSON-serialisable.
+            stubbed or to an output its stub does not give, a value is too large or not JSON-serialisable, or an
+            output contains `{{` or is not JSON-serialisable.
     """
     target = require_task(settings, task_key)
     if task_key in upstream_task_values:
@@ -1044,16 +1138,16 @@ def wrap_task(
         raise LakeflowError(
             f"Task {task_key!r} refers to task values of {missing} in its settings. Pass them in upstream_task_values."
         )
-    for stub_key, values in upstream_task_values.items():
-        check_values(stub_key, values)
+    stubs = as_stubs(upstream_task_values)
+    target = _rewrite_outputs(target, stubs)
     _check_keys(task_key, capture_task_values)
-    target.depends_on = [jobs.TaskDependency(task_key=key) for key in upstream_task_values] or None
-    stubs = [_stub_task(key, values, helpers) for key, values in upstream_task_values.items()]
+    target.depends_on = [jobs.TaskDependency(task_key=key) for key in stubs] or None
+    stub_tasks = [_stub_task(key, stub.values, helpers) for key, stub in stubs.items()]
     probes = []
     if capture_task_values:
         probes.append(_probe_task(task_key, capture_task_values, helpers))
-    settings.tasks = [*stubs, target, *probes]
-    if stubs or probes:
+    settings.tasks = [*stub_tasks, target, *probes]
+    if stub_tasks or probes:
         _add_helper_compute(settings, helpers)
     return settings
 

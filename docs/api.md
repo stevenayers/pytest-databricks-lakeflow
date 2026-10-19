@@ -47,6 +47,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 
 ::: pytest_databricks_lakeflow.TaskRun
 
+## `Stub`
+
+::: pytest_databricks_lakeflow.Stub
+
 ## `TaskValues`
 
 ::: pytest_databricks_lakeflow.TaskValues

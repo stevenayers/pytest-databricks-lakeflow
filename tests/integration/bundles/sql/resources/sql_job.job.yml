@@ -36,3 +36,13 @@ resources:
               label: from-bundle
             file:
               path: ../src/queries/labelled.sql
+        - task_key: use_results
+          depends_on:
+            - task_key: query
+            - task_key: types
+          notebook_task:
+            notebook_path: ../src/notebooks/use_results.py
+            base_parameters:
+              count: "{{tasks.query.output.first_row.n}}"
+              row: "{{tasks.types.output.first_row}}"
+              rows: "{{tasks.types.output.rows}}"
