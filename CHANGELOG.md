@@ -3,6 +3,21 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.7.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.6.0...v0.7.0) (2026-10-19)
+
+
+### Features
+
+* accept SQL statements or a notebook file for setup= and teardown= ([#153](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/153)) ([09eb4d5](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/09eb4d5510a8adfe1d6a9dc8299540b34f28f1f5))
+* add run(stop_after=) so streaming runs return a cancelled JobRun ([#155](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/155)) ([3f5a238](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/3f5a238e6cb6bd578b9bc6d2647e1e2622224044))
+* resolve local wheels with extras in extra_dependencies and warn on stale uploads ([#154](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/154)) ([90126b4](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/90126b483d5917df823aee672de516af11b29648))
+* stub upstream tasks on job() and replay a run's task values into them ([#150](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/150)) ([3962ff3](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/3962ff3324356217ee086f6821f299d584dd0565))
+
+
+### Bug Fixes
+
+* land the wave 4 review notes and the wave 3 triage fixes ([#156](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/156)) ([3062987](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/3062987f0da28c99709c0336e1b15757f0263539))
+
 ## [0.6.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.5.0...v0.6.0) (2026-10-19)
 
 
