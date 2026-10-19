@@ -747,8 +747,11 @@ class TaskRun:
 
     @property
     def ran(self) -> bool:
-        """Whether the task ran. False if it was skipped, excluded, disabled or cancelled."""
-        return self.result_state not in NOT_RUN
+        """Whether the task ran. False if it was skipped, excluded, disabled or cancelled, or has no result state.
+
+        The platform reports no result state for the tasks of a run it skipped because every task is disabled.
+        """
+        return _ran(self.result_state)
 
     @property
     def excluded(self) -> bool:
@@ -762,9 +765,9 @@ class TaskRun:
 
     @property
     def disabled(self) -> bool:
-        """Whether the task ended `DISABLED`, disabled in the job or left out by `only`.
+        """Whether the task ended `DISABLED`: disabled in the job, downstream of a disabled task, or left out by `only`.
 
-        `JobRun.disabled_tasks` and `JobRun.skipped_tasks` tell the two apart.
+        `JobRun.disabled_tasks` and `JobRun.skipped_tasks` tell them apart.
         """
         return self.result_state == "DISABLED"
 
@@ -850,7 +853,9 @@ class JobRun:
         tasks: The user's tasks that were part of the run, by task key.
         injected_tasks: The stub, probe, setup and teardown tasks added by the plugin, by task key.
         skipped_tasks: Tasks left out by `only`, by task key.
-        disabled_tasks: Tasks disabled in the job, in the bundle or with `disable=`, by task key.
+        disabled_tasks: Tasks disabled in the job, in the bundle or with `disable=`, and the tasks the platform
+            disabled because they are downstream of one, by task key. When every task is disabled, the platform skips
+            the run: its tasks have no result state and are all here.
         parameters: The run's job parameters by name: the value passed for the run, or the default when none was.
             Parameters the plugin injects are left out.
         timing: The queue, setup, execution and cleanup durations of the parent run. Zero where the platform
@@ -1011,13 +1016,18 @@ class JobRun:
 def describe_failing(run: JobRun) -> list[str]:
     """Describe each failing task of `run` as `key: error`, with the error's first line or the result state.
 
-    A failed setup task comes first, as `setup: error`, because it is why the tasks after it did not run.
+    A failed setup task comes first, as `setup: error`, because it is why the tasks after it did not run. When the
+    run did not succeed and no task in `tasks` is failing, the run's termination message follows as `run: message`,
+    as for a run the platform skipped because every task is disabled.
     """
     described: list[str] = []
     if run.setup is not None and not run.setup.succeeded:
         described.append(f"setup: {task_outcome(run.setup)}")
-    for task in run._failing_tasks():
+    failing = run._failing_tasks()
+    for task in failing:
         described.append(f"{task.task_key}: {task_outcome(task)}")
+    if run.failed and not failing and run.termination_code != "SUCCESS" and run.termination_message:
+        described.append(f"run: {run.termination_message}")
     return described
 
 
@@ -1241,8 +1251,11 @@ def build_job_run(
         job_id: The ephemeral job's id.
         stubs: Keys of stub tasks, which count as injected tasks.
         capture_task_values: The value keys requested from each probed task, by task key.
-        disabled: Keys of the tasks disabled in the job's settings. The Jobs API does not flag them on the run, where
-            a disabled task and one left out by `only` both end `DISABLED`.
+        disabled: Keys of the tasks disabled in the job's settings and of the tasks downstream of them, as
+            `disabled_task_keys` returns them. The Jobs API does not flag them on the run, where a disabled task, a
+            task downstream of one and a task left out by `only` all end `DISABLED`. A task in `disabled` that ended
+            `DISABLED` or has no result state is filed under `disabled_tasks`; any other task that ended `DISABLED`
+            under `skipped_tasks`.
         outputs: Task outputs already read, by task run id. Only the outputs missing from it are fetched.
         job_keys: Bundle resource keys by job id, which name the child runs of run-job tasks.
         notebook_export: Which notebook tasks to export with `jobs.export_run`: `failed` for those that ran and did
@@ -1263,7 +1276,7 @@ def build_job_run(
     ran: list[jobs.RunTask] = []
     for task_runs in task_runs_by_key.values():
         for task_run in task_runs:
-            if _result_state(task_run) not in NOT_RUN:
+            if _ran(_result_state(task_run)):
                 ran.append(task_run)
     resolved = fetch_resolved_values(ws, ran)
     sql_results = fetch_sql_results(ws, ran)
@@ -1302,12 +1315,12 @@ def build_job_run(
     skipped_tasks: dict[str, TaskRun] = {}
     disabled_tasks: dict[str, TaskRun] = {}
     for key, task in user.items():
-        if not task.disabled:
-            tasks[key] = task
-        elif key in disabled:
+        if key in disabled and (task.disabled or task.result_state is None):
             disabled_tasks[key] = task
-        else:
+        elif task.disabled:
             skipped_tasks[key] = task
+        else:
+            tasks[key] = task
 
     details = run.status.termination_details if run.status else None
     return JobRun(
@@ -1405,8 +1418,12 @@ def _job_parameters(parameters: Sequence[jobs.JobParameter] | None) -> dict[str,
 
 
 def has_output(task: jobs.RunTask) -> bool:
-    """Whether a terminated task run has an output to read: every task run but a disabled one has."""
-    return _result_state(task) != "DISABLED"
+    """Whether a terminated task run has an output to read.
+
+    Every one has but a disabled one and one with no result state, as each task of a skipped run has.
+    """
+    state = _result_state(task)
+    return state is not None and state != "DISABLED"
 
 
 def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.RunOutput]:
@@ -1574,7 +1591,7 @@ def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) 
 
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
-    if output is None or _result_state(task) in NOT_RUN:
+    if output is None or not _ran(_result_state(task)):
         return None
     error = TaskError.from_output(output.error, output.error_trace)
     if error is None:
@@ -1598,7 +1615,7 @@ def _task_run(
     logs_truncated = bool(out.logs_truncated)
     _warn_when_truncated(key, output_truncated=output_truncated, logs_truncated=logs_truncated)
     error = None
-    if state not in NOT_RUN:
+    if _ran(state):
         error = TaskError.from_output(out.error, out.error_trace)
     return TaskRun(
         task_key=key,
@@ -1720,6 +1737,11 @@ def _probe_output(probe: TaskRun | None) -> tuple[dict[str, object], list[str]] 
 
 def _result_state(task: jobs.RunTask) -> str | None:
     return _enum(task.state.result_state if task.state else None)
+
+
+def _ran(result_state: str | None) -> bool:
+    # A task with no result state did not run: the platform reports none for the tasks of a skipped run.
+    return result_state is not None and result_state not in NOT_RUN
 
 
 def _enum(value: Enum | str | None) -> str | None:

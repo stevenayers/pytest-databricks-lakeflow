@@ -506,6 +506,33 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
     return settings
 
 
+def disabled_task_keys(settings: jobs.JobSettings) -> set[str]:
+    """Get the keys of the disabled tasks and of every task downstream of one, whatever its `run_if`.
+
+    The platform disables a task downstream of a disabled task ("This task was disabled because it is downstream of
+    a disabled task"), and the run does not say which task was disabled in the job: `RunTask.disabled` is always
+    null. A task listed here that the platform ran anyway still ends in a result state other than `DISABLED`.
+
+    Args:
+        settings: The job's settings.
+
+    Returns:
+        The keys of the top-level tasks whose `disabled` is true, and of the top-level tasks that depend on one of
+        them, directly or through other tasks.
+    """
+    tasks = settings.tasks or []
+    downstream: dict[str, set[str]] = {task.task_key: set() for task in tasks}
+    for task in tasks:
+        for dependency in task.depends_on or []:
+            downstream.setdefault(dependency.task_key, set()).add(task.task_key)
+    disabled: set[str] = set()
+    for task in tasks:
+        if task.disabled:
+            disabled.add(task.task_key)
+            disabled |= _reachable(task.task_key, downstream)
+    return disabled
+
+
 def override_tasks(settings: jobs.JobSettings, overrides: Mapping[str, Mapping[str, object]]) -> jobs.JobSettings:
     """Set the timeout and retry fields in `TASK_OVERRIDES` on the named tasks.
 

@@ -13,7 +13,7 @@ from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.results import JobRun, TaskRun, Timing, build_job_run, serialise, serialise_with_files
 
-from .fakes import DATA, HOST, FakeWorkspaceClient, make_run, recorded
+from .fakes import ALL_DISABLED, DATA, HOST, FakeWorkspaceClient, make_run, recorded, skipped_run
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
 RECORDED_RUNS = sorted(path.stem for path in (DATA / "runs").glob("*.json"))
@@ -227,6 +227,21 @@ class TestSkippedAndDisabledTasks:
         with pytest.raises(KeyError, match=r"Skipped by only: \['b'\]") as raised:
             run.task("b")
         assert "Disabled in the job" not in str(raised.value)
+
+    def test_a_task_with_no_result_state_reads_no_output(self) -> None:
+        ws = FakeWorkspaceClient()
+        keys = ["a", "b", "c"]
+        built = build_from(ws, skipped_run(1, keys, notebooks=keys), disabled=set(keys))
+        assert built.tasks == {}
+        assert built.skipped_tasks == {}
+        assert sorted(built.disabled_tasks) == keys
+        assert not any(task.ran for task in built.disabled_tasks.values())
+        assert built.disabled_tasks["a"].termination_message == ALL_DISABLED
+        assert built.failed
+        assert repr(built) == f"JobRun('my_job', None, {built.run_url}, failing=['run: {ALL_DISABLED}'])"
+        assert ws.jobs.output_calls == []
+        assert ws.jobs.export_calls == []
+        assert not any(call.get("include_resolved_values") for call in ws.jobs.get_run_calls)
 
     def test_stubs_count_as_injected(self) -> None:
         run, _ = build("probe_success", stubs={"extract"})

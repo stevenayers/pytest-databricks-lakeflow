@@ -303,7 +303,8 @@ class Lakeflow:
                 application id, and a `jobs.JobRunAs` is used as given. A service principal needs you to have the
                 Service Principal User role on it, which is checked before the copy is created when the workspace
                 client knows its account id.
-            disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
+            disable: Task keys to disable in the copy. Runs skip them, and the platform disables every task downstream
+                of them too. Both appear in `JobRun.disabled_tasks`.
             task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
                 mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
                 a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list

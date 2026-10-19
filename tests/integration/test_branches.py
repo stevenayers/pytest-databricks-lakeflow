@@ -89,9 +89,28 @@ def test_disabling_the_upstream_of_a_forced_condition_disables_its_branches(lake
         assert run.result_state == "SUCCESS"
         assert run.setup is not None
         assert run.setup.succeeded
-        assert sorted(run.disabled_tasks) == ["check_input"]
-        downstream = {**run.tasks, **run.skipped_tasks}
-        assert sorted(downstream) == ["check", "on_false", "on_true"]
-        assert all(task.disabled for task in downstream.values()), downstream
-        assert downstream["check"].condition_outcome is None
+        assert sorted(run.disabled_tasks) == ["check", "check_input", "on_false", "on_true"]
+        assert run.skipped_tasks == {}
+        assert run.tasks == {}
+        assert all(task.disabled for task in run.disabled_tasks.values()), run.disabled_tasks
+        check = run.disabled_tasks["check"]
+        assert (check.termination_message or "").startswith(
+            "This task was disabled because it is downstream of a disabled task"
+        ), check
+        assert check.condition_outcome is None
         assert run.executed_tasks == []
+        with pytest.raises(KeyError, match="Disabled in the job"):
+            run.branch_taken("check")
+
+
+def test_disabling_every_task_skips_the_run(lakeflow: Lakeflow) -> None:
+    # check_input is the only root task, so disabling it leaves nothing enabled and the platform skips the run.
+    with lakeflow.job("branching_job", disable=["check_input"]) as job:
+        run = job.run()
+        assert run.tasks == {}
+        assert sorted(run.disabled_tasks) == ["check", "check_input", "on_false", "on_true"]
+        assert not any(task.ran for task in run.disabled_tasks.values()), run.disabled_tasks
+        assert run.executed_tasks == []
+        assert not run.succeeded
+        assert "Skipped because every task is disabled" in (run.termination_message or ""), run
+        assert "run: Skipped because every task is disabled" in repr(run)

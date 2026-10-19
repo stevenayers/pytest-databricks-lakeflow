@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     check_references,
     create_kwargs,
+    disabled_task_keys,
     job_timeout_seconds,
     name_lifecycle_params,
     pipeline_params,
@@ -562,7 +563,6 @@ class EphemeralJob:
     def _job_run(self, run: jobs.Run, outputs: Mapping[int, jobs.RunOutput]) -> JobRun:
         """Build the `JobRun` of a terminated run of this job, from the task outputs read while polling."""
         assert self.job_id is not None
-        disabled = {task.task_key for task in self.settings.tasks or [] if task.disabled and task.task_key}
         return build_job_run(
             self.lakeflow.ws,
             run,
@@ -570,7 +570,7 @@ class EphemeralJob:
             job_id=self.job_id,
             stubs=self.stubs,
             capture_task_values=self.capture_task_values,
-            disabled=disabled,
+            disabled=disabled_task_keys(self.settings),
             outputs=outputs,
             job_keys=self.lakeflow._job_keys(),
             notebook_export=self.lakeflow.notebook_export,

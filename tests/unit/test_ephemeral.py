@@ -30,6 +30,7 @@ from .fakes import (
     pipeline_settings,
     reporting_settings,
     running_run,
+    skipped_run,
     sp_rule_set,
 )
 from .test_build_job_run import QUERY_FILE, SQL_FILE_OUTPUT
@@ -1042,6 +1043,77 @@ class TestDisabledTasks:
             "load": True,
             "classic": None,
         }
+
+    def test_tasks_downstream_of_a_disabled_task_are_disabled(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        states = {"extract": "DISABLED", "transform": "DISABLED", "load": "DISABLED", "classic": "SUCCESS"}
+        fake_ws.jobs.queue(make_run(77, states))
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            def test_job(lakeflow):
+                run = lakeflow.job("my_job", disable=["extract"]).run()
+                assert sorted(run.disabled_tasks) == ["extract", "load", "transform"]
+                assert run.skipped_tasks == {}
+                assert run.succeeded
+                assert run.executed_tasks == ["classic"]
+                with pytest.raises(KeyError, match=r"Disabled in the job: \\['extract', 'load', 'transform'\\]\\."):
+                    run.task("transform")
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_tasks_left_out_by_only_stay_skipped(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        states = {"extract": "DISABLED", "transform": "DISABLED", "load": "DISABLED", "classic": "SUCCESS"}
+        fake_ws.jobs.queue(make_run(77, states))
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            def test_job(lakeflow):
+                run = lakeflow.job("my_job").run(only=["classic"])
+                assert sorted(run.skipped_tasks) == ["extract", "load", "transform"]
+                assert run.disabled_tasks == {}
+                with pytest.raises(KeyError, match=r"Skipped by only: \\['extract', 'load', 'transform'\\]"):
+                    run.task("transform")
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_a_run_with_every_task_disabled_ran_nothing(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        keys = ["extract", "transform", "load", "classic"]
+        fake_ws.jobs.queue(skipped_run(77, keys, notebooks=["extract", "transform", "classic"]))
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowRunFailed
+
+            def test_job(lakeflow):
+                run = lakeflow.job("my_job", disable=["extract", "classic"]).run()
+                assert run.tasks == {}
+                assert sorted(run.disabled_tasks) == ["classic", "extract", "load", "transform"]
+                assert not any(task.ran for task in run.disabled_tasks.values())
+                assert run.executed_tasks == []
+                assert not run.succeeded
+                with pytest.raises(LakeflowRunFailed) as raised:
+                    run.raise_for_failure()
+                reason = (
+                    "Skipped because every task is disabled. Re-enable at least one task to be able to run the job."
+                )
+                assert f"run: {reason}" in str(raised.value)
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.output_calls == []
+        assert fake_ws.jobs.export_calls == []
 
     def test_template_disabled_tasks_are_reported_separately(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient

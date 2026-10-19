@@ -23,6 +23,7 @@ from pytest_databricks_lakeflow.settings import (
     check_task_params,
     create_kwargs,
     disable_tasks,
+    disabled_task_keys,
     force_conditions,
     inject_lifecycle,
     inject_probes,
@@ -867,6 +868,27 @@ class TestDisableAndRunJobTasks:
         assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
         assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
         assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+
+
+class TestDisabledTaskKeys:
+    """Which tasks a disabled task takes with it."""
+
+    @pytest.mark.parametrize(
+        ("disabled", "all_done", "expected"),
+        [
+            ([], False, set()),
+            (["extract"], False, {"extract", "transform", "load"}),
+            (["transform"], False, {"transform", "load"}),
+            (["load"], False, {"load"}),
+            (["classic"], False, {"classic"}),
+            (["extract"], True, {"extract", "transform", "load"}),
+        ],
+    )
+    def test_disabled_task_keys(self, disabled: list[str], all_done: bool, expected: set[str]) -> None:
+        settings = disable_tasks(example_settings(), disabled)
+        if all_done:
+            next(t for t in settings.tasks or [] if t.task_key == "load").run_if = jobs.RunIf.ALL_DONE
+        assert disabled_task_keys(settings) == expected
 
 
 class TestOverrideTasks:

@@ -69,7 +69,7 @@ A string that contains `@` names a user and any other string names a service pri
 
 ### Disable a task
 
-A task that notifies people or refreshes a downstream system can be switched off in the copy without changing the bundle. `disable` sets `disabled` on those tasks, so every run of the copy skips them:
+A task that notifies people or refreshes a downstream system can be switched off in the copy without changing the bundle. `disable` sets `disabled` on those tasks, so every run of the copy skips them, and the platform skips every task downstream of them as well:
 
 ```python
 def test_without_load(lakeflow: Lakeflow) -> None:
@@ -80,6 +80,19 @@ def test_without_load(lakeflow: Lakeflow) -> None:
 ```
 
 A disabled task ends `DISABLED` and lands in `run.disabled_tasks`, and `run.task("load")` raises a `KeyError` that says `Disabled in the job: ['load']`. Tasks the bundle already disables land there too. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
+
+`load` is a leaf, so nothing else changes. Disable a task that others depend on and the platform disables every task downstream of it too, with the termination message "This task was disabled because it is downstream of a disabled task". Their code does not run, and they are in `run.disabled_tasks` with the task you named. `run.succeeded` looks only at `run.tasks`, so it can be true while the tasks you meant to test did nothing. Assert on the tasks you expect to have run:
+
+```python
+def test_without_extract(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", disable=["extract"]) as job:
+        run = job.run()
+        assert run.succeeded  # only my_wheel_task ran
+        assert sorted(run.disabled_tasks) == ["extract", "load", "transform"]
+        assert run.executed_tasks == ["my_wheel_task"]
+```
+
+`run.task("load")` says `Disabled in the job: ['extract', 'load', 'transform']`, and each task's `termination_message` carries the platform's reason. The message suggests a `run_if` such as `ALL_DONE` for a dependant that must run anyway; set it on the copy with `modify_settings` (the plugin has not tried this against the platform). When nothing is left enabled, the platform skips the whole run with "Skipped because every task is disabled. Re-enable at least one task to be able to run the job." Every task is then in `run.disabled_tasks` with no result state and `ran` false, `run.tasks` and `run.executed_tasks` are empty, `run.succeeded` is false, and `repr(run)` names the reason as `failing=['run: Skipped because every task is disabled. Re-enable at least one task to be able to run the job.']`.
 
 ### Retries and timeouts
 
@@ -228,7 +241,7 @@ A run that is still active when its job closes, at the end of the `with` block o
 
 Do not use `run.result_state`, the parent run's state, as the verdict. A job with a probe that runs after a failed task ends `SUCCESS_WITH_FAILURES`.
 
-`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. Tasks left out by `only` are in `run.skipped_tasks`, and tasks disabled in the job, in the bundle or with `disable`, are in `run.disabled_tasks`. Tasks in both groups end `DISABLED`; the run itself does not say why, so the plugin reads the copy's settings to tell them apart. The plugin's stubs and probes are in `run.injected_tasks`. `run.task(key)` says `Skipped by only: [...]` or `Disabled in the job: [...]` for such a task. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
+`run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. `run.skipped_tasks` holds only the tasks left out by `only`. `run.disabled_tasks` holds the tasks disabled in the job, in the bundle or with `disable`, and the tasks downstream of them, which the platform disables too (see [Disable a task](#disable-a-task)). Tasks in both groups end `DISABLED`; the run itself does not say why, so the plugin reads the copy's settings to tell them apart. The plugin's stubs and probes are in `run.injected_tasks`. `run.task(key)` says `Skipped by only: [...]` or `Disabled in the job: [...]` for such a task. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
 
 `run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out.
 
@@ -236,7 +249,7 @@ Each `TaskRun` has:
 
 - `result_state`, such as `SUCCESS`, `FAILED` or `UPSTREAM_FAILED`, and `succeeded` and `ran`. `timed_out` is true when the task ended `TIMEDOUT`, stopped by the platform at its `timeout_seconds`.
 - `excluded`, true when the task ended `EXCLUDED` because its `run_if` or if/else condition was not met. Excluded tasks stay in `run.tasks` and do not fail the run.
-- `upstream_failed`, `disabled` and `cancelled`, true when the task ended exactly `UPSTREAM_FAILED`, `DISABLED` or `CANCELED`. `UPSTREAM_CANCELED` sets none of them; `ran` is false for all of these states.
+- `upstream_failed`, `disabled` and `cancelled`, true when the task ended exactly `UPSTREAM_FAILED`, `DISABLED` or `CANCELED`. `UPSTREAM_CANCELED` sets none of them; `ran` is false for all of these states, and for a task with no result state, as every task of a run the platform skipped has.
 - `condition_outcome`, for an if/else condition task: `True` when the condition held, `False` when it did not, and `None` for any other task. See [Branches](#branches).
 - `termination_code` and `termination_message`, from the task's termination details.
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
