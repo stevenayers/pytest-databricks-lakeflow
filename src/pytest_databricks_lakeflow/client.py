@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import posixpath
-import re
 import secrets
 import warnings
 from collections.abc import Callable, Collection, Generator, Mapping, Sequence
@@ -458,7 +456,7 @@ class Lakeflow:
         if not catalog:
             raise LakeflowError("Lakeflow.schema() needs a catalog. Pass catalog to Lakeflow or to schema().")
         state = session.current()
-        name = f"pytest_{re.sub(r'[^a-z0-9_]', '_', state.run_id.lower())}_{secrets.token_hex(4)}"
+        name = f"{session.schema_prefix(state.run_id)}{secrets.token_hex(4)}"
         full_name = f"{catalog}.{name}"
         self.ws.schemas.create(name=name, catalog_name=catalog)
         log.info("Created schema %s", full_name)
@@ -524,7 +522,7 @@ class Lakeflow:
     def _inject_lifecycle(self, settings: jobs.JobSettings, notebooks: Mapping[str, str]) -> None:
         if not notebooks:
             return
-        folder = posixpath.dirname(self._state()["helpers"]["set_values"])
+        folder = session.folder_of_helpers(self._state())
         uploaded = session.current().uploaded_notebooks
         paths: dict[str, str] = {}
         for role, source in notebooks.items():
@@ -557,7 +555,8 @@ class Lakeflow:
             if children == "refuse":
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
-        attribution = dict(session.current().attribution)
+        current = session.current()
+        attribution = dict(current.attribution)
         if "pytest_user" not in attribution:
             user = self._state().get("user")
             if user:
@@ -565,7 +564,13 @@ class Lakeflow:
         sanitise(
             settings,
             name=name or item.nodeid,
-            tags={"pytest": "", "pytest_run_id": self.run_id, "pytest_nodeid": item.nodeid, **attribution},
+            tags={
+                "pytest": "",
+                "pytest_run_id": self.run_id,
+                "pytest_nodeid": item.nodeid,
+                **current.expiry_tag(),
+                **attribution,
+            },
             description=f"{item.nodeid} {attribution.get('pytest_ci_url', '')}".strip(),
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
