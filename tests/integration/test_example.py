@@ -167,6 +167,26 @@ def test_run_twice_in_one_job(lakeflow: Lakeflow) -> None:
         assert second.duration < first.duration
 
 
+def test_start_two_jobs_and_wait(lakeflow: Lakeflow) -> None:
+    hello = lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"})
+    hi = lakeflow.job("my_example_job", params={"param1": "hi", "param2": "there"})
+    with hello, hi:
+        first = hello.start()
+        second = hi.start()
+        assert first.url is not None and second.url is not None
+        first_run = first.wait()
+        second_run = second.wait()
+        assert first_run.succeeded and second_run.succeeded
+        assert first_run.task("transform").output == "hello world"
+        assert second_run.task("transform").output == "hi there"
+        assert (hello.runs, hi.runs) == ([first_run], [second_run])
+        # The second run started before the first ended, so it did not wait for it.
+        second_started = lakeflow.ws.jobs.get_run(second_run.run_id).start_time
+        first_ended = lakeflow.ws.jobs.get_run(first_run.run_id).end_time
+        assert second_started is not None and first_ended is not None
+        assert second_started < first_ended
+
+
 def test_values_captured_even_on_failure(lakeflow: Lakeflow) -> None:
     with lakeflow.job(
         "my_example_job", params={"param1": "explode"}, capture_task_values={"transform": ["stage"]}
