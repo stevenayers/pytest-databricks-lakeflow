@@ -159,9 +159,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - uses: databricks/setup-cli@2bf4520fd10723ed5a22eca62a8c8a63714a7ba9 # v1.21.0
-      # tests/integration/conftest.py reads LAKEFLOW_CATALOG.
+      # tests/integration/conftest.py reads LAKEFLOW_CATALOG. --dist loadgroup keeps the tests of each xdist_group on one
+      # worker, so a run that a module-scoped fixture shares between them happens once.
       - run: >-
-          uv run pytest tests/integration -n 4 -rA --lakeflow-sweep --junitxml=integration.xml
+          uv run pytest tests/integration -n 4 --dist loadgroup -rA --lakeflow-sweep --junitxml=integration.xml
           --lakeflow-report-dir=lakeflow-report
       # A test cannot see its own report, so check here that the real runs wrote theirs: a report.json with at least
       # one run for each test that waited for one, and the exported notebook of the task that fails on purpose.
