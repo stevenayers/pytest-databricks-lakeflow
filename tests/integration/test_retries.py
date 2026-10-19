@@ -105,6 +105,42 @@ def test_a_longer_run_timeout_raises_the_job_timeout(lakeflow: Lakeflow) -> None
         assert run.task("sleep").output == "slept 120 seconds"
 
 
+def test_stop_after_returns_a_cancelled_run(lakeflow: Lakeflow) -> None:
+    # slow_job stands in for a streaming job, which never ends on its own: its sleep task runs for three minutes under
+    # a task timeout of four, so only stop_after can end the run within the first minutes.
+    overrides = {"sleep": {"timeout_seconds": 240}}
+    with lakeflow.job("slow_job", params={"seconds": "180"}, task_overrides=overrides) as job:
+        started = time.monotonic()
+        run = job.run(stop_after=timedelta(seconds=45))
+        assert time.monotonic() - started < 150
+        assert run.cancelled, run
+        assert run.result_state == "CANCELED"
+        assert run.failed
+        sleep = run.task("sleep")
+        assert sleep.result_state == "CANCELED"
+        assert not sleep.ran
+        assert (sleep.output, sleep.error) == (None, None)
+        assert job.runs == [run]
+        assert not lakeflow.active_runs
+
+
+def test_start_timeout_raises_the_job_timeout_and_is_the_wait_default(lakeflow: Lakeflow) -> None:
+    # Lakeflow(timeout=20s) creates the copy with a job timeout_seconds of 80, and a plain wait() would give up after
+    # 20 seconds. start(timeout=5 min) lengthens the job's timeout before the run starts and becomes wait()'s default,
+    # so the 60 second sleep finishes.
+    quick = dataclasses.replace(lakeflow, timeout=timedelta(seconds=20))
+    overrides = {"sleep": {"timeout_seconds": 240}}
+    with quick.job("slow_job", params={"seconds": "60"}, task_overrides=overrides) as job:
+        handle = job.start(timeout=timedelta(minutes=5))
+        assert job.job_id is not None
+        settings = quick.ws.jobs.get(job.job_id).settings
+        assert settings is not None
+        assert settings.timeout_seconds == 360
+        run = handle.wait()
+        assert run.succeeded, run
+        assert run.task("sleep").output == "slept 60 seconds"
+
+
 def _only_run_id(lakeflow: Lakeflow, job_id: int) -> int:
     runs = list(lakeflow.ws.jobs.list_runs(job_id=job_id))
     assert len(runs) == 1, runs

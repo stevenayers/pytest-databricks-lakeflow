@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, cast
@@ -29,6 +30,7 @@ from pytest_databricks_lakeflow.results import (
     task_outcome,
 )
 from pytest_databricks_lakeflow.settings import (
+    TIMEOUT_GRACE_SECONDS,
     check_compute,
     check_params,
     create_kwargs,
@@ -58,6 +60,17 @@ TERMINAL_LIFE_CYCLE = (
 
 # The last state logged for each task attempt, keyed by task key and attempt number, and whether it had terminated.
 LoggedStates = dict[tuple[str, int], tuple[str, bool]]
+
+
+@dataclass
+class _Polling:
+    """What polling one run has seen: the task states logged, the outputs read, and whether the plugin cancelled it."""
+
+    run_id: int
+    item: pytest.Item
+    logged: LoggedStates = field(default_factory=dict)
+    outputs: dict[int, jobs.RunOutput] = field(default_factory=dict)
+    cancelled: bool = False
 
 
 class EphemeralJob:
@@ -96,7 +109,7 @@ class EphemeralJob:
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
         self._run_urls: dict[int, str] = {}
-        self._active: set[int] = set()
+        self._active: dict[int, pytest.Item] = {}
         self._entered = False
         self._closed = False
         self._timeout_raised = False
@@ -147,6 +160,7 @@ class EphemeralJob:
         only: Sequence[str] | None = None,
         timeout: timedelta | None = None,
         *,
+        stop_after: timedelta | None = None,
         performance_target: jobs.PerformanceTarget | str | None = None,
         queue: bool | None = None,
         full_refresh: bool | None = None,
@@ -156,7 +170,7 @@ class EphemeralJob:
         """Run the job and wait for it to finish, creating it first if needed.
 
         Every call sends a fresh idempotency token with the run request, so a request the SDK retries cannot
-        start a second run.
+        start a second run. It is `start(params, only, timeout=timeout, ...).wait(stop_after=stop_after)`.
 
         Args:
             params: Job parameters for this run only, merged over the job's params.
@@ -165,6 +179,10 @@ class EphemeralJob:
                 the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets, the job's `timeout_seconds` is
                 raised to it before the run starts, with a warning when the template or `modify_settings` set the
                 shorter value.
+            stop_after: How long the run may go on before it is cancelled, for a job that does not end on its own,
+                such as a streaming job. The run is then polled until it has ended and returned as a `JobRun` whose
+                `cancelled` is true, instead of raising. It counts from the start of the run and must not be longer
+                than `timeout`.
             performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
             queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
@@ -180,32 +198,35 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a pipeline refresh option is set and the job has no pipeline task, or a selection is set and
-                the installed databricks-sdk cannot send it.
+                task, a pipeline refresh option is set and the job has no pipeline task, a selection is set and
+                the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`. Each is raised
+                before the run starts.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
-        # Converted before the job is created, so an unknown target never leaves a job behind.
-        target = _performance_target(performance_target)
-        self.create()
-        if timeout is not None:
-            self._raise_timeout(timeout)
+        if stop_after is not None:
+            limit = timeout
+            if limit is None:
+                limit = self.lakeflow.timeout
+            _check_stop_after(self.job_key, stop_after, limit)
         handle = self.start(
             params,
             only,
-            performance_target=target,
+            timeout=timeout,
+            performance_target=performance_target,
             queue=queue,
             full_refresh=full_refresh,
             full_refresh_selection=full_refresh_selection,
             refresh_selection=refresh_selection,
         )
-        return handle.wait(timeout)
+        return handle.wait(stop_after=stop_after)
 
     def start(
         self,
         params: Mapping[str, str] | None = None,
         only: Sequence[str] | None = None,
         *,
+        timeout: timedelta | None = None,
         performance_target: jobs.PerformanceTarget | str | None = None,
         queue: bool | None = None,
         full_refresh: bool | None = None,
@@ -215,12 +236,16 @@ class EphemeralJob:
         """Start a run of the job without waiting for it, creating the job first if needed.
 
         The run is cancelled when the job closes, unless `RunHandle.wait()` has returned by then. Its page is
-        recorded in the test's report straight away, so a run that is never waited for still appears there. The
-        job allows one run at a time, so start runs of different jobs to run them side by side.
+        recorded in the test's report straight away, so a run that is never waited for still appears there, and
+        with `--lakeflow-report-dir` the cancelled run is listed in report.json. The job allows one run at a time,
+        so start runs of different jobs to run them side by side.
 
         Args:
             params: Job parameters for this run only, as for `run()`.
             only: Task keys to run, as for `run()`.
+            timeout: How long `RunHandle.wait()` waits when it is given no timeout of its own. Defaults to
+                `Lakeflow`'s `timeout`. As for `run()`, when this plus 60 seconds is longer than the job's
+                `timeout_seconds`, the job's `timeout_seconds` is raised to it before the run starts.
             performance_target: The performance target of this run only, as for `run()`.
             queue: Whether this run may queue behind other runs, as for `run()`.
             full_refresh: Whether the job's pipeline tasks run a full refresh in this run, as for `run()`.
@@ -251,6 +276,8 @@ class EphemeralJob:
         )
         merged = {**self.params, **run_params}
         selected = select(self.settings, only, self.stubs) if only else None
+        if timeout is not None:
+            self._raise_timeout(timeout)
         ws = self.lakeflow.ws
         token = uuid.uuid4().hex
         waiter = ws.jobs.run_now(
@@ -264,13 +291,13 @@ class EphemeralJob:
         )
         run_id = cast(jobs.RunNowResponse, waiter.response).run_id
         assert run_id is not None
-        self._active.add(run_id)
+        self._active[run_id] = item
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
         log.debug("Run %s was started with idempotency token %s", run_id, token)
         first = ws.jobs.get_run(run_id)
         self._record_url(run_id, first, item)
-        return RunHandle(self, run_id, item, first)
+        return RunHandle(self, run_id, item, first, timeout)
 
     def _raise_timeout(self, timeout: timedelta) -> None:
         """Raise the job's `timeout_seconds` to `timeout` plus the grace period when it is shorter."""
@@ -308,7 +335,8 @@ class EphemeralJob:
             raise LakeflowError(
                 f"wait(timeout={timeout}) of {self.job_key!r} is longer than the job's timeout_seconds of {limit} "
                 f"({timedelta(seconds=limit)}), so the platform would stop the run first. Pass the timeout to "
-                "run(timeout=...), which raises the job's timeout before the run starts, or a shorter wait timeout."
+                "run(timeout=...) or start(timeout=...), which raise the job's timeout before the run starts, or a "
+                "shorter wait timeout."
             )
 
     def _wait(
@@ -318,40 +346,121 @@ class EphemeralJob:
         item: pytest.Item,
         first: jobs.Run | None = None,
         first_at: float = 0.0,
+        stop_after: timedelta | None = None,
     ) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
-        """Poll the run until it terminates, starting from `first`, the poll that `start()` made at `first_at`."""
-        ws = self.lakeflow.ws
+        """Poll the run until it terminates, starting from `first`, the poll that `start()` made at `first_at`.
+
+        With `stop_after`, the run is cancelled once `stop_after` has passed since `first_at` and polled until it
+        terminates. When `timeout` expires first, the run is cancelled, unless `stop_after` already did that, reported
+        with `--lakeflow-report-dir`, and `LakeflowTimeout` is raised.
+        """
         deadline = time.monotonic() + timeout.total_seconds()
-        interval = POLL_SECONDS
-        if self.lakeflow.poll_interval is not None:
-            interval = self.lakeflow.poll_interval.total_seconds()
-        logged: LoggedStates = {}
-        outputs: dict[int, jobs.RunOutput] = {}
-        progress = item.stash.setdefault(PROGRESS, [])
-        run = first
-        if run is None:
-            run = ws.jobs.get_run(run_id)
+        stop_at = None
+        if stop_after is not None:
+            stop_at = first_at + stop_after.total_seconds()
         # A snapshot older than one poll interval is polled again at once, without a sleep or the deadline check, so
         # a wait() long after start() neither sleeps on it nor times out a run that has finished since.
-        stale = first is not None and time.monotonic() - first_at >= interval
-        while True:
-            self._record_url(run_id, run, item)
-            self._log_progress(run, logged, outputs, progress)
-            if _terminated(run):
-                return run, outputs
-            if not stale:
-                self._check_deadline(run_id, run, timeout, deadline)
-                time.sleep(interval)
-            stale = False
-            run = ws.jobs.get_run(run_id)
-
-    def _check_deadline(self, run_id: int, run: jobs.Run, timeout: timedelta, deadline: float) -> None:
-        if time.monotonic() < deadline:
-            return
-        self._cancel(run_id)
-        raise LakeflowTimeout(
+        stale = first is not None and time.monotonic() - first_at >= self._poll_interval()
+        polling = _Polling(run_id, item)
+        run = self._poll(polling, deadline, first, stale, stop_at)
+        if _terminated(run):
+            return run, polling.outputs
+        if not polling.cancelled:
+            cancel_run(self.lakeflow.ws, run_id)
+        self._forget(run_id)
+        message = (
             f"Run {run_id} of {self.job_key!r} did not finish within {timeout} and was cancelled: "
             f"{run.run_page_url}\nTasks when cancelled: {_task_states(run)}"
+        )
+        self._report_cancelled(polling)
+        raise LakeflowTimeout(message)
+
+    def _poll(
+        self,
+        polling: _Polling,
+        deadline: float,
+        first: jobs.Run | None = None,
+        stale: bool = False,
+        stop_at: float | None = None,
+    ) -> jobs.Run:
+        """Poll the run until it terminates or `deadline` passes, and return the last snapshot.
+
+        The run is cancelled once `stop_at` passes, and polled on until it terminates. Like the deadline, `stop_at` is
+        checked only after a fresh poll, so a `stale` snapshot is polled again first.
+        """
+        ws = self.lakeflow.ws
+        interval = self._poll_interval()
+        progress = polling.item.stash.setdefault(PROGRESS, [])
+        run = first
+        if run is None:
+            run = ws.jobs.get_run(polling.run_id)
+        while True:
+            self._record_url(polling.run_id, run, polling.item)
+            self._log_progress(run, polling.logged, polling.outputs, progress)
+            if _terminated(run):
+                return run
+            if not stale:
+                now = time.monotonic()
+                if stop_at is not None and now >= stop_at and not polling.cancelled:
+                    # The run stays active until it has terminated, so a job that closes meanwhile still cancels it.
+                    cancel_run(ws, polling.run_id)
+                    polling.cancelled = True
+                if now >= deadline:
+                    return run
+                time.sleep(interval)
+            stale = False
+            run = ws.jobs.get_run(polling.run_id)
+
+    def _poll_interval(self) -> float:
+        if self.lakeflow.poll_interval is not None:
+            return self.lakeflow.poll_interval.total_seconds()
+        return POLL_SECONDS
+
+    def _report_cancelled(self, polling: _Polling) -> None:
+        """List a run the plugin cancelled in the report.json of the test that started it, with `--lakeflow-report-dir`.
+
+        The run is neither appended to `runs` nor passed to `run_finished`.
+        """
+        if session.current().report_dir is None:
+            return
+        try:
+            result = self._read_cancelled(polling)
+        # The report never stops the job from being deleted, nor hides the LakeflowTimeout about to be raised.
+        except Exception as e:
+            log.warning("Could not read cancelled run %s of %r for the report: %s", polling.run_id, self.job_key, e)
+            return
+        if result is not None:
+            polling.item.stash.setdefault(RUNS, []).append((self, result))
+
+    def _read_cancelled(self, polling: _Polling) -> JobRun | None:
+        """Poll a cancelled run until it terminates, for at most the grace period, and build its `JobRun`."""
+        run = self._poll(polling, time.monotonic() + TIMEOUT_GRACE_SECONDS)
+        if _terminated(run):
+            return self._job_run(run, polling.outputs)
+        log.warning(
+            "Run %s of %r had not ended %s seconds after it was cancelled, so report.json does not list it: %s",
+            polling.run_id,
+            self.job_key,
+            TIMEOUT_GRACE_SECONDS,
+            run.run_page_url,
+        )
+        return None
+
+    def _job_run(self, run: jobs.Run, outputs: Mapping[int, jobs.RunOutput]) -> JobRun:
+        """Build the `JobRun` of a terminated run of this job, from the task outputs read while polling."""
+        assert self.job_id is not None
+        disabled = {task.task_key for task in self.settings.tasks or [] if task.disabled and task.task_key}
+        return build_job_run(
+            self.lakeflow.ws,
+            run,
+            job_key=self.job_key,
+            job_id=self.job_id,
+            stubs=self.stubs,
+            capture_task_values=self.capture_task_values,
+            disabled=disabled,
+            outputs=outputs,
+            job_keys=self.lakeflow._job_keys(),
+            notebook_export=self.lakeflow.notebook_export,
         )
 
     def _record_url(self, run_id: int, run: jobs.Run, item: pytest.Item) -> None:
@@ -389,6 +498,9 @@ class EphemeralJob:
     def close(self, failed: bool = False) -> None:
         """Cancel active runs, then delete the job unless the keep rules say to keep it.
 
+        With `--lakeflow-report-dir`, each cancelled run is polled until it has ended, for at most 60 seconds, and
+        listed in the report.json of the test that started it.
+
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.
         """
@@ -396,7 +508,9 @@ class EphemeralJob:
             return
         self._closed = True
         for run_id in sorted(self._active):
+            item = self._active[run_id]
             self._cancel(run_id)
+            self._report_cancelled(_Polling(run_id, item))
         if self.job_id is None:
             return
         state = session.current()
@@ -419,7 +533,7 @@ class EphemeralJob:
         self._forget(run_id)
 
     def _forget(self, run_id: int) -> None:
-        self._active.discard(run_id)
+        self._active.pop(run_id, None)
         self.lakeflow.active_runs.discard(run_id)
 
 
@@ -431,12 +545,15 @@ class RunHandle:
         run_id: The run's id.
     """
 
-    def __init__(self, job: EphemeralJob, run_id: int, item: pytest.Item, first: jobs.Run) -> None:
+    def __init__(
+        self, job: EphemeralJob, run_id: int, item: pytest.Item, first: jobs.Run, timeout: timedelta | None = None
+    ) -> None:
         self.job = job
         self.run_id = run_id
         self._item = item
         self._first = first
         self._first_at = time.monotonic()
+        self._timeout = timeout
         self._result: JobRun | None = None
 
     @property
@@ -444,22 +561,27 @@ class RunHandle:
         """The run's page in the workspace, or `None` if the workspace has not reported it yet."""
         return self.job._run_urls.get(self.run_id)
 
-    def wait(self, timeout: timedelta | None = None) -> JobRun:
+    def wait(self, timeout: timedelta | None = None, *, stop_after: timedelta | None = None) -> JobRun:
         """Wait for the run to finish.
 
         Waiting again returns the same `JobRun`, and `run_finished` is called only the first time.
 
         Args:
-            timeout: How long to wait from this call. Defaults to `Lakeflow`'s `timeout`. It must not be longer than
-                the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets. The run has already started, so
-                pass a longer timeout to `run()`, which raises `timeout_seconds` first.
+            timeout: How long to wait from this call. Defaults to the `timeout` passed to `start()`, else
+                `Lakeflow`'s `timeout`. It must not be longer than the job's `timeout_seconds`, which `Lakeflow`'s
+                `timeout` sets. The run has already started, so pass a longer timeout to `start()` or `run()`, which
+                raise `timeout_seconds` first.
+            stop_after: How long the run may go on before it is cancelled, counted from `start()`, for a job that does
+                not end on its own. The run is then polled until it has ended and returned as a `JobRun` whose
+                `cancelled` is true, instead of raising. It must not be longer than `timeout`.
 
         Returns:
             The run's outcome, which is also appended to the job's `runs`.
 
         Raises:
-            LakeflowError: If the job closed before the run finished, which cancelled the run, or `timeout` is longer
-                than the job's `timeout_seconds`.
+            LakeflowError: If the job closed before the run finished, which cancelled the run, `timeout` is longer
+                than the job's `timeout_seconds`, or `stop_after` is longer than `timeout`. In the last two cases the
+                run goes on.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
         """
         if self._result is not None:
@@ -467,28 +589,19 @@ class RunHandle:
         job = self.job
         if job._closed:
             raise LakeflowError(f"The ephemeral job for {job.job_key!r} has already been closed")
-        if timeout is None:
-            timeout = job.lakeflow.timeout
-        else:
+        if timeout is not None:
             job._check_timeout(timeout)
+        elif self._timeout is not None:
+            timeout = self._timeout
+        else:
+            timeout = job.lakeflow.timeout
+        if stop_after is not None:
+            _check_stop_after(job.job_key, stop_after, timeout)
         first = self._first
         self._first = None
-        run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at)
+        run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at, stop_after)
         job._forget(self.run_id)
-        assert job.job_id is not None
-        disabled = {task.task_key for task in job.settings.tasks or [] if task.disabled and task.task_key}
-        result = build_job_run(
-            job.lakeflow.ws,
-            run,
-            job_key=job.job_key,
-            job_id=job.job_id,
-            stubs=job.stubs,
-            capture_task_values=job.capture_task_values,
-            disabled=disabled,
-            outputs=outputs,
-            job_keys=job.lakeflow._job_keys(),
-            notebook_export=job.lakeflow.notebook_export,
-        )
+        result = job._job_run(run, outputs)
         self._result = result
         job.runs.append(result)
         # Held on the test only for --lakeflow-report-dir, because a run can carry megabytes of logs and notebooks.
@@ -512,6 +625,14 @@ def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
         log.info("Cancelled run %s", run_id)
     except DatabricksError as e:
         log.warning("Could not cancel run %s: %s", run_id, e)
+
+
+def _check_stop_after(job_key: str, stop_after: timedelta, timeout: timedelta) -> None:
+    if stop_after > timeout:
+        raise LakeflowError(
+            f"stop_after={stop_after} of {job_key!r} is longer than its timeout of {timeout}, so the run would time "
+            "out before it is stopped. Pass a longer timeout or a shorter stop_after."
+        )
 
 
 def _performance_target(value: jobs.PerformanceTarget | str | None) -> jobs.PerformanceTarget | None:

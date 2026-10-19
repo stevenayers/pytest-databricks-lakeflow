@@ -137,11 +137,12 @@ def lakeflow() -> Lakeflow:
 
 ## Run it
 
-`job.run(params=None, only=None, timeout=None, *, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run, waits for it to finish, and returns a `JobRun`.
+`job.run(params=None, only=None, timeout=None, *, stop_after=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run, waits for it to finish, and returns a `JobRun`.
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
 - `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. When `timeout` plus 60 seconds is longer than the job's `timeout_seconds`, `run()` first lengthens it to that with `jobs.update` and logs the change, as a warning when the shorter value came from the template or `modify_settings`. Later runs with the same or a shorter timeout make no update.
+- `stop_after`, keyword only, is a `timedelta` for a job that does not end on its own, such as a streaming job. That long after the run started, the run is cancelled, polled until it has ended, and returned as a `JobRun` whose `cancelled` is true, instead of raising. `timeout` still applies: a run that has not ended by then raises `LakeflowTimeout`, and a `stop_after` longer than `timeout` raises `LakeflowError` before the run starts. See [Stop a run that does not end](#stop-a-run-that-does-not-end).
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
 - `full_refresh`, `full_refresh_selection` and `refresh_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
@@ -161,14 +162,31 @@ def test_run_twice_in_one_job(lakeflow: Lakeflow) -> None:
 
 The copy allows one run at a time. `job.runs` holds every finished `JobRun`, and `job.job_id` and `job.url` identify the job in the workspace.
 
-When the timeout expires, the `LakeflowTimeout` message names the run and its page, and ends with the state of each task when the run was cancelled, such as `Tasks when cancelled: extract SUCCESS, transform RUNNING, load PENDING`.
+When the timeout expires, the `LakeflowTimeout` message names the run and its page, and ends with the state of each task when the run was cancelled, such as `Tasks when cancelled: extract SUCCESS, transform RUNNING, load PENDING`. With [`--lakeflow-report-dir`](configuration.md#report-directory), the cancelled run is still listed in the test's `report.json`.
+
+### Stop a run that does not end
+
+A streaming job, or any job whose task never returns, ends only when something stops it. Pass `stop_after` to stop it after a fixed time and still get its outcome:
+
+```python
+def test_streaming_job_stops_after(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema, lakeflow.job("streaming_job", params={"schema": schema}) as job:
+        run = job.run(stop_after=timedelta(minutes=3))
+        assert run.cancelled
+        assert run.result_state == "CANCELED"
+        assert not run.task("stream").ran
+```
+
+`stop_after` counts from the start of the run, as `timeout` does for `run()`. Once it has passed, the plugin calls `cancel_run` once and keeps polling until the run has ended, which takes a few seconds; `timeout` still bounds the whole wait. The `JobRun` is appended to `job.runs` and passed to `run_finished` like any other. A cancelled run has `cancelled` true and, because its tasks did not succeed, `failed` true as well, so assert on `cancelled` and on the data the job wrote rather than on `succeeded`. Its cancelled tasks have `ran` false and no `error`, `output` or `logs`.
 
 ### Start a run without waiting
 
-`job.start(params=None, only=None, *, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run()` is `start()` followed by `wait()`.
+`job.start(params=None, only=None, *, timeout=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run(params, only, timeout, stop_after=..., ...)` is `start(params, only, timeout=timeout, ...)` followed by `wait(stop_after=...)`.
+
+- `timeout`, keyword only, is the default timeout of `handle.wait()`. As for `run()`, when it plus 60 seconds is longer than the job's `timeout_seconds`, `start()` first lengthens the job's `timeout_seconds` with `jobs.update`, before the run starts.
 
 - `handle.run_id` is the run's id, `handle.job` the `EphemeralJob`, and `handle.url` the run's page, known as soon as `start()` returns. The page is recorded in the test's report even if the test never waits.
-- `handle.wait(timeout=None)` waits for the run to finish and returns its `JobRun`, which is also appended to `job.runs`. `timeout` counts from the call to `wait()`. The run has already started, so a `timeout` longer than the job's `timeout_seconds` raises `LakeflowError`; pass a longer timeout to `run()`, which lengthens the job's `timeout_seconds` before the run starts. Waiting again returns the same `JobRun`, and `run_finished` is called once. Waiting after the job was closed raises `LakeflowError`, because closing the job cancelled the run.
+- `handle.wait(timeout=None, *, stop_after=None)` waits for the run to finish and returns its `JobRun`, which is also appended to `job.runs`. `timeout` counts from the call to `wait()` and defaults to the `timeout` passed to `start()`, else `Lakeflow`'s `timeout`. The run has already started, so a `timeout` longer than the job's `timeout_seconds` raises `LakeflowError`; pass a longer timeout to `start()` or `run()`, which lengthen the job's `timeout_seconds` before the run starts. `stop_after` works as for `run()` and counts from `start()`; one longer than the wait's `timeout` raises `LakeflowError` and leaves the run going. Waiting again returns the same `JobRun`, and `run_finished` is called once. Waiting after the job was closed raises `LakeflowError`, because closing the job cancelled the run.
 - `handle.cancel()` cancels the run. A later `wait()` returns it as a `JobRun` that ended `CANCELED`.
 
 Each copy allows one run at a time, so start runs of different copies to run them side by side:
@@ -179,14 +197,14 @@ def test_start_two_jobs_and_wait(lakeflow: Lakeflow) -> None:
     hi = lakeflow.job("my_example_job", params={"param1": "hi", "param2": "there"})
     with hello, hi:
         first = hello.start()
-        second = hi.start()
+        second = hi.start(timeout=timedelta(hours=1))
         first_run = first.wait()
-        second_run = second.wait(timeout=timedelta(minutes=10))
+        second_run = second.wait()
         assert first_run.succeeded and second_run.succeeded
         assert second_run.task("transform").output == "hi there"
 ```
 
-A run that is still active when its job closes, at the end of the `with` block or of the test, is cancelled, and so is one still active at the end of the session.
+A run that is still active when its job closes, at the end of the `with` block or of the test, is cancelled, and so is one still active at the end of the session. With [`--lakeflow-report-dir`](configuration.md#report-directory), a run cancelled when its job closes is listed in the test's `report.json` once it has ended.
 
 ## Assert on the result
 
@@ -233,6 +251,8 @@ def test_alert_triggers_and_child_job_runs(lakeflow: Lakeflow) -> None:
 ```
 
 `run.timed_out` is true when the parent run ended `TIMEDOUT` or any task in `run.tasks` timed out. Such a run has failed, and `repr(run)` lists a timed-out task without an error as `load: TIMEDOUT`.
+
+`run.cancelled` is true when the parent run ended `CANCELED`, as a run stopped by [`stop_after`](#stop-a-run-that-does-not-end) or cancelled with `handle.cancel()` does. Such a run has failed too.
 
 A failure test reads like this:
 
