@@ -1,0 +1,12 @@
+resources:
+  jobs:
+    retrying_job:
+      name: retrying_job
+      description: A job whose only task always fails and retries once, for the attempts integration tests.
+      tasks:
+        - task_key: flaky
+          max_retries: 1
+          min_retry_interval_millis: 1000
+          retry_on_timeout: false
+          notebook_task:
+            notebook_path: ../src/notebooks/flaky.py
