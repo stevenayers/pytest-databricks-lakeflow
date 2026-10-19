@@ -60,9 +60,10 @@ class BundleKey:
             self.sync,
             self.helpers_path,
             self.variables,
-            list(self.deploy_flags),
+            self.deploy_flags,
         ]
-        return f"lakeflow_{hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:16]}.json"
+        digest = hashlib.sha256(json.dumps(fields).encode()).hexdigest()
+        return f"lakeflow_{digest[:16]}.json"
 
 
 @dataclass(eq=False)
@@ -141,25 +142,7 @@ class SessionState:
             LakeflowError: If setting it up failed earlier in this session.
         """
         if key not in self.setups:
-            path = None if self.state_dir is None else self.state_dir / key.file_name()
-            produced = False
-
-            def produce() -> dict[str, Any]:
-                nonlocal produced
-                produced = True
-                return setup(ws, key)
-
-            try:
-                produced_state = shared_state(path, produce)
-            except Exception as e:
-                self.setups[key] = e
-                raise
-            self.setups[key] = produced_state
-            if key.sync == "deploy":
-                self.deployed.append((str(key.root), key.target, key.profile, key.variables))
-            if produced and self.sweep and not self.swept:
-                self.swept = True
-                sweep(ws, self.run_id, sweep_hours, user=produced_state.get("user"))
+            self._set_up(key, ws, sweep_hours)
         state = self.setups[key]
         if isinstance(state, Exception):
             raise LakeflowError(
@@ -167,6 +150,27 @@ class SessionState:
                 f"{type(state).__name__}: {state}"
             )
         return state
+
+    def _set_up(self, key: BundleKey, ws: WorkspaceClient, sweep_hours: float) -> None:
+        path = None if self.state_dir is None else self.state_dir / key.file_name()
+        produced_here = False
+
+        def produce() -> dict[str, Any]:
+            nonlocal produced_here
+            produced_here = True
+            return setup(ws, key)
+
+        try:
+            state = shared_state(path, produce)
+        except Exception as e:
+            self.setups[key] = e
+            raise
+        self.setups[key] = state
+        if key.sync == "deploy":
+            self.deployed.append((str(key.root), key.target, key.profile, key.variables))
+        if produced_here and self.sweep and not self.swept:
+            self.swept = True
+            sweep(ws, self.run_id, sweep_hours, user=state.get("user"))
 
 
 _sessions: list[SessionState] = []
@@ -202,22 +206,20 @@ def make_workspace_client(profile: str | None) -> WorkspaceClient:
     Returns:
         The client.
     """
-    for attempt in range(1, CLIENT_ATTEMPTS):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return WorkspaceClient(profile=profile)
         except ValueError as e:
-            if "cannot get access token" not in str(e):
+            if "cannot get access token" not in str(e) or attempt == CLIENT_ATTEMPTS:
                 raise
             log.info("Retrying workspace client after: %s", e)
             time.sleep(2**attempt)
-    return WorkspaceClient(profile=profile)
 
 
 def resolve_run_id() -> str:
-    for name in RUN_ID_VARIABLES:
-        if value := os.environ.get(name):
-            return value
-    return secrets.token_hex(4)
+    return _first_set(RUN_ID_VARIABLES) or secrets.token_hex(4)
 
 
 def resolve_attribution(rootpath: Path) -> dict[str, str]:
@@ -232,25 +234,33 @@ def resolve_attribution(rootpath: Path) -> dict[str, str]:
     Returns:
         The `pytest_ci_url`, `pytest_git_sha`, `pytest_git_branch` and `pytest_user` tags that have a value.
     """
-    env = os.environ
-    ci_url = None
-    if all(env.get(name) for name in GITHUB_URL_VARIABLES):
-        server, repository, run_id = (env[name] for name in GITHUB_URL_VARIABLES)
-        ci_url = f"{server.rstrip('/')}/{repository}/actions/runs/{run_id}"
-    elif all(env.get(name) for name in AZURE_DEVOPS_URL_VARIABLES):
-        collection, project, build_id = (env[name] for name in AZURE_DEVOPS_URL_VARIABLES)
-        ci_url = f"{collection}{urllib.parse.quote(project)}/_build/results?buildId={build_id}"
     attribution = {
-        "pytest_ci_url": ci_url,
-        "pytest_git_sha": _first(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
-        "pytest_git_branch": _first(BRANCH_VARIABLES) or _git_branch(rootpath),
-        "pytest_user": _first(USER_VARIABLES),
+        "pytest_ci_url": _ci_url(),
+        "pytest_git_sha": _first_set(SHA_VARIABLES) or _git(rootpath, "rev-parse", "HEAD"),
+        "pytest_git_branch": _first_set(BRANCH_VARIABLES) or _git_branch(rootpath),
+        "pytest_user": _first_set(USER_VARIABLES),
     }
     return {key: value for key, value in attribution.items() if value}
 
 
-def _first(names: tuple[str, ...]) -> str | None:
-    return next((value for name in names if (value := os.environ.get(name))), None)
+def _ci_url() -> str | None:
+    env = os.environ
+    if all(env.get(name) for name in GITHUB_URL_VARIABLES):
+        server, repository, run_id = (env[name] for name in GITHUB_URL_VARIABLES)
+        return f"{server.rstrip('/')}/{repository}/actions/runs/{run_id}"
+    if all(env.get(name) for name in AZURE_DEVOPS_URL_VARIABLES):
+        collection, project, build_id = (env[name] for name in AZURE_DEVOPS_URL_VARIABLES)
+        return f"{collection}{urllib.parse.quote(project)}/_build/results?buildId={build_id}"
+    return None
+
+
+def _first_set(names: tuple[str, ...]) -> str | None:
+    """The value of the first of `names` that is set to a non-empty string in the environment."""
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 def _git_branch(cwd: Path) -> str | None:
@@ -340,27 +350,33 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     if key.sync == "deploy":
         bundle.deploy(root, key.target, key.profile, variables, flags=key.deploy_flags)
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
-        check_host(key.target, (bundle_summary.get("workspace") or {}).get("host"), ws.config.host)
+        check_host(key.target, _workspace_host(bundle_summary), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
-        job_ids = bundle.job_ids(bundle_summary)[0]
+        job_ids, _ = bundle.job_ids(bundle_summary)
     else:
         if key.sync == "sync":
             bundle.sync(root, key.target, key.profile, variables)
         config = bundle.validate(root, key.target, key.profile, variables)
-        check_host(key.target, (config.get("workspace") or {}).get("host"), ws.config.host)
+        check_host(key.target, _workspace_host(config), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
         job_ids = {}
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
-    state = {
+    helper_paths = helpers.upload(ws, folder)
+    log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
+    return {
         "templates": templates,
         "template_errors": errors,
-        "helpers": helpers.upload(ws, folder),
+        "helpers": helper_paths,
         "user": user,
         "job_ids": job_ids,
     }
-    log.info("Loaded %d job templates from %s; helpers in %s", len(templates), root, folder)
-    return state
+
+
+def _workspace_host(config: Mapping[str, Any]) -> str | None:
+    # `bundle summary` and `bundle validate` can print "workspace": null rather than an object.
+    workspace = config.get("workspace") or {}
+    return workspace.get("host")
 
 
 def check_host(target: str, bundle_host: str | None, client_host: str | None) -> None:
@@ -376,7 +392,9 @@ def check_host(target: str, bundle_host: str | None, client_host: str | None) ->
     Raises:
         LakeflowError: If the hosts differ.
     """
-    if not bundle_host or not client_host or _netloc(bundle_host) == _netloc(client_host):
+    if not bundle_host or not client_host:
+        return
+    if _netloc(bundle_host) == _netloc(client_host):
         return
     raise LakeflowError(
         f"Bundle target {target!r} deploys to {bundle_host} but the workspace client is for {client_host}. "
@@ -446,12 +464,12 @@ def sweep(ws: WorkspaceClient, run_id: str, hours: float, user: str | None = Non
         The ids of the deleted jobs.
     """
     me = user or ws.current_user.me().user_name
-    cutoff = (time.time() - hours * 3600) * 1000
-    stale = [
-        job.job_id
-        for job in ws.jobs.list(limit=100)
-        if job.job_id is not None and job.creator_user_name == me and _stale(job, run_id, cutoff)
-    ]
+    cutoff_ms = (time.time() - hours * 3600) * 1000
+    # Listing finishes before the first delete, so deleting does not disturb the paging.
+    stale: list[int] = []
+    for job in ws.jobs.list(limit=100):
+        if job.job_id is not None and _is_stale(job, me, run_id, cutoff_ms):
+            stale.append(job.job_id)
     deleted = []
     for job_id in stale:
         try:
@@ -464,7 +482,13 @@ def sweep(ws: WorkspaceClient, run_id: str, hours: float, user: str | None = Non
     return deleted
 
 
-def _stale(job: jobs.BaseJob, run_id: str, cutoff_ms: float) -> bool:
+def _is_stale(job: jobs.BaseJob, user: str | None, run_id: str, cutoff_ms: float) -> bool:
+    """Whether `job` is an ephemeral job of `user` from another run, created before `cutoff_ms`."""
+    if job.creator_user_name != user:
+        return False
     tags = (job.settings.tags if job.settings else None) or {}
-    other_run = tags.get("pytest_run_id", run_id) != run_id
-    return "pytest" in tags and other_run and (job.created_time or 0) < cutoff_ms
+    if "pytest" not in tags or "pytest_run_id" not in tags:
+        return False
+    if tags["pytest_run_id"] == run_id:
+        return False
+    return (job.created_time or 0) < cutoff_ms
