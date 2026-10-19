@@ -55,9 +55,9 @@ LoggedStates = dict[tuple[str, int], tuple[str, bool]]
 class EphemeralJob:
     """A throwaway copy of a bundle job.
 
-    The job is created on entering the `with` block, or by the first `run()` when used without `with`. It is
-    deleted on leaving the block, or at the end of the test that made it, unless `keep` is set or the test failed
-    and `keep_failed` is on.
+    The job is created on entering the `with` block, or by the first `run()` or `start()` when used without `with`.
+    It is deleted on leaving the block, or at the end of the test that made it, unless `keep` is set or the test
+    failed and `keep_failed` is on. Runs that are still active then are cancelled first.
 
     Attributes:
         lakeflow: The `Lakeflow` that made the job.
@@ -174,6 +174,56 @@ class EphemeralJob:
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
+        self.create()
+        if timeout is not None:
+            # Checked before the run starts, so a timeout that is too long never leaves a run behind.
+            self._check_timeout(timeout)
+        handle = self.start(
+            params,
+            only,
+            performance_target=performance_target,
+            queue=queue,
+            full_refresh=full_refresh,
+            full_refresh_selection=full_refresh_selection,
+            refresh_selection=refresh_selection,
+        )
+        return handle.wait(timeout)
+
+    def start(
+        self,
+        params: Mapping[str, str] | None = None,
+        only: Sequence[str] | None = None,
+        *,
+        performance_target: jobs.PerformanceTarget | str | None = None,
+        queue: bool | None = None,
+        full_refresh: bool | None = None,
+        full_refresh_selection: Sequence[str] | None = None,
+        refresh_selection: Sequence[str] | None = None,
+    ) -> RunHandle:
+        """Start a run of the job without waiting for it, creating the job first if needed.
+
+        The run is cancelled when the job closes, unless `RunHandle.wait()` has returned by then. Its page is
+        recorded in the test's report straight away, so a run that is never waited for still appears there. The
+        job allows one run at a time, so start runs of different jobs to run them side by side.
+
+        Args:
+            params: Job parameters for this run only, as for `run()`.
+            only: Task keys to run, as for `run()`.
+            performance_target: The performance target of this run only, as for `run()`.
+            queue: Whether this run may queue behind other runs, as for `run()`.
+            full_refresh: Whether the job's pipeline tasks run a full refresh in this run, as for `run()`.
+            full_refresh_selection: Tables that the job's pipeline tasks fully refresh in this run, as for `run()`.
+            refresh_selection: Tables that the job's pipeline tasks refresh in this run, as for `run()`.
+
+        Returns:
+            A handle to wait for the run or cancel it.
+
+        Raises:
+            LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
+                task, a pipeline refresh option is set and the job has no pipeline task, or a selection is set and
+                the installed databricks-sdk cannot send it.
+            ValueError: If `performance_target` is not a known performance target.
+        """
         target = None if performance_target is None else jobs.PerformanceTarget(performance_target)
         queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
@@ -187,10 +237,6 @@ class EphemeralJob:
             full_refresh_selection=full_refresh_selection,
             refresh_selection=refresh_selection,
         )
-        if timeout is None:
-            timeout = self.lakeflow.timeout
-        else:
-            self._check_timeout(timeout)
         merged = {**self.params, **run_params}
         selected = select(self.settings, only, self.stubs) if only else None
         ws = self.lakeflow.ws
@@ -210,28 +256,9 @@ class EphemeralJob:
         self.lakeflow.active_runs.add(run_id)
         log.info("Started run %s of job %s", run_id, self.job_id)
         log.debug("Run %s was started with idempotency token %s", run_id, token)
-        run, outputs = self._wait(run_id, timeout, item)
-        self._forget(run_id)
-        disabled = {task.task_key for task in self.settings.tasks or [] if task.disabled and task.task_key}
-        result = build_job_run(
-            ws,
-            run,
-            job_key=self.job_key,
-            job_id=self.job_id,
-            stubs=self.stubs,
-            capture_task_values=self.capture_task_values,
-            disabled=disabled,
-            outputs=outputs,
-            job_keys=self.lakeflow._job_keys(),
-            notebook_export=self.lakeflow.notebook_export,
-        )
-        self.runs.append(result)
-        _record_outcome(item, result)
-        log.info("Run %s finished %s in %s: %s", run_id, result.result_state, result.duration, result.run_url)
-        _warn_on_failed_teardown(result)
-        if self.lakeflow.run_finished is not None:
-            self.lakeflow.run_finished(result, item)
-        return result
+        first = ws.jobs.get_run(run_id)
+        self._record_url(run_id, first, item)
+        return RunHandle(self, run_id, item, first)
 
     def _check_timeout(self, timeout: timedelta) -> None:
         limit = self.settings.timeout_seconds
@@ -242,17 +269,23 @@ class EphemeralJob:
                 "Lakeflow(timeout=...), which sets the job's timeout, or a shorter run timeout."
             )
 
-    def _wait(self, run_id: int, timeout: timedelta, item: pytest.Item) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
+    def _wait(
+        self, run_id: int, timeout: timedelta, item: pytest.Item, first: jobs.Run | None = None
+    ) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
+        """Poll the run until it terminates, starting from `first`, the poll that `start()` made, when given."""
         ws = self.lakeflow.ws
         deadline = time.monotonic() + timeout.total_seconds()
+        interval = POLL_SECONDS
+        if self.lakeflow.poll_interval is not None:
+            interval = self.lakeflow.poll_interval.total_seconds()
         logged: LoggedStates = {}
         outputs: dict[int, jobs.RunOutput] = {}
         progress = item.stash.setdefault(PROGRESS, [])
-        while True:
+        run = first
+        if run is None:
             run = ws.jobs.get_run(run_id)
-            if run_id not in self._run_urls and run.run_page_url:
-                self._run_urls[run_id] = run.run_page_url
-                item.user_properties.append(("lakeflow_run_url", run.run_page_url))
+        while True:
+            self._record_url(run_id, run, item)
             self._log_progress(run, logged, outputs, progress)
             if _terminated(run):
                 return run, outputs
@@ -260,9 +293,16 @@ class EphemeralJob:
                 self._cancel(run_id)
                 raise LakeflowTimeout(
                     f"Run {run_id} of {self.job_key!r} did not finish within {timeout} and was cancelled: "
-                    f"{run.run_page_url}"
+                    f"{run.run_page_url}\nTasks when cancelled: {_task_states(run)}"
                 )
-            time.sleep(POLL_SECONDS)
+            time.sleep(interval)
+            run = ws.jobs.get_run(run_id)
+
+    def _record_url(self, run_id: int, run: jobs.Run, item: pytest.Item) -> None:
+        if run_id in self._run_urls or not run.run_page_url:
+            return
+        self._run_urls[run_id] = run.run_page_url
+        item.user_properties.append(("lakeflow_run_url", run.run_page_url))
 
     def _log_progress(
         self, run: jobs.Run, logged: LoggedStates, outputs: dict[int, jobs.RunOutput], progress: list[str]
@@ -325,6 +365,84 @@ class EphemeralJob:
     def _forget(self, run_id: int) -> None:
         self._active.discard(run_id)
         self.lakeflow.active_runs.discard(run_id)
+
+
+class RunHandle:
+    """A run started by `EphemeralJob.start()`, to wait for or cancel later.
+
+    Attributes:
+        job: The job the run belongs to.
+        run_id: The run's id.
+    """
+
+    def __init__(self, job: EphemeralJob, run_id: int, item: pytest.Item, first: jobs.Run) -> None:
+        self.job = job
+        self.run_id = run_id
+        self._item = item
+        self._first = first
+        self._result: JobRun | None = None
+
+    @property
+    def url(self) -> str | None:
+        """The run's page in the workspace, or `None` if the workspace has not reported it yet."""
+        return self.job._run_urls.get(self.run_id)
+
+    def wait(self, timeout: timedelta | None = None) -> JobRun:
+        """Wait for the run to finish.
+
+        Waiting again returns the same `JobRun`, and `run_finished` is called only the first time.
+
+        Args:
+            timeout: How long to wait from this call. Defaults to `Lakeflow`'s `timeout`. It must not be longer than
+                the job's `timeout_seconds`, which `Lakeflow`'s `timeout` sets.
+
+        Returns:
+            The run's outcome, which is also appended to the job's `runs`.
+
+        Raises:
+            LakeflowError: If the job closed before the run finished, which cancelled the run, or `timeout` is longer
+                than the job's `timeout_seconds`.
+            LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
+        """
+        if self._result is not None:
+            return self._result
+        job = self.job
+        if job._closed:
+            raise LakeflowError(f"The ephemeral job for {job.job_key!r} has already been closed")
+        if timeout is None:
+            timeout = job.lakeflow.timeout
+        else:
+            job._check_timeout(timeout)
+        first = self._first
+        self._first = None
+        run, outputs = job._wait(self.run_id, timeout, self._item, first)
+        job._forget(self.run_id)
+        assert job.job_id is not None
+        disabled = {task.task_key for task in job.settings.tasks or [] if task.disabled and task.task_key}
+        result = build_job_run(
+            job.lakeflow.ws,
+            run,
+            job_key=job.job_key,
+            job_id=job.job_id,
+            stubs=job.stubs,
+            capture_task_values=job.capture_task_values,
+            disabled=disabled,
+            outputs=outputs,
+            job_keys=job.lakeflow._job_keys(),
+            notebook_export=job.lakeflow.notebook_export,
+        )
+        self._result = result
+        job.runs.append(result)
+        _record_outcome(self._item, result)
+        log.info("Run %s finished %s in %s: %s", self.run_id, result.result_state, result.duration, result.run_url)
+        _warn_on_failed_teardown(result)
+        if job.lakeflow.run_finished is not None:
+            job.lakeflow.run_finished(result, self._item)
+        return result
+
+    def cancel(self) -> None:
+        """Cancel the run. It ends `CANCELED` shortly after, which a later `wait()` returns."""
+        self.job._cancel(self.run_id)
 
 
 def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
@@ -397,11 +515,26 @@ def _task_state(task: jobs.RunTask) -> tuple[str | None, bool]:
     return life_cycle.value, False
 
 
-def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jobs.RunOutput | None, done: bool) -> str:
-    """Describe a task run's change of state, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: x`."""
+def _task_states(run: jobs.Run) -> str:
+    """List each task run's state, such as `extract SUCCESS, transform RUNNING, load PENDING`."""
+    states = []
+    for task in run.tasks or []:
+        state, _ = _task_state(task)
+        states.append(f"{_label(task)} {state or '?'}")
+    return ", ".join(states) or "none"
+
+
+def _label(task: jobs.RunTask) -> str:
+    """Name a task run by its key, adding the attempt number of a retry."""
     label = task.task_key or "?"
     if task.attempt_number:
         label = f"{label} (attempt {task.attempt_number})"
+    return label
+
+
+def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jobs.RunOutput | None, done: bool) -> str:
+    """Describe a task run's change of state, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: x`."""
+    label = _label(task)
     line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
     if not done:
         return line

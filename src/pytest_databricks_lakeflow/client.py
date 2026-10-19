@@ -92,6 +92,7 @@ class Lakeflow:
             not allowed.
         timeout: The default timeout for one job run. Each job is also created with `timeout_seconds` set to this
             plus 60 seconds, unless the template has a smaller one, so the platform stops runs the plugin cannot.
+        poll_interval: How long to wait between two polls of a run that has not finished. Defaults to two seconds.
         catalog: The catalog in which `schema()` creates temporary schemas.
         helpers_path: The workspace folder for the helper notebooks. Defaults to
             `/Users/<you>/.pytest-databricks-lakeflow`.
@@ -145,6 +146,7 @@ class Lakeflow:
     variables: Mapping[str, str] | None = None
     deploy_flags: Sequence[str] = ()
     timeout: timedelta = timedelta(minutes=30)
+    poll_interval: timedelta | None = None
     catalog: str | None = None
     helpers_path: str | None = None
     helpers_compute: str | None = None

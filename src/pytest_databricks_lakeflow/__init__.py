@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pytest_databricks_lakeflow.client import Lakeflow
-from pytest_databricks_lakeflow.ephemeral import EphemeralJob
+from pytest_databricks_lakeflow.ephemeral import EphemeralJob, RunHandle
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError, LakeflowRunFailed, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
     JobRun,
@@ -26,6 +26,7 @@ __all__ = [
     "LakeflowTimeout",
     "NotebookCell",
     "NotebookView",
+    "RunHandle",
     "SqlResult",
     "TaskError",
     "TaskRun",

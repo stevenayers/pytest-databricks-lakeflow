@@ -130,6 +130,33 @@ def test_run_twice_in_one_job(lakeflow: Lakeflow) -> None:
 
 The copy allows one run at a time. `job.runs` holds every finished `JobRun`, and `job.job_id` and `job.url` identify the job in the workspace.
 
+When the timeout expires, the `LakeflowTimeout` message names the run and its page, and ends with the state of each task when the run was cancelled, such as `Tasks when cancelled: extract SUCCESS, transform RUNNING, load PENDING`.
+
+### Start a run without waiting
+
+`job.start(params=None, only=None, *, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run the way `run()` does and returns a `RunHandle` straight away, so one test can drive several jobs at once. `run()` is `start()` followed by `wait()`.
+
+- `handle.run_id` is the run's id, `handle.job` the `EphemeralJob`, and `handle.url` the run's page, known as soon as `start()` returns. The page is recorded in the test's report even if the test never waits.
+- `handle.wait(timeout=None)` waits for the run to finish and returns its `JobRun`, which is also appended to `job.runs`. `timeout` counts from the call to `wait()` and follows the same rules as `run()`'s. Waiting again returns the same `JobRun`, and `run_finished` is called once. Waiting after the job was closed raises `LakeflowError`, because closing the job cancelled the run.
+- `handle.cancel()` cancels the run. A later `wait()` returns it as a `JobRun` that ended `CANCELED`.
+
+Each copy allows one run at a time, so start runs of different copies to run them side by side:
+
+```python
+def test_start_two_jobs_and_wait(lakeflow: Lakeflow) -> None:
+    hello = lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"})
+    hi = lakeflow.job("my_example_job", params={"param1": "hi", "param2": "there"})
+    with hello, hi:
+        first = hello.start()
+        second = hi.start()
+        first_run = first.wait()
+        second_run = second.wait(timeout=timedelta(minutes=10))
+        assert first_run.succeeded and second_run.succeeded
+        assert second_run.task("transform").output == "hi there"
+```
+
+A run that is still active when its job closes, at the end of the `with` block or of the test, is cancelled, and so is one still active at the end of the session.
+
 ## Assert on the result
 
 `run.succeeded` is true only if every one of your tasks that was part of the run ended `SUCCESS`. Tasks the plugin injected do not count, nor do tasks that were `EXCLUDED` because their `run_if` or if/else condition was not met. `run.failed` is `not run.succeeded`.

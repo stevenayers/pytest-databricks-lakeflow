@@ -16,6 +16,7 @@ All arguments are keyword-only.
 | `variables` | `None` | Bundle variables as a mapping of name to value, passed as `--var name=value`, sorted by name, to every `bundle deploy`, `summary`, `validate`, `sync` and `destroy` call. Two `Lakeflow` instances for the same target with different variables are set up, and deployed, separately. See [Bundle targets and variables](#bundle-targets-and-variables). |
 | `deploy_flags` | `()` | Extra flags for `databricks bundle deploy`, added at the end of the command, such as `["--fail-on-active-runs"]`. Used only when `sync` is `deploy`. `Lakeflow` instances with different flags deploy separately. `-t`, `--target`, `-e`, `--environment`, `-p`, `--profile`, `--var` and `--auto-approve` raise `ValueError`: use `target`, `profile` or `variables` instead. See [isolating test deployments](how-it-works.md#isolating-test-deployments). |
 | `timeout` | 30 minutes | The default `timedelta` to wait for one run. Each job is created with `timeout_seconds` equal to this timeout plus 60 seconds, so the platform stops a run that the plugin can no longer cancel, for example after the pytest process was killed. A template with a smaller `timeout_seconds` keeps it. |
+| `poll_interval` | two seconds | The `timedelta` to wait between two polls of a run that has not finished. A longer interval makes fewer `get_run` calls; a shorter one notices a finished run sooner. |
 | `catalog` | `None` | The catalog in which `schema()` creates temporary schemas. |
 | `helpers_path` | `/Users/<you>/.pytest-databricks-lakeflow` | The workspace folder for the two helper notebooks. |
 | `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for stub, probe, setup and teardown tasks, for workspaces without serverless. |
@@ -36,7 +37,7 @@ All arguments are keyword-only.
 | `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, instead of the `UserWarning` the plugin emits once per session. Later lookups fail with the same message. See [Limitations](limitations.md). |
 | `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. See [Permissions](#permissions). |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
-| `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes. |
+| `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes, once per run however often `RunHandle.wait()` is called. |
 
 Test-only packages are set per test rather than on `Lakeflow`: pass `extra_dependencies` to `lakeflow.job()` or `lakeflow.task()`, see [Test-only dependencies](job-tests.md#test-only-dependencies).
 
@@ -142,7 +143,7 @@ The entries go to `jobs.create` unchanged, so they take `user_name`, `group_name
 
 The plugin logs to the `pytest_databricks_lakeflow` logger: INFO when it deploys, creates a job, starts and finishes a run, and deletes a job or drops a schema; WARNING when it keeps something or a cleanup call fails. Show the INFO lines with `pytest --log-cli-level=INFO`.
 
-While `run()` waits, every poll logs a line at INFO for each task run whose state changed, the plugin's stub, probe, setup and teardown tasks included. A task run seen for the first time logs its state on its own; a later change logs the old and new state. The state is the V2 lifecycle state, such as `PENDING`, `QUEUED` or `RUNNING`, until the task run terminates, and its result state after that. A terminated task run adds its duration and the first line of its error, if it reported one:
+While `run()` or `RunHandle.wait()` waits, every poll logs a line at INFO for each task run whose state changed, the plugin's stub, probe, setup and teardown tasks included. A task run seen for the first time logs its state on its own; a later change logs the old and new state. The state is the V2 lifecycle state, such as `PENDING`, `QUEUED` or `RUNNING`, until the task run terminates, and its result state after that. A terminated task run adds its duration and the first line of its error, if it reported one:
 
 ```text
 extract: PENDING
@@ -160,7 +161,7 @@ Each test's job and run coordinates are appended to `item.user_properties`, so t
 | --- | --- | --- |
 | `lakeflow_job_url` | when the job is created | the job's page in the workspace |
 | `lakeflow_job_id` | when the job is created | the job's id |
-| `lakeflow_run_url` | when a run starts | the run's page in the workspace |
+| `lakeflow_run_url` | when a run starts, also with `start()` and no `wait()` | the run's page in the workspace |
 | `lakeflow_run_id` | when a run finishes | the run's id |
 | `lakeflow_result_state` | when a run finishes | the run's result state, such as `SUCCESS` or `FAILED` |
 | `lakeflow_duration` | when a run finishes | the run's duration in seconds, with three decimals |
