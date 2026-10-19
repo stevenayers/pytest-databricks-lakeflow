@@ -198,6 +198,20 @@ def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
         assert run.task("transform").task_values["source_path"] == source_path
 
 
+def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
+    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
+    assert first.succeeded, first
+    assert first.task("extract").task_values == {"row_count": 7, "source_path": "/Volumes/example/raw/landing"}
+    with lakeflow.task("my_example_job.transform", upstream_from=first, capture_task_values=["source_path"]) as task:
+        run = task.run()
+        assert run.succeeded, run
+        assert run.task("transform").output == "hello world"
+        assert run.task("transform").task_values["source_path"] == "/Volumes/example/raw/landing"
+        transform = run.task("transform").parameters
+        assert isinstance(transform, dict)
+        assert transform["row_count"] == "7", "the stub sets the row count the full run's extract set"
+
+
 def test_permissions_are_applied(lakeflow: Lakeflow) -> None:
     # The creator already owns the job, so grant to a group rather than to the current user.
     shared = dataclasses.replace(lakeflow, permissions=[{"group_name": "users", "permission_level": "CAN_MANAGE_RUN"}])

@@ -81,6 +81,34 @@ def test_stage_is_recorded_before_the_failure(lakeflow: Lakeflow) -> None:
         assert run.task("transform").task_values["stage"] == "validation"
 ```
 
+## Replay a task from a previous run
+
+`upstream_from` takes the stub values from a run of the same job instead of from your test. Each task that the task depends on in the deployed job becomes a stub that sets the values that task set in that run, so you can re-run one task against real upstream data without writing the values out:
+
+```python
+def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
+    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
+    with lakeflow.task("my_example_job.transform", upstream_from=first) as task:
+        run = task.run()
+        assert run.succeeded, run
+        assert run.task("transform").output == "hello world"
+```
+
+The Jobs API does not return task values, so the first run must capture them: pass `capture_task_values` with every upstream task and every key the task reads. `lakeflow.task()` raises `LakeflowError` before anything is created when `upstream_from` is a run of another job, or when an upstream task was not part of that run (left out by `only` or disabled) or has no captured values. Only runs made by the plugin qualify; a production run had no probes, so its task values cannot be recovered.
+
+`upstream_task_values` still works alongside it. An entry replaces the values `upstream_from` holds for that task, and the stubs it names are added to those from the run, so a what-if test changes one value and keeps the rest:
+
+```python
+captured = first.task("extract").task_values
+what_if = lakeflow.task(
+    "my_example_job.transform",
+    upstream_from=first,
+    upstream_task_values={"extract": {**captured, "row_count": 0}},
+)
+```
+
+The replayed values go through the [rules for stub values](#rules-for-stub-values) like any others.
+
 ## Test an if/else condition
 
 A condition task that compares an upstream task value can be tested on its own, with the value set by a stub. Only the condition task and its stubs are in a task job, so the branches downstream of it are not part of the run; assert on its outcome instead. In the `branches` integration bundle, `check` compares `{{tasks.check_input.values.rows}}` with `> 0`:

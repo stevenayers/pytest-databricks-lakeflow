@@ -35,6 +35,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_test_marker,
     run_job_tasks,
     sanitise,
+    upstream_values_from,
     wrap_task,
 )
 from pytest_databricks_lakeflow.settings import force_conditions as force_condition_outcomes
@@ -326,6 +327,7 @@ class Lakeflow:
         capture_task_values: Sequence[str] | None = None,
         run_as: RunAs = None,
         *,
+        upstream_from: JobRun | None = None,
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
@@ -336,12 +338,18 @@ class Lakeflow:
         Each upstream task named in `upstream_task_values` is replaced by a stub task with the same key, so the task's
         `{{tasks.<key>.values.<name>}}` references and `taskValues.get` calls resolve against the stub.
 
+        `upstream_from` replays the task with the values a previous run of the job captured: each task that the task
+        depends on is stubbed with its `task_values` in that run. The platform returns no task values with a run, so
+        that run must have captured them, with `capture_task_values={"<upstream key>": [...]}` on `job()`.
+
         Args:
             ref: The job and task as `"job_key.task_key"`.
             params: Job parameters for every run.
-            upstream_task_values: The task values each stub sets, by upstream task key.
+            upstream_task_values: The task values each stub sets, by upstream task key. An entry replaces the values
+                `upstream_from` holds for that task.
             capture_task_values: The task value keys to capture from the task.
             run_as: Who the job runs as, as for `job()`.
+            upstream_from: A run of the same job whose captured task values stub the task's upstream tasks.
             children: What to do when the task is a Run Job task, as for `job()`.
             setup: Runs first, before the stubs, as for `job()`.
             teardown: Runs last, after the task and its probe, as for `job()`.
@@ -353,7 +361,8 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed, a value is too large or not JSON-serialisable, an entry of
+                task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
+                upstream task, a value is too large or not JSON-serialisable, an entry of
                 `extra_dependencies` is a local path, `children` is `"refuse"` and the task is a Run Job task, or
                 `setup` or `teardown` cannot run, as for `job()`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
@@ -367,7 +376,11 @@ class Lakeflow:
         settings = self.template(job_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         add_dependencies(settings, extra_dependencies or [])
-        upstream = dict(upstream_task_values or {})
+        explicit = dict(upstream_task_values or {})
+        upstream: dict[str, Mapping[str, object]] = {}
+        if upstream_from is not None:
+            upstream.update(upstream_values_from(job_key, settings, task_key, upstream_from, explicit))
+        upstream.update(explicit)
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         self._inject_lifecycle(settings, notebooks)
         capture: dict[str, list[str]] = {}
