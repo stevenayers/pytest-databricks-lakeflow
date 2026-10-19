@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any, cast
@@ -18,10 +17,6 @@ from .fakes import DATA, HOST, FakeWorkspaceClient, make_run, recorded
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
 FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
-
-NEW_ALERT_TASK = pytest.mark.skipif(
-    not hasattr(jobs, "AlertTaskOutput"), reason="this databricks-sdk has no alert task output"
-)
 
 
 def build_from(ws: FakeWorkspaceClient, run: jobs.Run, **kwargs: Any) -> JobRun:
@@ -565,15 +560,12 @@ class TestTaskOutputs:
         ("output", "expected"),
         [
             pytest.param(
-                lambda: jobs.RunOutput(
-                    alert_output=jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.TRIGGERED)
-                ),
+                jobs.RunOutput(alert_output=jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.TRIGGERED)),
                 "TRIGGERED",
-                marks=NEW_ALERT_TASK,
                 id="alert-task",
             ),
             pytest.param(
-                lambda: jobs.RunOutput(
+                jobs.RunOutput(
                     sql_output=jobs.SqlOutput(
                         alert_output=jobs.SqlAlertOutput(alert_state=jobs.SqlAlertState.TRIGGERED)
                     )
@@ -582,7 +574,7 @@ class TestTaskOutputs:
                 id="legacy-sql-alert",
             ),
             pytest.param(
-                lambda: jobs.RunOutput(
+                jobs.RunOutput(
                     sql_output=jobs.SqlOutput(alert_output=jobs.SqlAlertOutput(alert_state=jobs.SqlAlertState.OK))
                 ),
                 "OK",
@@ -590,12 +582,9 @@ class TestTaskOutputs:
             ),
         ],
     )
-    def test_alert_state_from_new_and_legacy_alert_outputs(
-        self, output: Callable[[], jobs.RunOutput], expected: str
-    ) -> None:
-        assert built_task(output(), "check").alert_state == expected
+    def test_alert_state_from_new_and_legacy_alert_outputs(self, output: jobs.RunOutput, expected: str) -> None:
+        assert built_task(output, "check").alert_state == expected
 
-    @NEW_ALERT_TASK
     def test_alert_task_output_is_exposed(self) -> None:
         alert = jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.OK)
         task = built_task(jobs.RunOutput(alert_output=alert), "check")

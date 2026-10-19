@@ -477,8 +477,8 @@ class TaskRun:
         sql_output: The output of a SQL task as the platform reported it: `query_output` (with `warehouse_id`,
             `output_link`, `query_text` and `sql_statements`), `alert_output` or `dashboard_output`. Holds no query
             rows. `None` for any other task or when the platform reported none.
-        alert_output: The output of an alert task, with its `alert_state`. `None` for any other task, when the
-            platform reported none, or with a databricks-sdk too old to know the field.
+        alert_output: The output of an alert task, with its `alert_state`. `None` for any other task or when the
+            platform reported none.
         dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`.
         run_job_output: The output of a run-job task, with the triggered run's `run_id`, or `None`.
         child_run_id: The id of the job run that a run-job task triggered, from `run_job_output.run_id`. The run is
@@ -1149,8 +1149,7 @@ def _task_run(task: jobs.RunTask, out: jobs.RunOutput | None, resolved: jobs.Res
         effective_performance_target=_enum(task.effective_performance_target),
         condition_outcome=_condition_outcome(task.condition_task),
         sql_output=out.sql_output,
-        # Older databricks-sdk releases have no alert task, so `RunOutput` may lack the field.
-        alert_output=getattr(out, "alert_output", None),
+        alert_output=out.alert_output,
         dbt_output=out.dbt_output,
         run_job_output=out.run_job_output,
         child_run_id=out.run_job_output.run_id if out.run_job_output else None,

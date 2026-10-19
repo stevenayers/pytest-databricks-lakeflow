@@ -335,7 +335,7 @@ class TestTimeouts:
 
 
 class TestSideEffects:
-    """Dashboard and SQL alert subscriptions are paused unless side_effects is "keep"."""
+    """Dashboard and SQL alert subscriptions are paused unless side_effects is "keep"; alert and Power BI tasks stay."""
 
     def test_sanitise_pauses_dashboard_and_alert_subscriptions(self) -> None:
         before, after = reporting_settings(), sanitised(reporting_settings())
@@ -367,6 +367,16 @@ class TestSideEffects:
         assert task(sanitised(settings), "dashboard").dashboard_task == jobs.DashboardTask(
             dashboard_id="d1", warehouse_id="w1"
         )
+
+    @pytest.mark.parametrize("side_effects", ["neutralise", "keep"])
+    def test_sanitise_leaves_alert_and_power_bi_tasks_alone(self, side_effects: str) -> None:
+        before, after = reporting_settings(), sanitised(reporting_settings(), side_effects=side_effects)
+        alert, power_bi = task(after, "check").alert_task, task(after, "refresh_powerbi").power_bi_task
+        assert alert is not None and power_bi is not None
+        assert alert == task(before, "check").alert_task
+        assert alert.subscribers == [jobs.AlertTaskSubscriber(user_name="someone@example.com")]
+        assert power_bi == task(before, "refresh_powerbi").power_bi_task
+        assert power_bi.refresh_after_update is True
 
     @pytest.mark.skipif(
         "filters" not in jobs.DashboardTask.__dataclass_fields__,
