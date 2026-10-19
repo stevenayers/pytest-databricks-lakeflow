@@ -331,12 +331,15 @@ class EphemeralJob:
         if not only:
             raise LakeflowError("replay stubs the tasks that only leaves out, so it needs only")
         selected = selected_tasks(self.settings, only, self.stubs)
-        explicit: set[str] = set(selected) | self.stubs
+        explicit = selected | self.stubs
         for task in self.settings.tasks or []:
             if task.task_key.startswith(PREFIX):
                 explicit.add(task.task_key)
         upstream: dict[str, dict[str, object]] = {}
         for task_key in sorted(selected - self.stubs):
+            # `key+` selects the teardown task, which depends on every leaf; injected tasks read no task values.
+            if task_key.startswith(PREFIX):
+                continue
             values = upstream_values_from(self.job_key, self.settings, task_key, run, explicit, argument="replay")
             upstream.update(values)
         if not upstream:

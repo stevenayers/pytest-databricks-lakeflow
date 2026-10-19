@@ -868,11 +868,12 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
     Raises:
         LakeflowError: If a selected task that is not a stub refers to a task that is neither selected nor a stub.
     """
+    running = {*selected, *stubs}
     for task in settings.tasks or []:
         if task.task_key not in selected or task.task_key in stubs:
             continue
         referenced = set(TASK_REFERENCE.findall(json.dumps(task.as_dict())))
-        missing = sorted(referenced - set(selected) - set(stubs))
+        missing = sorted(referenced - running)
         if missing:
             raise LakeflowError(
                 f"Task {task.task_key!r} refers to task values of {missing}, which only leaves out, so the platform "

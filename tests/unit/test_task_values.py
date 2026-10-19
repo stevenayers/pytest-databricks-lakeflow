@@ -512,6 +512,31 @@ class TestEndToEnd:
         assert replay["tasks"][0].disable_auto_optimization
         assert fake_ws.jobs.run_now_calls[1]["only"] == ["transform+", "extract"]
 
+    def test_replay_stubs_no_task_upstream_of_teardown(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        states = {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS", "__pytest_teardown": "SUCCESS"}
+        fake_ws.jobs.queue(make_run(78, states))
+        pytester.makepyfile(
+            """
+            def cleanup(dbutils, params):
+                pass
+
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                again = lakeflow.job("my_job", teardown=cleanup).run(only=["transform+"], replay=first)
+                assert again.succeeded
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        replay = fake_ws.jobs.created[1]
+        assert [t.task_key for t in replay["tasks"]] == ["extract", "transform", "load", "classic", "__pytest_teardown"]
+        assert stub_values(replay, "extract") == '{"row_count": 42}'
+        classic = replay["tasks"][3]
+        assert classic.notebook_task.notebook_path.endswith("/src/classic"), "upstream of teardown only, so no stub"
+        assert fake_ws.jobs.run_now_calls[1]["only"] == ["transform+", "extract"]
+
     def test_replay_on_a_created_job_fails_clearly(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
