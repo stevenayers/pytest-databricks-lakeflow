@@ -17,7 +17,7 @@ with lakeflow.task(
 
 - `ref` names the job and the task as `"job_key.task_key"`.
 - `params` are job parameters for every run. The job's declared parameters are kept, and the same rules apply as for [job tests](job-tests.md#make-a-job).
-- `upstream_task_values` maps upstream task keys to the task values their stubs set. Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
+- `upstream_task_values` maps upstream task keys to the task values their stubs set, or to a `Stub` that also answers the task's `{{tasks.<key>.output.<path>}}` references, see [Output references](#output-references). Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
 - `run_as` chooses who the job runs as: `None` by default, which runs it as you, `"keep"` for the template's `run_as`, a user's email, a service principal's application id, or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity).
 - `children` and `extra_dependencies` work as for job tests, see [Jobs that run other jobs](job-tests.md#jobs-that-run-other-jobs) and [Test-only dependencies](job-tests.md#test-only-dependencies). The stub and probe tasks never get the dependencies.
@@ -51,6 +51,31 @@ If the task's settings refer to `{{tasks.<key>.values...}}` of a task that is no
 
 Stub values arrive as JSON through a widget. `{{` inside a value is escaped so that the platform does not treat it as a reference, and the value reaches the task verbatim.
 
+Other references to a stubbed task resolve against the stub's own run: `{{tasks.<key>.run_id}}` to its run id, `result_state` to `success`, `error_code` to an empty string. `{{tasks.<key>.notebook_path}}` resolves to the helper notebook's path, not the real task's.
+
+### Output references
+
+A stub is a notebook task, so it has no SQL, alert or other task output, and a `{{tasks.<key>.output.<path>}}` reference to it could never resolve. Give the outputs the task reads with a `Stub`, whose `values` are the task values it sets and whose `outputs` are literals for those references, by the path after `output.`. A plain mapping is the same as `Stub(values=mapping)`. In the `sql` integration bundle, `use_results` reads `{{tasks.query.output.first_row.n}}`, `{{tasks.types.output.first_row}}` and `{{tasks.types.output.rows}}`:
+
+```python
+from pytest_databricks_lakeflow import Lakeflow, Stub
+
+
+def test_use_results_with_stubbed_queries(lakeflow: Lakeflow) -> None:
+    rows = [{"n": "7", "m": "", "d": "2.5", "day": "2026-02-01", "b": "false"}]
+    upstream = {
+        "query": Stub(outputs={"first_row.n": "7"}),
+        "types": Stub(values={"stage": "done"}, outputs={"first_row": rows[0], "rows": rows}),
+    }
+    with lakeflow.task("sql_job.use_results", upstream_task_values=upstream) as task:
+        run = task.run()
+        assert run.succeeded, run
+        assert run.task("use_results").parameters["count"] == "7"
+        assert run.task("use_results").parameters["row"] == '{"n":"7","m":"","d":"2.5","day":"2026-02-01","b":"false"}'
+```
+
+The plugin replaces each such reference in the task's settings with the literal before the job is created, so the platform never sees it; `run.task(key).parameters` shows the literal. A string is used verbatim and any other value as compact JSON, as `row` shows, which is how the platform spells `rows` and `first_row` (see [Limitations](limitations.md)). The path must be spelt exactly as in the reference, such as `first_row.n`, `first_row`, `rows`, `alert_state`, `catalog_name`, `schema_name` or `response`. When the task refers to an output that its stub does not give, a plain mapping included, the plugin raises `LakeflowError` before anything is created: `Task 'use_results' refers to {{tasks.query.output.first_row.n}}, but the stub for 'query' has no output 'first_row.n'. Pass Stub(outputs={'first_row.n': ...}) for 'query' in upstream_task_values.` The stub task itself is still created, so `depends_on`, `run.injected_tasks` and `{{tasks.<key>.run_id}}` keep working. `lakeflow.job()` takes a `Stub` in its `upstream_task_values` too, and rewrites the references of every task of the copy.
+
 ## Rules for stub values
 
 The plugin checks these before creating the job and raises `LakeflowError` otherwise:
@@ -59,6 +84,7 @@ The plugin checks these before creating the job and raises `LakeflowError` other
 - Each value must be at most 49,152 characters as JSON, which is the platform's limit for a task value.
 - Keys must be at most 512 characters.
 - You cannot stub the task under test.
+- An output cannot contain `{{`, which the platform would resolve as a reference, and one that is not a string must be JSON-serialisable.
 
 ## Read captured values
 

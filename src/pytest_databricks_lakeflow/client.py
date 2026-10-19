@@ -26,6 +26,8 @@ from pytest_databricks_lakeflow.settings import (
     Helpers,
     RunAs,
     SideEffects,
+    Stub,
+    Upstream,
     add_dependencies,
     apply_task_params,
     check_lifecycle_params,
@@ -266,7 +268,7 @@ class Lakeflow:
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
-        upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
+        upstream_task_values: Upstream | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -332,9 +334,11 @@ class Lakeflow:
                 `retry_on_timeout`. They are applied before the probes, setup and teardown tasks are added, so those
                 cannot be named.
             upstream_task_values: Tasks of the copy to replace with stubs, by task key, with the task values each stub
-                sets, such as `{"extract": {"row_count": 10}}`. A stub keeps the task's key and place, so the tasks
-                downstream of it still depend on it and their `{{tasks.<key>.values.<name>}}` references resolve
-                against it, and `run(only=...)` adds it whenever a selected task depends on it. It drops the task's
+                sets, such as `{"extract": {"row_count": 10}}`, or a `Stub` with `values` and `outputs`. A stub keeps
+                the task's key and place, so the tasks downstream of it still depend on it and their
+                `{{tasks.<key>.values.<name>}}` references resolve against it, and `run(only=...)` adds it whenever a
+                selected task depends on it. Their `{{tasks.<key>.output.<path>}}` references are replaced by the
+                stub's `outputs`. It drops the task's
                 `depends_on`, so the tasks upstream of it still run on a full run but no longer hold it back. It
                 is applied after `task_params`, `disable`, `force_conditions`, `extra_dependencies` and
                 `task_overrides`, so what they set on that task is lost. It appears in `JobRun.injected_tasks`.
@@ -361,7 +365,8 @@ class Lakeflow:
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
-                a value that is too large or not JSON-serialisable.
+                a value that is too large or not JSON-serialisable, an output that contains `{{` or is not
+                JSON-serialisable, or no output for a path that a task of the copy refers to.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -398,7 +403,7 @@ class Lakeflow:
         self,
         ref: str,
         params: Mapping[str, str] | None = None,
-        upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
+        upstream_task_values: Upstream | None = None,
         capture_task_values: Sequence[str] | None = None,
         run_as: RunAs = None,
         *,
@@ -414,7 +419,9 @@ class Lakeflow:
         """Make a throwaway job that holds one task of a bundle job.
 
         Each upstream task named in `upstream_task_values` is replaced by a stub task with the same key, so the task's
-        `{{tasks.<key>.values.<name>}}` references and `taskValues.get` calls resolve against the stub.
+        `{{tasks.<key>.values.<name>}}` references and `taskValues.get` calls resolve against the stub. A stub is a
+        notebook task, so it has no SQL, alert or other task output: the task's `{{tasks.<key>.output.<path>}}`
+        references are replaced by the literals that a `Stub` gives in `outputs`.
 
         `upstream_from` replays the task with the values a previous run of the job captured: each task that the task
         depends on is stubbed with its `task_values` in that run. The platform returns no task values with a run, so
@@ -423,8 +430,8 @@ class Lakeflow:
         Args:
             ref: The job and task as `"job_key.task_key"`.
             params: Job parameters for every run.
-            upstream_task_values: The task values each stub sets, by upstream task key. An entry replaces the values
-                `upstream_from` holds for that task.
+            upstream_task_values: By upstream task key, a mapping of value keys to values, or a `Stub` with `values`
+                and `outputs`. An entry replaces the values `upstream_from` holds for that task.
             capture_task_values: The task value keys to capture from the task.
             run_as: Who the job runs as, as for `job()`.
             task_params: Parameters for the task, as for `job()`. Only the task under test can be named.
@@ -443,11 +450,13 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no such job.
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
-                upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` cannot
-                be used as for `job()`, `children` is `"refuse"` and the task is a Run Job task, or `task_params` or
-                `task_overrides` names another task. Also in the cases where `job()` raises it because `task_params`,
-                `environments` or `task_overrides` cannot be applied or `setup` or `teardown` cannot run.
+                task that is not stubbed or to an output that its stub does not give, `upstream_from` is a run of
+                another job or lacks the captured values of an upstream task, a value is too large or not
+                JSON-serialisable, an output contains `{{` or is not JSON-serialisable, an entry of
+                `extra_dependencies` cannot be used as for `job()`, `children` is `"refuse"` and the task is a Run Job
+                task, or `task_params` or `task_overrides` names another task. Also in the cases where `job()` raises
+                it because `task_params`, `environments` or `task_overrides` cannot be applied or `setup` or
+                `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -469,7 +478,7 @@ class Lakeflow:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
         add_dependencies(settings, self._resolve_local_wheels(extra_dependencies or []))
         explicit = dict(upstream_task_values or {})
-        upstream: dict[str, Mapping[str, object]] = {}
+        upstream: dict[str, Mapping[str, object] | Stub] = {}
         if upstream_from is not None:
             upstream.update(upstream_values_from(job_key, settings, task_key, upstream_from, explicit))
         upstream.update(explicit)
