@@ -125,6 +125,16 @@ steps:
 
 The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. Several processes refreshing a user-to-machine (`databricks-cli`) token at once can fail with `exit status 45`, which is why CI should use a service principal.
 
+A nightly job can clean up after every pipeline and developer that shares the workspace, as a principal allowed to delete their jobs and schemas. It needs a test that sets up the bundle, because the sweep runs at setup; dry-run it first and keep the report:
+
+```bash
+uv run pytest tests/test_smoke.py --lakeflow-sweep --lakeflow-sweep-scope=all \
+    --lakeflow-sweep-schemas=dev_sandbox --lakeflow-sweep-notebooks \
+    --lakeflow-sweep-dry-run --lakeflow-sweep-report=sweep.json
+```
+
+Drop `--lakeflow-sweep-dry-run` once the report lists only what you expect. See [sweeping leftovers](configuration.md#sweeping-leftovers).
+
 When several branches, pipelines or developers share one test target, a deploy from one replaces the wheels that another session's jobs are running. Give each identity and branch its own deployment with the recipe in [isolating test deployments](how-it-works.md#isolating-test-deployments), and end the pipeline with `pytest --lakeflow-destroy`.
 
 Jobs that the service principal creates are visible only to it and to workspace admins. Give your team access with `permissions`, so that they can open a kept job from the CI log:

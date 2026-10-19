@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
+import logging
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import PermissionDenied
-from databricks.sdk.service import jobs
+from databricks.sdk.service import catalog, jobs, workspace
 
 from pytest_databricks_lakeflow import session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
+from pytest_databricks_lakeflow.plugin import parse_duration
 
 from .conftest import FakeCli, configure_lakeflow
-from .fakes import HOST, FakeWorkspaceClient, make_run
+from .fakes import HOST, HOUR_MS, FakeWorkspaceClient, listed_job, make_run, sweep_candidates
 from .test_session import STAGING_FIXTURE, make_xdist_conftest
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
@@ -20,10 +24,12 @@ pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 DESTROY = ["bundle", "destroy", "-t", "test", "--auto-approve"]
 DESTROY_STAGING = ["bundle", "destroy", "-t", "staging", "--auto-approve"]
 DEPLOY_WITH_VARIABLES = ["bundle", "deploy", "-t", "test", "--auto-approve", "--var", "catalog=dev"]
-HOUR_MS = 3_600_000
+FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow"
+OLD = {"pytest": "", "pytest_run_id": "old-run"}
 USES_LAKEFLOW = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
 USES_SCHEMA = "def test_schema(lakeflow):\n    with lakeflow.schema():\n        pass\n"
 FAILING_JOB = "def test_{0}(lakeflow):\n    lakeflow.job('my_job').create()\n    assert False\n"
+CREATES_JOBS = "def test_{0}(lakeflow):\n    with lakeflow.job('my_job'):\n        pass\n"
 SWEEP_HINT = "hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours"
 VARIABLES_FIXTURE = """
 
@@ -52,25 +58,58 @@ def leaves_runs_active(runs: str) -> str:
     return USES_LAKEFLOW.format("leak") + f"    lakeflow.active_runs.update({runs})\n"
 
 
-def listed(job_id: int, age_hours: float, tags: dict[str, str], creator: str = "someone@example.com") -> jobs.BaseJob:
-    created = int(time.time() * 1000 - age_hours * HOUR_MS)
-    return jobs.BaseJob(
-        job_id=job_id, created_time=created, creator_user_name=creator, settings=jobs.JobSettings(tags=tags)
+def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
+    return cast(WorkspaceClient, ws)
+
+
+def ago(hours: float) -> int:
+    return int(time.time() * 1000 - hours * HOUR_MS)
+
+
+def expires(hours: float) -> str:
+    """A `pytest_expires` tag value `hours` from now, in the past for a negative number."""
+    return (datetime.now(UTC) + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def schema(name: str, age_hours: float, creator: str = "someone@example.com") -> catalog.SchemaInfo:
+    return catalog.SchemaInfo(
+        catalog_name="dev_sandbox",
+        name=name,
+        full_name=f"dev_sandbox.{name}",
+        created_at=ago(age_hours),
+        created_by=creator,
     )
 
 
-def sweep_candidates() -> list[jobs.BaseJob]:
-    old = {"pytest": "", "pytest_run_id": "old-run"}
-    return [
-        listed(1, 25, old),
-        listed(2, 25, {"pytest": "", "pytest_run_id": "this-run"}),
-        listed(3, 1, old),
-        listed(4, 25, old, creator="colleague@example.com"),
-        listed(5, 25, {"pytest_run_id": "old-run"}),
-        listed(6, 25, {"pytest": ""}),
-        listed(7, 30, old),
-        jobs.BaseJob(job_id=8, created_time=0),
+def notebook(
+    name: str, age_hours: float, object_type: workspace.ObjectType = workspace.ObjectType.NOTEBOOK
+) -> workspace.ObjectInfo:
+    return workspace.ObjectInfo(path=f"{FOLDER}/{name}", object_type=object_type, modified_at=ago(age_hours))
+
+
+def sweep_workspace(ws: FakeWorkspaceClient | None = None) -> FakeWorkspaceClient:
+    """Fill `ws` with the sweep candidates, schemas of this run and others, and helper notebooks young and old."""
+    ws = ws or FakeWorkspaceClient()
+    ws.jobs.listed = sweep_candidates()
+    ws.schemas.listed = [
+        schema("pytest_old_run_1a2b3c4d", 25),
+        schema("pytest_this_run_0f0f0f0f", 25),
+        schema("pytest_old_run_2b3c4d5e", 1),
+        schema("pytest_old_run_3c4d5e6f", 25, creator="colleague@example.com"),
+        schema("analytics", 25),
     ]
+    ws.workspace.listed = [
+        notebook("set_values", 25),
+        notebook("get_values", 25),
+        notebook("setup_0123456789ab", 25),
+        notebook("teardown_0123456789ab", 25),
+        notebook("setup_ba9876543210", 1),
+        notebook("teardown_ba9876543210", 1),
+        notebook("setup_tables", 25),
+        notebook("teardown_tables", 25),
+        notebook("setup_00000000000a", 25, workspace.ObjectType.DIRECTORY),
+    ]
+    return ws
 
 
 class TestSchemas:
@@ -133,14 +172,16 @@ class TestSweep:
     def test_sweep_deletes_old_jobs_of_other_runs(self) -> None:
         ws = FakeWorkspaceClient()
         ws.jobs.listed = sweep_candidates()
-        assert session.sweep(cast(WorkspaceClient, ws), "this-run", 24) == [1, 7]
+        assert session.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (1, 7)
         assert ws.jobs.deleted == [1, 7]
 
     def test_sweep_carries_on_after_a_failed_delete(self, caplog: pytest.LogCaptureFixture) -> None:
         ws = FakeWorkspaceClient()
         ws.jobs.listed = sweep_candidates()
         ws.jobs.delete_errors[1] = PermissionDenied("not yours")
-        assert session.sweep(cast(WorkspaceClient, ws), "this-run", 0.5) == [3, 7]
+        report = session.sweep(as_client(ws), "this-run", 0.5, FOLDER)
+        assert report.jobs == (3, 7)
+        assert report.errors == ("Could not delete job 1: not yours",)
         assert "Could not delete job 1: not yours" in caplog.text
 
     @pytest.mark.parametrize(
@@ -166,6 +207,211 @@ class TestSweep:
         pytester.makepyfile(uses_lakeflow("a"))
         pytester.runpytest().assert_outcomes(passed=1)
         assert fake_ws.jobs.list_calls == 0
+
+    def test_sweep_scope_all_ignores_the_creator(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.listed = sweep_candidates()
+        options = session.SweepOptions(scope="all")
+        assert session.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1, 4, 7)
+        assert ws.jobs.deleted == [1, 4, 7]
+
+    def test_sweep_branch_filter(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.listed = [
+            listed_job(1, 25, {**OLD, "pytest_git_branch": "main"}),
+            listed_job(2, 25, {**OLD, "pytest_git_branch": "feature/x"}),
+            listed_job(3, 25, OLD),
+            listed_job(4, 1, {**OLD, "pytest_git_branch": "main"}),
+        ]
+        options = session.SweepOptions(branch="main")
+        assert session.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1,)
+        assert ws.jobs.deleted == [1]
+
+    def test_sweep_honours_pytest_expires(self) -> None:
+        ws = FakeWorkspaceClient()
+        ws.jobs.listed = [
+            listed_job(1, 30, {**OLD, "pytest_expires": expires(24)}),
+            listed_job(2, 1, {**OLD, "pytest_expires": expires(-24)}),
+            listed_job(3, 25, {**OLD, "pytest_expires": "next week"}),
+            listed_job(4, 1, {**OLD, "pytest_expires": "next week"}),
+            listed_job(5, 1, {"pytest": "", "pytest_run_id": "this-run", "pytest_expires": expires(-24)}),
+        ]
+        assert session.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (2, 3)
+
+
+class TestSweepSchemasAndNotebooks:
+    """`--lakeflow-sweep-schemas` and `--lakeflow-sweep-notebooks` drop only what the plugin made, once it is old."""
+
+    @pytest.mark.parametrize(
+        ("scope", "dropped"),
+        [
+            pytest.param("mine", ("dev_sandbox.pytest_old_run_1a2b3c4d",), id="mine"),
+            pytest.param(
+                "all",
+                ("dev_sandbox.pytest_old_run_1a2b3c4d", "dev_sandbox.pytest_old_run_3c4d5e6f"),
+                id="all",
+            ),
+        ],
+    )
+    def test_sweep_schemas_drops_stale_pytest_schemas(self, scope: str, dropped: tuple[str, ...]) -> None:
+        ws = sweep_workspace()
+        options = session.SweepOptions(scope=cast(Any, scope), schemas_catalog="dev_sandbox")
+        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        assert report.schemas == dropped
+        assert tuple(ws.schemas.deleted) == dropped
+        assert ws.workspace.deleted == []
+
+    @pytest.mark.parametrize("role", ["setup", "teardown"])
+    def test_sweep_notebooks_keeps_the_helpers(self, role: str) -> None:
+        ws = sweep_workspace()
+        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        assert f"{FOLDER}/{role}_0123456789ab" in report.notebooks
+        assert f"{FOLDER}/{role}_ba9876543210" not in report.notebooks
+        assert f"{FOLDER}/{role}_tables" not in report.notebooks
+        assert report.notebooks == (f"{FOLDER}/setup_0123456789ab", f"{FOLDER}/teardown_0123456789ab")
+        assert ws.workspace.deleted == list(report.notebooks)
+        assert ws.schemas.deleted == []
+
+    def test_sweep_records_a_listing_it_cannot_read(self) -> None:
+        ws = sweep_workspace()
+        ws.schemas.list_errors["dev_sandbox"] = PermissionDenied("no USE CATALOG")
+        options = session.SweepOptions(schemas_catalog="dev_sandbox", notebooks=True)
+        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        assert report.errors == ("Could not list the schemas in dev_sandbox: no USE CATALOG",)
+        assert report.jobs == (1, 7)
+        assert len(report.notebooks) == 2
+
+
+class TestSweepReport:
+    """`--lakeflow-sweep-dry-run` deletes nothing, and `--lakeflow-sweep-report` writes what was or would be swept."""
+
+    def test_sweep_dry_run_deletes_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.INFO, logger="pytest_databricks_lakeflow")
+        ws = sweep_workspace()
+        options = session.SweepOptions(dry_run=True, schemas_catalog="dev_sandbox", notebooks=True)
+        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        assert (ws.jobs.deleted, ws.schemas.deleted, ws.workspace.deleted) == ([], [], [])
+        assert report.dry_run
+        assert report.jobs == (1, 7)
+        assert report.schemas == ("dev_sandbox.pytest_old_run_1a2b3c4d",)
+        assert report.notebooks == (f"{FOLDER}/setup_0123456789ab", f"{FOLDER}/teardown_0123456789ab")
+        assert "Would delete job 7" in caplog.text
+
+    def test_sweep_report_is_written(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.listed = sweep_candidates()
+        fake_ws.jobs.delete_errors[1] = PermissionDenied("not yours")
+        pytester.makepyfile(uses_lakeflow("a"))
+        pytester.runpytest("--lakeflow-sweep", "--lakeflow-sweep-report=out/sweep.json").assert_outcomes(passed=1)
+        report = json.loads((pytester.path / "out" / "sweep.json").read_text())
+        assert report == {
+            "version": 1,
+            "dry_run": False,
+            "jobs": [2, 7],
+            "schemas": [],
+            "notebooks": [],
+            "errors": ["Could not delete job 1: not yours"],
+        }
+
+    @pytest.mark.parametrize(
+        ("flags", "lines"),
+        [
+            pytest.param(
+                [],
+                [
+                    "lakeflow: sweep dry run deleted nothing; it would delete:",
+                    *(f"  job {HOST}/jobs/{i}" for i in (1, 2, 7)),
+                ],
+                id="jobs",
+            ),
+            pytest.param(
+                ["--lakeflow-sweep-scope=all", "--lakeflow-sweep-schemas=dev_sandbox", "--lakeflow-sweep-notebooks"],
+                [
+                    "lakeflow: sweep dry run deleted nothing; it would delete:",
+                    *(f"  job {HOST}/jobs/{i}" for i in (1, 2, 4, 7)),
+                    "  schema dev_sandbox.pytest_old_run_1a2b3c4d",
+                    "  schema dev_sandbox.pytest_this_run_0f0f0f0f",
+                    "  schema dev_sandbox.pytest_old_run_3c4d5e6f",
+                    f"  notebook {FOLDER}/setup_0123456789ab",
+                    f"  notebook {FOLDER}/teardown_0123456789ab",
+                ],
+                id="everything",
+            ),
+            pytest.param(
+                ["--lakeflow-sweep-branch=main"], ["lakeflow: sweep dry run found nothing to delete"], id="branch"
+            ),
+        ],
+    )
+    def test_dry_run_is_listed_in_the_terminal_summary(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, flags: list[str], lines: list[str]
+    ) -> None:
+        sweep_workspace(fake_ws)
+        pytester.makepyfile(uses_lakeflow("a"))
+        result = pytester.runpytest("--lakeflow-sweep", "--lakeflow-sweep-dry-run", *flags)
+        result.assert_outcomes(passed=1)
+        assert (fake_ws.jobs.deleted, fake_ws.schemas.deleted, fake_ws.workspace.deleted) == ([], [], [])
+        result.stdout.fnmatch_lines(["*= lakeflow =*", *lines])
+        result.stdout.no_fnmatch_line("  notebook */set_values")
+
+    @pytest.mark.parametrize(
+        ("flags", "message"),
+        [
+            pytest.param(
+                ["--lakeflow-sweep", "--lakeflow-sweep-branch=main", "--lakeflow-sweep-schemas=dev_sandbox"],
+                "*--lakeflow-sweep-branch cannot be combined with --lakeflow-sweep-schemas*",
+                id="branch_and_schemas",
+            ),
+            pytest.param(
+                ["--lakeflow-sweep", "--lakeflow-sweep-branch=main", "--lakeflow-sweep-notebooks"],
+                "*--lakeflow-sweep-branch cannot be combined with --lakeflow-sweep-notebooks*",
+                id="branch_and_notebooks",
+            ),
+            pytest.param(
+                ["--lakeflow-sweep-dry-run"],
+                "*--lakeflow-sweep-dry-run needs --lakeflow-sweep*",
+                id="without_sweep",
+            ),
+        ],
+    )
+    def test_sweep_flags_that_cannot_apply_are_usage_errors(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, flags: list[str], message: str
+    ) -> None:
+        pytester.makepyfile(uses_lakeflow("a"))
+        result = pytester.runpytest(*flags)
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines([message])
+        assert fake_ws.jobs.list_calls == 0
+
+
+class TestKeepTtl:
+    """`--lakeflow-keep-ttl` tags every job with an expiry, which the sweep honours."""
+
+    def test_keep_ttl_tags_every_job(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        pytester.makepyfile("\n".join(CREATES_JOBS.format(name) for name in ("a", "b")))
+        before = datetime.now(UTC).replace(microsecond=0)
+        pytester.runpytest("--lakeflow-keep-ttl=48h").assert_outcomes(passed=2)
+        after = datetime.now(UTC)
+        assert len(fake_ws.jobs.created) == 2
+        for created in fake_ws.jobs.created:
+            value = created["tags"]["pytest_expires"]
+            assert value.endswith("Z")
+            expiry = datetime.fromisoformat(value)
+            assert before + timedelta(hours=48) <= expiry <= after + timedelta(hours=48)
+
+    def test_no_expiry_without_the_flag(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        pytester.makepyfile(CREATES_JOBS.format("a"))
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert "pytest_expires" not in fake_ws.jobs.created[0]["tags"]
+
+    @pytest.mark.parametrize("value", ["48", "2w", "-1h"])
+    def test_keep_ttl_rejects_bad_durations(self, pytester: pytest.Pytester, value: str) -> None:
+        pytester.makepyfile(CREATES_JOBS.format("a"))
+        result = pytester.runpytest(f"--lakeflow-keep-ttl={value}")
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines([f"*--lakeflow-keep-ttl takes hours or days, such as 48h or 7d, not {value!r}*"])
+
+    @pytest.mark.parametrize(("value", "expected"), [("48h", timedelta(hours=48)), ("7d", timedelta(days=7))])
+    def test_parse_duration(self, value: str, expected: timedelta) -> None:
+        assert parse_duration(value) == expected
 
 
 class TestDestroy:

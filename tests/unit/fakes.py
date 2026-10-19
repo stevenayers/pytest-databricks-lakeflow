@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import time
 import urllib.parse
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import replace
@@ -13,10 +14,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from databricks.sdk.errors import NotFound
-from databricks.sdk.service import iam, jobs
+from databricks.sdk.service import catalog, iam, jobs, workspace
 
 DATA = Path(__file__).parent / "data"
 HOST = "https://example.cloud.databricks.com"
+HOUR_MS = 3_600_000
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 
 
@@ -40,6 +42,7 @@ class FakeJobs:
         self.exports: dict[int, str | Exception] = {}
         self.export_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
+        self.delete_log: Path | None = None
         self.list_calls = 0
         self.gets: list[int] = []
         self._ids = itertools.count(1000)
@@ -69,6 +72,9 @@ class FakeJobs:
             raise self.delete_errors[job_id]
         self.deleted.append(job_id)
         self.settings.pop(job_id, None)
+        if self.delete_log is not None:
+            with self.delete_log.open("a") as f:
+                f.write(f"{job_id}\n")
 
     def queue(
         self,
@@ -205,6 +211,8 @@ class FakeWorkspace:
         self.folders: list[str] = []
         self.uploads: dict[str, dict[str, Any]] = {}
         self.upload_calls: list[str] = []
+        self.listed: list[workspace.ObjectInfo] = []
+        self.deleted: list[str] = []
 
     def mkdirs(self, path: str) -> None:
         self.folders.append(path)
@@ -222,6 +230,15 @@ class FakeWorkspace:
             raise NotFound(f"Path ({path}) doesn't exist.")
         return SimpleNamespace(path=path)
 
+    def list(self, path: str, **kwargs: Any) -> Iterator[workspace.ObjectInfo]:
+        """List the objects in `listed` directly inside the folder `path`."""
+        folder = path.rstrip("/")
+        return iter([info for info in self.listed if (info.path or "").rsplit("/", 1)[0] == folder])
+
+    def delete(self, path: str, **kwargs: Any) -> None:
+        self.deleted.append(path)
+        self.objects.discard(path)
+
 
 class FakeFiles:
     def __init__(self, workspace: FakeWorkspace) -> None:
@@ -235,6 +252,8 @@ class FakeSchemas:
     def __init__(self) -> None:
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.listed: list[catalog.SchemaInfo] = []
+        self.list_errors: dict[str, Exception] = {}
 
     def create(self, name: str, catalog_name: str, **kwargs: Any) -> SimpleNamespace:
         self.created.append(f"{catalog_name}.{name}")
@@ -243,6 +262,11 @@ class FakeSchemas:
     def delete(self, full_name: str, *, force: bool | None = None) -> None:
         assert force
         self.deleted.append(full_name)
+
+    def list(self, catalog_name: str, **kwargs: Any) -> Iterator[catalog.SchemaInfo]:
+        if catalog_name in self.list_errors:
+            raise self.list_errors[catalog_name]
+        return iter([info for info in self.listed if info.catalog_name == catalog_name])
 
 
 class FakeCurrentUser:
@@ -309,6 +333,31 @@ def notebook_export(commands: Sequence[dict[str, Any]]) -> str:
         "<!DOCTYPE html>\n<html>\n<head>\n<title>notebook - Databricks</title>\n"
         f"<script>var __DATABRICKS_NOTEBOOK_MODEL = '{encoded}';</script>\n</head>\n<body></body>\n</html>"
     )
+
+
+def listed_job(
+    job_id: int, age_hours: float, tags: dict[str, str], creator: str = "someone@example.com"
+) -> jobs.BaseJob:
+    """Build a job as `jobs.list` returns it, created `age_hours` ago by `creator`."""
+    created = int(time.time() * 1000 - age_hours * HOUR_MS)
+    return jobs.BaseJob(
+        job_id=job_id, created_time=created, creator_user_name=creator, settings=jobs.JobSettings(tags=tags)
+    )
+
+
+def sweep_candidates() -> list[jobs.BaseJob]:
+    """Jobs for `--lakeflow-sweep` to choose from. With a 24 hour cutoff and run id `this-run`, it deletes 1 and 7."""
+    old = {"pytest": "", "pytest_run_id": "old-run"}
+    return [
+        listed_job(1, 25, old),
+        listed_job(2, 25, {"pytest": "", "pytest_run_id": "this-run"}),
+        listed_job(3, 1, old),
+        listed_job(4, 25, old, creator="colleague@example.com"),
+        listed_job(5, 25, {"pytest_run_id": "old-run"}),
+        listed_job(6, 25, {"pytest": ""}),
+        listed_job(7, 30, old),
+        jobs.BaseJob(job_id=8, created_time=0),
+    ]
 
 
 def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:

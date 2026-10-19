@@ -67,9 +67,47 @@ These apply to one pytest run and win over the matching arguments.
 | `--lakeflow-keep` | Keep every ephemeral job and temporary schema. |
 | `--lakeflow-keep-failed` | Keep the ephemeral job when its test fails, even with `Lakeflow(keep_failed=False)`. |
 | `--no-lakeflow-keep-failed` | Delete the ephemeral job even when its test fails. |
+| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job with `pytest_expires`, an ISO 8601 UTC time this far ahead, in whole hours (`h`) or days (`d`). The sweep keeps a tagged job until then, whatever its age, and deletes it once that time has passed. |
 | `--lakeflow-sweep` | At session start, delete your own jobs tagged `pytest` from other runs that are older than `sweep_hours`. |
+| `--lakeflow-sweep-scope=all` | Sweep jobs and schemas whoever created them, not only your own. The default is `mine`. |
+| `--lakeflow-sweep-schemas=<catalog>` | Also drop the temporary `pytest_<run id>_<8 hex digits>` schemas of other runs in that catalog that are older than `sweep_hours`. |
+| `--lakeflow-sweep-notebooks` | Also delete the `setup_<hash>` and `teardown_<hash>` notebooks in the helpers folder that were last uploaded more than `sweep_hours` ago. |
+| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs whose `pytest_git_branch` tag is that branch. |
+| `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete. |
+| `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file, relative to the directory pytest was started in. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`, relative to the directory pytest was invoked from: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](#report-directory). |
+
+### Sweeping leftovers
+
+`--lakeflow-sweep` runs once per session, in the process that sets up the first bundle target, and every other `--lakeflow-sweep-*` flag needs it. It only ever deletes what the plugin makes, recognised by name and tags:
+
+- Jobs tagged `pytest` and `pytest_run_id`, from a run other than this one, created more than `sweep_hours` ago. A job tagged `pytest_expires` is deleted once that time has passed instead, whatever its age. With the default scope only jobs you created are considered; `--lakeflow-sweep-scope=all` considers everyone's, and a delete you are not allowed to make is recorded as an error.
+- With `--lakeflow-sweep-schemas=<catalog>`, schemas named `pytest_<run id>_<8 hex digits>`, from another run, created more than `sweep_hours` ago, by you unless the scope is `all`. Schemas carry no tags, so `--lakeflow-keep-ttl` cannot protect them, and `--lakeflow-sweep-branch` cannot be combined with this flag.
+- With `--lakeflow-sweep-notebooks`, notebooks in the helpers folder named exactly `setup_` or `teardown_` followed by 12 hexadecimal digits, last uploaded more than `sweep_hours` ago. Every session that uses a setup or teardown function uploads its notebook again, so a notebook in use stays young. `set_values`, `get_values` and any other name are never deleted. `--lakeflow-sweep-branch` cannot be combined with this flag either.
+
+A failed delete or listing is logged at WARNING and the sweep carries on. To see first what a sweep would delete, run it with `--lakeflow-sweep-dry-run`: nothing is deleted, and the terminal summary lists each job, schema and notebook it would delete, then any error:
+
+```text
+=================================== lakeflow ===================================
+lakeflow: sweep dry run deleted nothing; it would delete:
+  job https://adb-123.azuredatabricks.net/jobs/1001
+  schema dev_sandbox.pytest_ab12cd34_9f0e1d2c
+  notebook /Users/someone@example.com/.pytest-databricks-lakeflow/setup_3f9a1c07b2d4
+```
+
+`--lakeflow-sweep-report=sweep.json` writes the same as JSON, for a dry run or a real sweep:
+
+```json
+{
+  "version": 1,
+  "dry_run": true,
+  "jobs": [1001],
+  "schemas": ["dev_sandbox.pytest_ab12cd34_9f0e1d2c"],
+  "notebooks": ["/Users/someone@example.com/.pytest-databricks-lakeflow/setup_3f9a1c07b2d4"],
+  "errors": []
+}
+```
 
 ## Environment variables
 
@@ -187,7 +225,7 @@ lakeflow: 1 run cancelled at session end
 hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours
 ```
 
-It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing and cancelled nothing prints no block.
+It does not depend on `--log-cli-level`. Under xdist the workers report what they kept to the controller, which prints one summary. A session that kept nothing, cancelled nothing and ran no sweep dry run prints no block. A sweep dry run adds its list at the top of the block, see [sweeping leftovers](#sweeping-leftovers).
 
 ### Report directory
 

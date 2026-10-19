@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 from collections.abc import Generator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,7 +16,9 @@ from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, c
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 from pytest_databricks_lakeflow.report import write as write_report
 from pytest_databricks_lakeflow.session import (
+    SWEEP_SCOPES,
     SessionState,
+    SweepOptions,
     activate,
     deactivate,
     resolve_attribution,
@@ -22,6 +26,16 @@ from pytest_databricks_lakeflow.session import (
 )
 
 STATE = pytest.StashKey[SessionState]()
+DURATION = re.compile(r"([0-9]+)([hd])")
+DURATION_UNITS = {"h": "hours", "d": "days"}
+SWEEP_FLAGS = {
+    "lakeflow_sweep_scope": "--lakeflow-sweep-scope",
+    "lakeflow_sweep_schemas": "--lakeflow-sweep-schemas",
+    "lakeflow_sweep_notebooks": "--lakeflow-sweep-notebooks",
+    "lakeflow_sweep_branch": "--lakeflow-sweep-branch",
+    "lakeflow_sweep_dry_run": "--lakeflow-sweep-dry-run",
+    "lakeflow_sweep_report": "--lakeflow-sweep-report",
+}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -41,7 +55,46 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Delete the ephemeral job even when its test fails.",
     )
+    group.addoption(
+        "--lakeflow-keep-ttl",
+        metavar="DURATION",
+        help="Tag every ephemeral job with a pytest_expires time this far ahead, such as 48h or 7d. The sweep keeps "
+        "a tagged job until then, whatever its age.",
+    )
     group.addoption("--lakeflow-sweep", action="store_true", help="Delete leftover ephemeral jobs at session start.")
+    group.addoption(
+        "--lakeflow-sweep-scope",
+        choices=SWEEP_SCOPES,
+        default=None,
+        help="Sweep jobs and schemas that you created (mine, the default) or that anyone created (all).",
+    )
+    group.addoption(
+        "--lakeflow-sweep-schemas",
+        metavar="CATALOG",
+        help="Also drop old pytest_<run id>_* schemas of other runs from this catalog.",
+    )
+    group.addoption(
+        "--lakeflow-sweep-notebooks",
+        action="store_true",
+        default=None,
+        help="Also delete old setup_<hash> and teardown_<hash> notebooks from the helpers folder.",
+    )
+    group.addoption(
+        "--lakeflow-sweep-branch",
+        metavar="BRANCH",
+        help="Sweep only jobs whose pytest_git_branch tag is this branch.",
+    )
+    group.addoption(
+        "--lakeflow-sweep-dry-run",
+        action="store_true",
+        default=None,
+        help="Delete nothing, and list what the sweep would delete.",
+    )
+    group.addoption(
+        "--lakeflow-sweep-report",
+        metavar="PATH",
+        help="Write what the sweep deleted, or would delete, to this JSON file.",
+    )
     group.addoption("--lakeflow-destroy", action="store_true", help="Run bundle destroy at the end of the session.")
     group.addoption(
         "--lakeflow-report-dir",
@@ -73,11 +126,58 @@ def pytest_configure(config: pytest.Config) -> None:
         keep=config.getoption("lakeflow_keep"),
         keep_failed=config.getoption("lakeflow_keep_failed"),
         sweep=config.getoption("lakeflow_sweep"),
+        sweep_options=_sweep_options(config),
+        keep_ttl=_keep_ttl(config),
         destroy=config.getoption("lakeflow_destroy"),
         report_dir=report_dir,
     )
     config.stash[STATE] = state
     activate(state)
+
+
+def parse_duration(value: str) -> timedelta:
+    """Read a duration in whole hours or days, such as `48h` or `7d`.
+
+    Raises:
+        pytest.UsageError: For anything else, a zero duration included.
+    """
+    match = DURATION.fullmatch(value)
+    if match is None or int(match[1]) == 0:
+        raise pytest.UsageError(f"--lakeflow-keep-ttl takes hours or days, such as 48h or 7d, not {value!r}")
+    return timedelta(**{DURATION_UNITS[match[2]]: int(match[1])})
+
+
+def _keep_ttl(config: pytest.Config) -> timedelta | None:
+    value = config.getoption("lakeflow_keep_ttl")
+    if value is None:
+        return None
+    return parse_duration(value)
+
+
+def _sweep_options(config: pytest.Config) -> SweepOptions:
+    given = [flag for dest, flag in SWEEP_FLAGS.items() if config.getoption(dest) is not None]
+    if given and not config.getoption("lakeflow_sweep"):
+        verb = "needs" if len(given) == 1 else "need"
+        raise pytest.UsageError(f"{', '.join(given)} {verb} --lakeflow-sweep")
+    branch = config.getoption("lakeflow_sweep_branch")
+    schemas_catalog = config.getoption("lakeflow_sweep_schemas")
+    notebooks = bool(config.getoption("lakeflow_sweep_notebooks"))
+    if branch is not None and (schemas_catalog or notebooks):
+        untagged = [SWEEP_FLAGS[dest] for dest in ("lakeflow_sweep_schemas", "lakeflow_sweep_notebooks")]
+        combined = [flag for flag in untagged if flag in given]
+        raise pytest.UsageError(
+            f"--lakeflow-sweep-branch cannot be combined with {' or '.join(combined)}: schemas and notebooks carry "
+            "no tags, so the branch cannot be told."
+        )
+    report = config.getoption("lakeflow_sweep_report")
+    return SweepOptions(
+        scope=config.getoption("lakeflow_sweep_scope") or "mine",
+        schemas_catalog=schemas_catalog,
+        notebooks=notebooks,
+        branch=branch,
+        dry_run=bool(config.getoption("lakeflow_sweep_dry_run")),
+        report=None if report is None else config.invocation_params.dir / report,
+    )
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -163,6 +263,7 @@ def _report_to_controller(workeroutput: dict[str, Any], state: SessionState) -> 
     workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
     workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
     workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
+    workeroutput["lakeflow_sweep_dry_run"] = state.sweep_dry_run
 
 
 def _destroy_deployments(session: pytest.Session, state: SessionState) -> None:
@@ -188,15 +289,19 @@ def pytest_testnodedown(node: Any, error: object) -> None:
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
+    if output.get("lakeflow_sweep_dry_run") is not None:
+        state.sweep_dry_run = output["lakeflow_sweep_dry_run"]
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
     state = config.stash.get(STATE, None)
     if state is None or hasattr(config, "workerinput"):
         return
-    if not (state.kept_jobs or state.kept_schemas or state.cancelled_runs):
+    if not (state.kept_jobs or state.kept_schemas or state.cancelled_runs or state.sweep_dry_run is not None):
         return
     terminalreporter.write_sep("=", "lakeflow")
+    if state.sweep_dry_run is not None:
+        _summarise_dry_run(terminalreporter, state.sweep_dry_run)
     for noun, names in (("job", state.kept_jobs), ("schema", state.kept_schemas)):
         if names:
             terminalreporter.write_line(f"lakeflow: {_count(len(names), noun)} kept")
@@ -206,6 +311,15 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: p
         terminalreporter.write_line(f"lakeflow: {_count(state.cancelled_runs, 'run')} cancelled at session end")
     if state.kept_jobs:
         terminalreporter.write_line("hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours")
+
+
+def _summarise_dry_run(terminalreporter: pytest.TerminalReporter, lines: list[str]) -> None:
+    if not lines:
+        terminalreporter.write_line("lakeflow: sweep dry run found nothing to delete")
+        return
+    terminalreporter.write_line("lakeflow: sweep dry run deleted nothing; it would delete:")
+    for line in lines:
+        terminalreporter.write_line(f"  {line}")
 
 
 def _count(number: int, noun: str) -> str:

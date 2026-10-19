@@ -42,7 +42,7 @@ from pytest_databricks_lakeflow import Lakeflow, bundle, session
 
 sys.path.insert(0, {unit_tests!r})
 
-from fakes import FakeWorkspaceClient, example_settings
+from fakes import FakeWorkspaceClient, example_settings, sweep_candidates
 
 
 def fake_cli(args, root, profile=None):
@@ -65,6 +65,19 @@ def pytest_configure(config):
     if hasattr(config, "workerinput"):
         bundle.run_cli = fake_cli
         session.make_workspace_client = make_client
+"""
+
+SWEEP_LOGGING = """
+
+from pathlib import Path
+
+
+def make_client(profile):
+    ws = FakeWorkspaceClient()
+    ws.jobs.add(example_settings())
+    ws.jobs.listed = sweep_candidates()
+    ws.jobs.delete_log = Path({deleted!r})
+    return ws
 """
 
 GIT_LOGGING = """
@@ -201,6 +214,18 @@ class TestSharedSetup:
         assert {t["pytest_git_branch"] for t in created} == {"topic"}
         assert {t["pytest_user"] for t in created} == {"someone@example.com"}
         assert not calls.exists(), calls.read_text()
+
+    def test_xdist_sweeps_once_with_a_report(self, pytester: pytest.Pytester, bundle_dir: Path) -> None:
+        pytest.importorskip("xdist")
+        deleted = pytester.path / "deleted.log"
+        make_xdist_conftest(pytester, STAGING_FIXTURE + SWEEP_LOGGING.format(deleted=str(deleted)))
+        test = "def test_{i}(lakeflow, staging):\n    lakeflow.template('my_job')\n    staging.template('my_job')\n"
+        pytester.makepyfile("\n".join(test.format(i=i) for i in range(6)))
+        result = pytester.runpytest("-n", "2", "--lakeflow-sweep", "--lakeflow-sweep-report=sweep.json")
+        result.assert_outcomes(passed=6)
+        assert deleted.read_text().split() == ["1", "2", "7"]
+        report = json.loads((pytester.path / "sweep.json").read_text())
+        assert (report["dry_run"], report["jobs"]) == (False, [1, 2, 7])
 
 
 class TestRunId:

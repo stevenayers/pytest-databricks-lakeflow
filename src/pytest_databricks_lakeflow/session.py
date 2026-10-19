@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
+import re
 import secrets
 import subprocess
 import time
@@ -11,18 +13,21 @@ import urllib.parse
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import jobs
+from databricks.sdk.service import jobs, workspace
 from filelock import FileLock
 
 from pytest_databricks_lakeflow import bundle, helpers
 from pytest_databricks_lakeflow.errors import LakeflowError
+from pytest_databricks_lakeflow.settings import tag_value
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.client import Lakeflow
@@ -37,6 +42,70 @@ BRANCH_VARIABLES = ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "BUILD_SOURCEBRANCHNAM
 USER_VARIABLES = ("GITHUB_ACTOR", "BUILD_REQUESTEDFOREMAIL")
 GIT_TIMEOUT_SECONDS = 10
 CLIENT_ATTEMPTS = 4
+HOUR_MS = 3_600_000
+SweepScope = Literal["mine", "all"]
+SWEEP_SCOPES: tuple[str, ...] = get_args(SweepScope)
+SWEEP_REPORT_VERSION = 1
+SWEEP_STATE_FILE = "lakeflow_sweep.json"
+EXPIRES_TAG = "pytest_expires"
+EXPIRES_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+LIFECYCLE_NOTEBOOK = re.compile(rf"(setup|teardown)_[0-9a-f]{{{helpers.NOTEBOOK_DIGEST_CHARS}}}")
+SCHEMA_SUFFIX = "[0-9a-f]{8}"
+PYTEST_SCHEMA = re.compile(rf"pytest_[a-z0-9_]+_{SCHEMA_SUFFIX}")
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class SweepOptions:
+    """What `--lakeflow-sweep` deletes besides this user's old ephemeral jobs.
+
+    Attributes:
+        scope: `mine` for jobs and schemas this user created, `all` for anyone's.
+        schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas from other runs are dropped too.
+        notebooks: Also delete old `setup_<hash>` and `teardown_<hash>` notebooks from the helpers folder.
+        branch: Delete only jobs whose `pytest_git_branch` tag is this branch.
+        dry_run: Delete nothing, and report what would be deleted.
+        report: A file to write the report to, as JSON.
+    """
+
+    scope: SweepScope = "mine"
+    schemas_catalog: str | None = None
+    notebooks: bool = False
+    branch: str | None = None
+    dry_run: bool = False
+    report: Path | None = None
+
+
+DEFAULT_SWEEP_OPTIONS = SweepOptions()
+
+
+@dataclass(frozen=True)
+class SweepReport:
+    """What a sweep deleted, or with `dry_run` would have deleted.
+
+    Attributes:
+        dry_run: Whether the sweep only listed what it would delete.
+        jobs: The ids of the jobs.
+        schemas: The full names of the schemas.
+        notebooks: The workspace paths of the notebooks.
+        errors: What could not be listed or deleted.
+    """
+
+    dry_run: bool
+    jobs: tuple[int, ...] = ()
+    schemas: tuple[str, ...] = ()
+    notebooks: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": SWEEP_REPORT_VERSION,
+            "dry_run": self.dry_run,
+            "jobs": list(self.jobs),
+            "schemas": list(self.schemas),
+            "notebooks": list(self.notebooks),
+            "errors": list(self.errors),
+        }
 
 
 @dataclass(frozen=True)
@@ -79,12 +148,17 @@ class SessionState:
         keep: Whether `--lakeflow-keep` is set.
         keep_failed: `True` for `--lakeflow-keep-failed`, `False` for `--no-lakeflow-keep-failed`, or `None`.
         sweep: Whether `--lakeflow-sweep` is set.
+        sweep_options: What the sweep covers, from the `--lakeflow-sweep-*` flags.
+        keep_ttl: How long the `pytest_expires` tag protects each new job from the sweep, from
+            `--lakeflow-keep-ttl`, or `None`.
         destroy: Whether `--lakeflow-destroy` is set.
         item: The test that is running, or `None` between tests.
         setups: The outcome of setting up each bundle target: its state, or the error it failed with.
         lakeflows: Every `Lakeflow` used in this session.
         deployed: The root, target, profile and variables of each bundle target that this session deployed.
         swept: Whether this process has swept leftover jobs.
+        sweep_dry_run: After a sweep dry run, in the process that ran it and on the xdist controller, a line for each
+            job, schema and notebook it would delete and for each error. `None` without a dry run.
         kept_jobs: The URL of each ephemeral job that was kept, for the terminal summary.
         kept_schemas: The full name of each temporary schema that was kept.
         cancelled_runs: The number of runs cancelled at session end.
@@ -102,12 +176,15 @@ class SessionState:
     keep: bool = False
     keep_failed: bool | None = None
     sweep: bool = False
+    sweep_options: SweepOptions = field(default_factory=SweepOptions)
+    keep_ttl: timedelta | None = None
     destroy: bool = False
     item: pytest.Item | None = None
     setups: dict[BundleKey, dict[str, Any] | Exception] = field(default_factory=dict)
     lakeflows: list[Lakeflow] = field(default_factory=list)
     deployed: list[tuple[str, str, str | None, tuple[tuple[str, str], ...]]] = field(default_factory=list)
     swept: bool = False
+    sweep_dry_run: list[str] | None = None
     kept_jobs: list[str] = field(default_factory=list)
     kept_schemas: list[str] = field(default_factory=list)
     cancelled_runs: int = 0
@@ -134,7 +211,7 @@ class SessionState:
     def bundle_state(self, key: BundleKey, ws: WorkspaceClient, sweep_hours: float) -> dict[str, Any]:
         """Set up a bundle target the first time it is used in this session, once for all xdist workers.
 
-        The worker that sets it up also sweeps leftover jobs when `--lakeflow-sweep` is set.
+        With `--lakeflow-sweep`, the first setup in the session also sweeps, once for all xdist workers.
 
         Args:
             key: The bundle target.
@@ -160,24 +237,51 @@ class SessionState:
 
     def _set_up(self, key: BundleKey, ws: WorkspaceClient, sweep_hours: float) -> None:
         path = None if self.state_dir is None else self.state_dir / key.file_name()
-        produced_here = False
-
-        def produce() -> dict[str, Any]:
-            nonlocal produced_here
-            produced_here = True
-            return setup(ws, key)
 
         try:
-            state = shared_state(path, produce)
+            state = shared_state(path, lambda: setup(ws, key))
         except Exception as e:
             self.setups[key] = e
             raise
         self.setups[key] = state
         if key.sync == "deploy":
             self.deployed.append((str(key.root), key.target, key.profile, key.variables))
-        if produced_here and self.sweep and not self.swept:
+        if self.sweep and not self.swept:
             self.swept = True
-            sweep(ws, self.run_id, sweep_hours, user=state.get("user"))
+            self._sweep(ws, state, sweep_hours)
+
+    def _sweep(self, ws: WorkspaceClient, state: dict[str, Any], sweep_hours: float) -> None:
+        path = None if self.state_dir is None else self.state_dir / SWEEP_STATE_FILE
+        swept_here = False
+
+        def produce() -> dict[str, Any]:
+            nonlocal swept_here
+            swept_here = True
+            folder = folder_of_helpers(state)
+            report = sweep(ws, self.run_id, sweep_hours, folder, self.sweep_options, user=state.get("user"))
+            return report.as_dict()
+
+        report = shared_state(path, produce)
+        if swept_here and report["dry_run"]:
+            self.sweep_dry_run = _dry_run_lines(report, ws.config.host)
+
+    def expiry_tag(self) -> dict[str, str]:
+        """The `pytest_expires` tag for a new job, `keep_ttl` from now in UTC, or no tag without `keep_ttl`."""
+        if self.keep_ttl is None:
+            return {}
+        return {EXPIRES_TAG: (datetime.now(UTC) + self.keep_ttl).strftime(EXPIRES_FORMAT)}
+
+
+def _dry_run_lines(report: Mapping[str, Any], host: str | None) -> list[str]:
+    lines: list[str] = []
+    for job_id in report["jobs"]:
+        lines.append(f"job {host}/jobs/{job_id}")
+    for name in report["schemas"]:
+        lines.append(f"schema {name}")
+    for path in report["notebooks"]:
+        lines.append(f"notebook {path}")
+    lines.extend(report["errors"])
+    return lines
 
 
 _sessions: list[SessionState] = []
@@ -284,6 +388,16 @@ def _git(cwd: Path, *args: str) -> str | None:
         log.debug("git %s failed: %s", " ".join(args), e)
         return None
     return result.stdout.strip() or None
+
+
+def schema_prefix(run_id: str) -> str:
+    """Start the name of a temporary schema of the run `run_id`: `pytest_<run id>_`, lower case, `_` for the rest."""
+    return f"pytest_{re.sub(r'[^a-z0-9_]', '_', run_id.lower())}_"
+
+
+def folder_of_helpers(state: Mapping[str, Any]) -> str:
+    """The workspace folder of the helper notebooks, from a bundle target's state."""
+    return posixpath.dirname(state["helpers"]["set_values"])
 
 
 def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
@@ -461,44 +575,182 @@ def exists(ws: WorkspaceClient, path: str) -> bool:
     return True
 
 
-def sweep(ws: WorkspaceClient, run_id: str, hours: float, user: str | None = None) -> list[int]:
-    """Delete this user's ephemeral jobs from other runs that are older than `hours`.
+def sweep(
+    ws: WorkspaceClient,
+    run_id: str,
+    hours: float,
+    helpers_folder: str,
+    options: SweepOptions = DEFAULT_SWEEP_OPTIONS,
+    *,
+    user: str | None = None,
+) -> SweepReport:
+    """Delete ephemeral jobs from other runs that are older than `hours`, and what else `options` asks for.
+
+    A job tagged `pytest_expires` is old once that time has passed, whatever its age. A failed delete or listing
+    is logged and recorded in the report's `errors`, and the sweep carries on.
 
     Args:
         ws: The workspace client.
-        run_id: The id of this run, whose jobs are kept.
-        hours: The age after which a job is deleted.
-        user: The workspace user whose jobs are swept. Looked up when not given.
+        run_id: The id of this run, whose jobs and schemas are kept.
+        hours: The age after which a job, schema or notebook is deleted.
+        helpers_folder: The folder of the helper notebooks, for `options.notebooks`.
+        options: What else to sweep, and whether only to report it.
+        user: The workspace user whose jobs and schemas are swept with scope `mine`. Looked up when not given.
 
     Returns:
-        The ids of the deleted jobs.
+        What was deleted, or with `options.dry_run` what would have been. Written to `options.report` when set.
     """
-    me = user or ws.current_user.me().user_name
-    cutoff_ms = (time.time() - hours * 3600) * 1000
-    # Listing finishes before the first delete, so deleting does not disturb the paging.
+    me = None
+    if options.scope == "mine":
+        me = user or ws.current_user.me().user_name
+    now_ms = time.time() * 1000
+    cutoff_ms = now_ms - hours * HOUR_MS
+    errors: list[str] = []
+    # Each listing finishes before the first delete, so deleting does not disturb the paging.
+    stale_jobs = _stale_jobs(ws, run_id, me, cutoff_ms, now_ms, options.branch, errors)
+    deleted_jobs = _delete_each("job", stale_jobs, ws.jobs.delete, options.dry_run, errors)
+    deleted_schemas: list[str] = []
+    if options.schemas_catalog:
+        stale = _stale_schemas(ws, options.schemas_catalog, run_id, me, cutoff_ms, errors)
+        drop = partial(ws.schemas.delete, force=True)
+        deleted_schemas = _delete_each("schema", stale, drop, options.dry_run, errors)
+    deleted_notebooks: list[str] = []
+    if options.notebooks:
+        stale = _stale_notebooks(ws, helpers_folder, cutoff_ms, errors)
+        deleted_notebooks = _delete_each("notebook", stale, ws.workspace.delete, options.dry_run, errors)
+    report = SweepReport(
+        dry_run=options.dry_run,
+        jobs=tuple(deleted_jobs),
+        schemas=tuple(deleted_schemas),
+        notebooks=tuple(deleted_notebooks),
+        errors=tuple(errors),
+    )
+    if options.dry_run:
+        log.info(
+            "Sweep dry run: would delete %d jobs, %d schemas and %d notebooks",
+            len(deleted_jobs),
+            len(deleted_schemas),
+            len(deleted_notebooks),
+        )
+    else:
+        log.info("Swept %d leftover ephemeral jobs", len(deleted_jobs))
+        if options.schemas_catalog or options.notebooks:
+            log.info("Swept %d leftover schemas and %d notebooks", len(deleted_schemas), len(deleted_notebooks))
+    if options.report is not None:
+        options.report.parent.mkdir(parents=True, exist_ok=True)
+        options.report.write_text(json.dumps(report.as_dict(), indent=2) + "\n")
+    return report
+
+
+def _stale_jobs(
+    ws: WorkspaceClient,
+    run_id: str,
+    user: str | None,
+    cutoff_ms: float,
+    now_ms: float,
+    branch: str | None,
+    errors: list[str],
+) -> list[int]:
     stale: list[int] = []
-    for job in ws.jobs.list(limit=100):
-        if job.job_id is not None and _is_stale(job, me, run_id, cutoff_ms):
-            stale.append(job.job_id)
-    deleted = []
-    for job_id in stale:
-        try:
-            ws.jobs.delete(job_id)
-        except DatabricksError as e:
-            log.warning("Could not delete job %s: %s", job_id, e)
-        else:
-            deleted.append(job_id)
-    log.info("Swept %d leftover ephemeral jobs", len(deleted))
-    return deleted
+    try:
+        for job in ws.jobs.list(limit=100):
+            if job.job_id is not None and _is_stale(job, user, run_id, cutoff_ms, now_ms, branch):
+                stale.append(job.job_id)
+    except DatabricksError as e:
+        _record(errors, f"Could not list the jobs: {e}")
+    return stale
 
 
-def _is_stale(job: jobs.BaseJob, user: str | None, run_id: str, cutoff_ms: float) -> bool:
-    """Whether `job` is an ephemeral job of `user` from another run, created before `cutoff_ms`."""
-    if job.creator_user_name != user:
+def _is_stale(
+    job: jobs.BaseJob, user: str | None, run_id: str, cutoff_ms: float, now_ms: float, branch: str | None
+) -> bool:
+    """Whether `job` is an ephemeral job from another run that is past its expiry, or else created before the cutoff.
+
+    `user` `None` stands for any creator, and `branch` `None` for any branch.
+    """
+    if user is not None and job.creator_user_name != user:
         return False
     tags = (job.settings.tags if job.settings else None) or {}
     if "pytest" not in tags or "pytest_run_id" not in tags:
         return False
     if tags["pytest_run_id"] == run_id:
         return False
+    if branch is not None and tags.get("pytest_git_branch") != tag_value(branch):
+        return False
+    expiry_ms = _expiry_ms(tags.get(EXPIRES_TAG))
+    if expiry_ms is not None:
+        return expiry_ms < now_ms
     return (job.created_time or 0) < cutoff_ms
+
+
+def _expiry_ms(value: str | None) -> float | None:
+    """Read a `pytest_expires` tag. A missing or unreadable tag gives `None`, and the job's age decides."""
+    if not value:
+        return None
+    try:
+        expiry = datetime.fromisoformat(value)
+    except ValueError:
+        log.warning("Ignoring the unreadable %s tag %r", EXPIRES_TAG, value)
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=UTC)
+    return expiry.timestamp() * 1000
+
+
+def _stale_schemas(
+    ws: WorkspaceClient, catalog: str, run_id: str, user: str | None, cutoff_ms: float, errors: list[str]
+) -> list[str]:
+    """The temporary schemas in `catalog` of other runs, created before the cutoff, by `user` unless it is `None`."""
+    this_run = re.compile(re.escape(schema_prefix(run_id)) + SCHEMA_SUFFIX)
+    stale: list[str] = []
+    try:
+        for info in ws.schemas.list(catalog_name=catalog):
+            name = info.name or ""
+            if not PYTEST_SCHEMA.fullmatch(name) or this_run.fullmatch(name):
+                continue
+            if user is not None and info.created_by != user:
+                continue
+            if info.full_name and (info.created_at or 0) < cutoff_ms:
+                stale.append(info.full_name)
+    except DatabricksError as e:
+        _record(errors, f"Could not list the schemas in {catalog}: {e}")
+    return stale
+
+
+def _stale_notebooks(ws: WorkspaceClient, folder: str, cutoff_ms: float, errors: list[str]) -> list[str]:
+    """The setup and teardown notebooks in `folder` last changed before the cutoff. Other names are never matched."""
+    stale: list[str] = []
+    try:
+        for info in ws.workspace.list(folder):
+            path = info.path or ""
+            if info.object_type != workspace.ObjectType.NOTEBOOK:
+                continue
+            if not LIFECYCLE_NOTEBOOK.fullmatch(posixpath.basename(path)):
+                continue
+            if (info.modified_at or 0) < cutoff_ms:
+                stale.append(path)
+    except DatabricksError as e:
+        _record(errors, f"Could not list the notebooks in {folder}: {e}")
+    return stale
+
+
+def _delete_each(kind: str, names: list[T], delete: Callable[[T], None], dry_run: bool, errors: list[str]) -> list[T]:
+    """Delete each of `names`, or with `dry_run` only log them, and return those deleted or that would be."""
+    if dry_run:
+        for name in names:
+            log.info("Would delete %s %s", kind, name)
+        return list(names)
+    deleted: list[T] = []
+    for name in names:
+        try:
+            delete(name)
+        except DatabricksError as e:
+            _record(errors, f"Could not delete {kind} {name}: {e}")
+        else:
+            deleted.append(name)
+    return deleted
+
+
+def _record(errors: list[str], message: str) -> None:
+    log.warning("%s", message)
+    errors.append(message)
