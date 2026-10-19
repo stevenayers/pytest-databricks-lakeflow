@@ -356,9 +356,9 @@ def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Ma
         `settings`.
 
     Raises:
-        LakeflowError: If a key starts with `__pytest_`, an override holds a field that `compute.Environment` does
-            not have, a spec would set both `environment_version` and `base_environment`, or the job would have more
-            than 10 environments. Nothing is changed then.
+        LakeflowError: If a key starts with `__pytest_`, an override is not a mapping or holds a field that
+            `compute.Environment` does not have, a spec would set both `environment_version` and
+            `base_environment`, or the job would have more than 10 environments. Nothing is changed then.
     """
     if not environments:
         return settings
@@ -367,6 +367,10 @@ def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Ma
         raise LakeflowError(f"Environment keys starting with {PREFIX!r} are reserved for the plugin: {reserved}")
     known = sorted(f.name for f in fields(compute.Environment))
     for key, override in environments.items():
+        if not isinstance(override, Mapping):
+            raise LakeflowError(
+                f"environments[{key!r}] must be a mapping of spec fields to values, not {type(override).__name__}"
+            )
         # Environment.from_dict drops a field it does not know without a word.
         unknown = sorted(set(override) - set(known))
         if unknown:
@@ -715,7 +719,7 @@ def wrap_task(
         LakeflowError: If the task is not in the job, the task refers to task values of a task that is not
             stubbed, or a value is too large or not JSON-serialisable.
     """
-    target = next((t for t in settings.tasks or [] if t.task_key == task_key), None)
+    target = _find_task(settings, task_key)
     if target is None:
         available = sorted(t.task_key for t in settings.tasks or [])
         raise LakeflowError(f"No task {task_key!r} in the job. Available: {available}")
@@ -739,6 +743,13 @@ def wrap_task(
     if stubs or probes:
         _add_helper_compute(settings, helpers)
     return settings
+
+
+def _find_task(settings: jobs.JobSettings, task_key: str) -> jobs.Task | None:
+    for task in settings.tasks or []:
+        if task.task_key == task_key:
+            return task
+    return None
 
 
 def upstream_values_from(
@@ -765,7 +776,7 @@ def upstream_values_from(
     """
     if run.job_key != job_key:
         raise LakeflowError(f"upstream_from is a run of job {run.job_key!r}, not of {job_key!r}")
-    target = next((t for t in settings.tasks or [] if t.task_key == task_key), None)
+    target = _find_task(settings, task_key)
     if target is None:
         return {}
     upstream: dict[str, dict[str, object]] = {}
