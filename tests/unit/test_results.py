@@ -251,7 +251,7 @@ class TestTaskRunStates:
             ("DISABLED", "disabled", False),
             ("CANCELED", "cancelled", False),
             ("UPSTREAM_CANCELED", None, False),
-            (None, None, True),
+            (None, None, False),
         ],
     )
     def test_state_properties(self, state: str | None, flag: str | None, ran: bool) -> None:
