@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Collection, Mapping
 from datetime import timedelta
 from typing import Any
@@ -178,7 +179,11 @@ class TestWrapTask:
         transform = (settings.tasks or [])[1]
         assert transform.notebook_task is not None
         transform.notebook_task.base_parameters = {"upstream": "{{tasks.extract.result_state}}"}
-        with pytest.raises(LakeflowError, match=r"refers to task values of \['extract'\]"):
+        message = (
+            "Task 'transform' refers to ['extract'] in its settings, which task() leaves out of the job, and "
+            "jobs/create refuses a reference to a task that is not in the job. Pass them in upstream_task_values."
+        )
+        with pytest.raises(LakeflowError, match=re.escape(message)):
             wrap_task(settings, "transform", {}, [], HELPERS)
 
 
@@ -196,7 +201,7 @@ class TestStubOutputs:
                 "rows": "{{tasks.extract.output.rows}}",
             }
         )
-        outputs = {"first_row.n": 3, "alert_state": "OK", "rows": [{"n": 3, "s": "a\\b"}]}
+        outputs = {"first_row.n": 3, "alert_state": "OK", "rows": [{"n": 3, "s": "a\\b", "u": "ü"}]}
         wrap_task(settings, "transform", {"extract": Stub(outputs=outputs)}, [], HELPERS)
         assert keys(settings) == ["extract", "transform"]
         stub, target = settings.tasks or []
@@ -205,7 +210,7 @@ class TestStubOutputs:
             "row_count": "{{tasks.extract.values.row_count}}",
             "n": "3",
             "msg": 'got OK "ok"',
-            "rows": '[{"n":3,"s":"a\\\\b"}]',
+            "rows": '[{"n":3,"s":"a\\\\b","u":"ü"}]',
         }
         assert target.depends_on == [jobs.TaskDependency(task_key="extract")]
         assert stub.notebook_task is not None and stub.notebook_task.base_parameters is not None

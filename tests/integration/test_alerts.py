@@ -7,7 +7,7 @@ Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
         LAKEFLOW_WAREHOUSE_ID=<warehouse id> \
-        uv run pytest tests/integration/test_alerts.py -n 4 --dist loadgroup --lakeflow-sweep
+        uv run pytest tests/integration/test_alerts.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations

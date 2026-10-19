@@ -8,7 +8,7 @@ test that runs the pipeline shares one run, marked with the ``xdist_group`` ``re
 the deployed one and runs one update at a time. Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration/test_pipelines.py -n 4 --dist loadgroup --lakeflow-sweep
+        uv run pytest tests/integration/test_pipelines.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations

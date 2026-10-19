@@ -889,7 +889,7 @@ class TestDisabledTaskKeys:
     def test_disabled_task_keys(self, disabled: list[str], all_done: bool, expected: set[str]) -> None:
         settings = disable_tasks(example_settings(), disabled)
         if all_done:
-            next(t for t in settings.tasks or [] if t.task_key == "load").run_if = jobs.RunIf.ALL_DONE
+            task(settings, "load").run_if = jobs.RunIf.ALL_DONE
         assert disabled_task_keys(settings) == expected
 
 
