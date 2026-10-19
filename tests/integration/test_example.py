@@ -1,9 +1,9 @@
-r"""The acceptance tests from the spec, run against the example bundle in a real workspace.
+r"""Integration tests for the ``example`` bundle (tests/integration/bundles/example), run in a real workspace.
 
 Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration -n 4
+        uv run pytest tests/integration/test_example.py -n 4 --lakeflow-sweep
 """
 
 from __future__ import annotations
