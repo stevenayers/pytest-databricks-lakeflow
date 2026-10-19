@@ -366,6 +366,18 @@ def test_run_as_keep_runs_the_example_job(lakeflow: Lakeflow) -> None:
         assert job.run().succeeded
 
 
+def test_run_as_self_passes_the_pre_deploy_check(lakeflow: Lakeflow) -> None:
+    # The test target sets run_as to ${workspace.current_user.userName}, which setup checks before `bundle deploy`.
+    me = lakeflow.ws.current_user.me().user_name
+    assert lakeflow.template("my_example_job").run_as == jobs.JobRunAs(user_name=me)
+    with lakeflow.job("my_example_job", run_as=me) as job:
+        assert job.job_id is not None
+        created = lakeflow.ws.jobs.get(job.job_id)
+        assert created.run_as_user_name == me
+        assert created.settings is not None
+        assert created.settings.run_as == jobs.JobRunAs(user_name=me)
+
+
 @pytest.fixture(scope="module")
 def lakeflow_on_version_4(lakeflow: Lakeflow) -> Lakeflow:
     return dataclasses.replace(lakeflow, environment_version="4")
