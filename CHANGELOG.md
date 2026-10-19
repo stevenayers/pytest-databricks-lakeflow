@@ -3,6 +3,21 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.5.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.4.0...v0.5.0) (2026-10-19)
+
+
+### Features
+
+* add per-job serverless environment overrides to job() and task() ([#128](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/128)) ([5f9cd3f](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/5f9cd3fb5528899901261d8e8c4dfdcd772cb101))
+* add start() and RunHandle, a poll interval and task states on timeout ([#130](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/130)) ([3b9ec27](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/3b9ec27439f1c9aa69bac27bb301e20be50f05ab))
+* read the rows of a SQL file task into TaskRun.sql_result ([#131](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/131)) ([d152151](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/d1521512e3aae3145196d509d8cf5013b9ef71ad))
+* replay a task test with the task values a previous run captured ([#129](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/129)) ([2a8974d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/2a8974d241e685208235b175d2a8209571a588e6))
+
+
+### Bug Fixes
+
+* validate poll_interval and environment overrides, and land the wave 2 review notes ([#132](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/132)) ([9b54e36](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/9b54e36336929a2c623bc206126148e44bf736b3))
+
 ## [0.4.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.3.0...v0.4.0) (2026-10-19)
 
 
