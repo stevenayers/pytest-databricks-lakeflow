@@ -13,13 +13,18 @@ import re
 import warnings
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
 
 from .conftest import lakeflow_for
+
+if TYPE_CHECKING:
+    from databricks.sdk.dbutils import RemoteDbUtils
 
 
 @pytest.fixture(scope="module")
@@ -232,3 +237,96 @@ def test_environment_version_override(lakeflow_on_version_4: Lakeflow) -> None:
         spec = environments[0].spec
         assert spec is not None
         assert spec.environment_version == "4"
+
+
+def seed_orders(spark, dbutils, params):
+    schema = params["schema"]
+    spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {schema}.landing")
+    dbutils.fs.put(f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv", "id,sku\n1,a\n2,b\n", True)
+    return {"schema": schema, "param1": params["param1"]}
+
+
+# Annotated with a name the notebook does not import, to show the cluster does not evaluate annotations.
+def remove_landing_file(dbutils: RemoteDbUtils, params: dict[str, str]) -> bool:
+    return dbutils.fs.rm(f"/Volumes/{params['schema'].replace('.', '/')}/landing/orders.csv")
+
+
+def check_compute(spark):
+    return spark.sql("SELECT 1 AS ready").collect()[0]["ready"]
+
+
+def report_params(params):
+    return params
+
+
+def broken_setup():
+    raise ValueError("no seed data")
+
+
+def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema, "mode": "incremental"},
+            setup=seed_orders,
+            teardown=remove_landing_file,
+        ) as job:
+            run = job.run(params={"param1": "seeded"})
+            assert run.succeeded, run
+            assert run.setup is not None and run.setup.succeeded
+            assert run.setup.output_json == {"schema": schema, "param1": "seeded"}
+            assert run.task("load").output == "loaded 2 seeded orders"
+            assert run.teardown is not None and run.teardown.succeeded
+            assert run.teardown.output_json is True
+        landing_file = f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv"
+        with pytest.raises(NotFound):
+            lakeflow.ws.files.get_metadata(landing_file)
+
+
+def test_teardown_runs_after_a_failed_task(lakeflow: Lakeflow) -> None:
+    with lakeflow.job(
+        "my_example_job", params={"param1": "forbidden"}, setup=check_compute, teardown=report_params
+    ) as job:
+        run = job.run()
+        assert run.failed
+        assert run.task("transform").raised(PermissionError)
+        assert run.setup is not None and run.setup.output_json == 1
+        assert run.teardown is not None and run.teardown.succeeded, run.teardown
+        assert run.teardown.output_json == {"param1": "forbidden", "param2": "world", "schema": "", "mode": "full"}
+
+
+def test_only_still_runs_setup_and_teardown(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", setup=check_compute, teardown=report_params) as job:
+        # load depends on tasks that only leaves out; the platform still holds it until the setup has finished.
+        run = job.run(only=["load"])
+        assert run.succeeded, run
+        assert sorted(run.injected_tasks) == ["__pytest_setup", "__pytest_teardown"]
+        assert run.setup is not None and run.setup.succeeded
+        assert run.teardown is not None and run.teardown.succeeded, run.teardown
+        assert sorted(run.skipped_tasks) == ["extract", "my_wheel_task", "transform"]
+        timings = {t.task_key: t for t in lakeflow.ws.jobs.get_run(run.run_id).tasks or []}
+        assert (timings["load"].start_time or 0) >= (timings["__pytest_setup"].end_time or 0)
+
+
+def test_failed_setup_is_named_first(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", setup=broken_setup, teardown=report_params) as job:
+        run = job.run()
+        assert run.failed
+        assert "failing=['setup: ValueError: no seed data'" in repr(run), run
+        assert run.task("extract").upstream_failed
+        assert run.teardown is not None and run.teardown.succeeded, run.teardown
+
+
+def test_task_setup_runs_before_the_stubs(lakeflow: Lakeflow) -> None:
+    with lakeflow.task(
+        "my_example_job.transform",
+        upstream_task_values={"extract": {"row_count": 1, "source_path": "/Volumes/x/y/z"}},
+        setup=check_compute,
+        teardown=report_params,
+    ) as task:
+        run = task.run()
+        assert run.succeeded, run
+        setup, stub = run.injected_tasks["__pytest_setup"], run.injected_tasks["extract"]
+        assert setup.succeeded and stub.succeeded
+        assert run.teardown is not None and run.teardown.succeeded, run.teardown
