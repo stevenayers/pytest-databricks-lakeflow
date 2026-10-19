@@ -347,10 +347,10 @@ class Lakeflow:
                 the task's key and place, so the tasks downstream of it still depend on it and their
                 `{{tasks.<key>.values.<name>}}` references resolve against it, and `run(only=...)` adds it whenever a
                 selected task depends on it. Their `{{tasks.<key>.output.<path>}}` references are replaced by the
-                stub's `outputs`. It drops the task's
-                `depends_on`, so the tasks upstream of it still run on a full run but no longer hold it back. It
-                is applied after `task_params`, `disable`, `force_conditions`, `extra_dependencies` and
-                `task_overrides`, so what they set on that task is lost. It appears in `JobRun.injected_tasks`.
+                stub's `outputs`. It drops the task's `depends_on`, so the tasks upstream of it still run on a full
+                run but no longer hold it back. It is applied after `task_params`, `disable`, `force_conditions`,
+                `extra_dependencies` and `task_overrides`, so what they set on that task is lost. It appears in
+                `JobRun.injected_tasks`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -460,14 +460,14 @@ class Lakeflow:
 
         Raises:
             KeyError: If the bundle has no such job.
-            LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
-                task that is not stubbed or to an output that its stub does not give, `upstream_from` is a run of
-                another job or lacks the captured values of an upstream task, a value is too large or not
-                JSON-serialisable, an output contains `{{` or is not JSON-serialisable, an entry of
-                `extra_dependencies` cannot be used as for `job()`, `children` is `"refuse"` and the task is a Run Job
-                task, or `task_params` or `task_overrides` names another task. Also in the cases where `job()` raises
-                it because `task_params`, `environments` or `task_overrides` cannot be applied or `setup` or
-                `teardown` cannot run.
+            LakeflowError: If called outside a test, the job has no such task, the task refers to a task that is
+                not stubbed (its task values or any other `{{tasks.<key>.` reference) or to an output that its stub
+                does not give, `upstream_from` is a run of another job or lacks the captured values of an upstream
+                task, a value is too large or not JSON-serialisable, an output contains `{{` or is not
+                JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
+                `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
+                Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
+                cannot be applied or `setup` or `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)

@@ -664,58 +664,58 @@ def event(event_id: str, update_id: str | None, timestamp: str, level: str = "IN
     return pipelines.PipelineEvent(id=event_id, origin=origin, timestamp=timestamp, level=pipelines.EventLevel(level))
 
 
+def pipeline_update(ws: FakeWorkspaceClient) -> PipelineUpdate:
+    # The task run started at 2026-10-19T19:00:27Z, a second before the platform created the update.
+    return PipelineUpdate(
+        pipeline_id="abc",
+        update_id="mine",
+        state="FAILED",
+        cause="JOB_TASK",
+        full_refresh=False,
+        _ws=cast(WorkspaceClient, ws),
+        _since=1_792_436_427_000,
+    )
+
+
+def fake_with_events() -> FakeWorkspaceClient:
+    ws = FakeWorkspaceClient()
+    # Newest first, as the platform returns them. "started" is logged a few milliseconds before the update's
+    # creation time, which is why the lookup stops at the task run's start rather than at the update's creation.
+    ws.pipelines.events["abc"] = [
+        event("next", "later", "2026-10-19T19:05:00.000Z", "ERROR"),
+        event("failed", "mine", "2026-10-19T19:00:54.285Z", "ERROR"),
+        event("progress", "mine", "2026-10-19T19:00:50.019Z"),
+        event("started", "mine", "2026-10-19T19:00:28.187Z"),
+        event("created", None, "2026-10-19T18:00:00.000Z"),
+        event("old", "earlier", "2026-10-19T17:00:00.000Z", "ERROR"),
+    ]
+    return ws
+
+
 class TestPipelineUpdate:
     """PipelineUpdate reads the events its update logged, and only those."""
 
-    @staticmethod
-    def update(ws: FakeWorkspaceClient) -> PipelineUpdate:
-        # The task run started at 2026-10-19T19:00:27Z, a second before the platform created the update.
-        return PipelineUpdate(
-            pipeline_id="abc",
-            update_id="mine",
-            state="FAILED",
-            cause="JOB_TASK",
-            full_refresh=False,
-            _ws=cast(WorkspaceClient, ws),
-            _since=1_792_436_427_000,
-        )
-
-    @staticmethod
-    def fake_with_events() -> FakeWorkspaceClient:
-        ws = FakeWorkspaceClient()
-        # Newest first, as the platform returns them. "started" is logged a few milliseconds before the update's
-        # creation time, which is why the lookup stops at the task run's start rather than at the update's creation.
-        ws.pipelines.events["abc"] = [
-            event("next", "later", "2026-10-19T19:05:00.000Z", "ERROR"),
-            event("failed", "mine", "2026-10-19T19:00:54.285Z", "ERROR"),
-            event("progress", "mine", "2026-10-19T19:00:50.019Z"),
-            event("started", "mine", "2026-10-19T19:00:28.187Z"),
-            event("created", None, "2026-10-19T18:00:00.000Z"),
-            event("old", "earlier", "2026-10-19T17:00:00.000Z", "ERROR"),
-        ]
-        return ws
-
     def test_events_filter_by_level(self) -> None:
-        ws = self.fake_with_events()
-        errors = self.update(ws).events(level="ERROR")
+        ws = fake_with_events()
+        errors = pipeline_update(ws).events(level="ERROR")
         assert [e.id for e in errors] == ["failed"]
         assert ws.pipelines.calls == [
             {"method": "list_pipeline_events", "pipeline_id": "abc", "filter": "level='ERROR'"}
         ]
 
     def test_events_without_a_level_pass_no_filter(self) -> None:
-        ws = self.fake_with_events()
-        assert [e.id for e in self.update(ws).events()] == ["failed", "progress", "started"]
+        ws = fake_with_events()
+        assert [e.id for e in pipeline_update(ws).events()] == ["failed", "progress", "started"]
         assert ws.pipelines.calls == [{"method": "list_pipeline_events", "pipeline_id": "abc", "filter": None}]
 
     def test_events_stop_paging_before_the_task_started(self) -> None:
-        ws = self.fake_with_events()
-        self.update(ws).events()
+        ws = fake_with_events()
+        pipeline_update(ws).events()
         assert ws.pipelines.read_events == ["next", "failed", "progress", "started", "created"]
 
     def test_workspace_client_stays_out_of_the_repr_and_equality(self) -> None:
-        first = self.update(FakeWorkspaceClient())
-        assert first == self.update(FakeWorkspaceClient())
+        first = pipeline_update(FakeWorkspaceClient())
+        assert first == pipeline_update(FakeWorkspaceClient())
         assert repr(first) == (
             "PipelineUpdate(pipeline_id='abc', update_id='mine', state='FAILED', cause='JOB_TASK', full_refresh=False)"
         )

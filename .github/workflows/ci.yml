@@ -163,16 +163,28 @@ jobs:
       # tests/integration/conftest.py reads LAKEFLOW_CATALOG. --dist loadgroup keeps the tests of each xdist_group on one
       # worker, so a run that a module-scoped fixture shares between them happens once.
       - run: >-
-          uv run pytest tests/integration -n 4 --dist loadgroup -rA --lakeflow-sweep --junitxml=integration.xml
+          uv run pytest tests/integration -n 8 --dist loadgroup -rA --lakeflow-sweep --junitxml=integration.xml
           --lakeflow-report-dir=lakeflow-report
-      # A test cannot see its own report, so check here that the real runs wrote theirs: a report.json with at least
-      # one run for each test that waited for one, and the exported notebook of the task that fails on purpose.
+      # A test cannot see its own report, so check here that the real runs wrote theirs and the exported notebook of
+      # the task that fails on purpose. The step fails when there is no report.json, when one is not valid JSON, or
+      # when one does not hold the test's node id, its outcome and a list of runs that each have a run id.
       - name: Check the report files
         run: |
-          reports=$(find lakeflow-report -name report.json | sort)
-          test -n "$reports"
-          echo "$(echo "$reports" | wc -l) report.json files"
-          jq -s -e 'all(.[]; .runs | length > 0)' $reports > /dev/null
+          set -euo pipefail
+          mapfile -t reports < <(find lakeflow-report -name report.json | sort)
+          if [ "${#reports[@]}" -eq 0 ]; then
+            echo "::error::No report.json under lakeflow-report"
+            exit 1
+          fi
+          echo "${#reports[@]} report.json files"
+          for report in "${reports[@]}"; do
+            if ! jq -e '(.nodeid | type == "string") and (.outcome | type == "object")
+                and (.runs | type == "array" and length > 0) and all(.runs[]; .run_id | type == "number")' \
+                "$report" > /dev/null; then
+              echo "::error file=$report::Missing or malformed report.json"
+              exit 1
+            fi
+          done
           ls lakeflow-report/*test_job_surfaces_permission_error*/*/transform.html
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

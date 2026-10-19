@@ -1000,8 +1000,8 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
         stubs: Keys of the stub tasks. `select` adds only those that a selected task depends on, so only they run.
 
     Raises:
-        LakeflowError: If a selected task that is not a stub refers to a task that is neither selected nor a stub
-            that runs.
+        LakeflowError: If a selected task that is not a stub refers to the task values of a task that is neither
+            selected nor a stub that runs.
     """
     running = {*selected, *_running_stubs(settings, selected, stubs)}
     for task in settings.tasks or []:
@@ -1135,8 +1135,8 @@ def _render_output(key: str, stub: Stub, path: str) -> str:
         rendered = value
     else:
         try:
-            # Compact, as the platform spells rows and first_row: {"n":"1","m":""}.
-            rendered = json.dumps(value, separators=(",", ":"))
+            # Compact, as the platform spells rows and first_row: {"n":"1","m":""}, with non-ASCII text unescaped.
+            rendered = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError) as e:
             raise LakeflowError(f"Output {path!r} of stub {key!r} is not JSON-serialisable: {e}") from None
     # The platform substitutes the literal and would then resolve a reference inside it.
@@ -1207,18 +1207,27 @@ def wrap_task(
         `settings`.
 
     Raises:
-        LakeflowError: If the task is not in the job, the task refers to task values of a task that is not
-            stubbed or to an output its stub does not give, a value is too large or not JSON-serialisable, or an
-            output contains `{{` or is not JSON-serialisable.
+        LakeflowError: If the task is not in the job, the task refers to a task that is not stubbed (its task
+            values or any other `{{tasks.<key>.` reference) or to an output its stub does not give, a value is too
+            large or not JSON-serialisable, or an output contains `{{` or is not JSON-serialisable.
     """
     target = require_task(settings, task_key)
     if task_key in upstream_task_values:
         raise LakeflowError(f"upstream_task_values cannot stub {task_key!r}, the task under test")
-    referenced = set(TASK_REFERENCE.findall(json.dumps(target.as_dict())))
-    missing = sorted(referenced - set(upstream_task_values))
+    text = json.dumps(target.as_dict())
+    missing_values = sorted(set(TASK_VALUES_REFERENCE.findall(text)) - set(upstream_task_values))
+    if missing_values:
+        raise LakeflowError(
+            f"Task {task_key!r} refers to task values of {missing_values} in its settings. Pass them in "
+            "upstream_task_values."
+        )
+    # Unlike run(only=...), which leaves a task in the job and lets these references resolve against its DISABLED
+    # run, task() drops the task from the job, so jobs/create would refuse any reference to it.
+    missing = sorted(set(TASK_REFERENCE.findall(text)) - set(upstream_task_values))
     if missing:
         raise LakeflowError(
-            f"Task {task_key!r} refers to task values of {missing} in its settings. Pass them in upstream_task_values."
+            f"Task {task_key!r} refers to {missing} in its settings, which task() leaves out of the job, and "
+            "jobs/create refuses a reference to a task that is not in the job. Pass them in upstream_task_values."
         )
     stubs = as_stubs(upstream_task_values)
     target = _rewrite_outputs(target, stubs)
