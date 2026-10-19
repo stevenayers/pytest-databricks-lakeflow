@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -16,6 +18,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     create_kwargs,
     disable_tasks,
+    force_conditions,
     inject_lifecycle,
     inject_test_marker,
     pipeline_params,
@@ -27,7 +30,13 @@ from pytest_databricks_lakeflow.settings import (
 )
 
 from .conftest import NEEDS_REFRESH_SELECTION
-from .fakes import example_settings, parent_settings, pipeline_settings, reporting_settings
+from .fakes import (
+    branching_settings,
+    example_settings,
+    parent_settings,
+    pipeline_settings,
+    reporting_settings,
+)
 
 CLUSTER = "0123-456789-abcdef"
 NODEID = "tests/test_x.py::test_y"
@@ -744,6 +753,47 @@ class TestAddDependencies:
         assert repr(dependency) in str(e.value)
         assert 'sync="deploy"' in str(e.value)
         assert settings == example_settings(), "nothing changes before the error"
+
+
+class TestForceConditions:
+    """force_conditions replaces the operands of condition tasks with constants that give the chosen outcome."""
+
+    @pytest.mark.parametrize(("outcome", "expected"), [(True, "true"), (False, "false")])
+    def test_force_conditions_rewrites_operands(
+        self, caplog: pytest.LogCaptureFixture, outcome: bool, expected: str
+    ) -> None:
+        template = branching_settings()
+        with caplog.at_level(logging.INFO, logger="pytest_databricks_lakeflow"):
+            forced = force_conditions(branching_settings(), {"check": outcome})
+        check = task(forced, "check")
+        assert check.condition_task == jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right=expected)
+        assert check.depends_on == task(template, "check").depends_on
+        assert check.run_if == task(template, "check").run_if
+        assert "{{tasks." not in json.dumps(check.as_dict())
+        others = [t.as_dict() for t in forced.tasks or [] if t.task_key != "check"]
+        assert others == [t.as_dict() for t in template.tasks or [] if t.task_key != "check"]
+        assert (
+            f"Forcing condition task 'check' to {expected}; it compared '{{{{tasks.check_input.values.rows}}}}' "
+            "GREATER_THAN '0'"
+        ) in caplog.messages
+
+    @pytest.mark.parametrize(
+        ("disable", "outcomes", "match"),
+        [
+            ([], {"on_true": True}, r"Task 'on_true' in force_conditions has no condition_task. .*\['check'\]"),
+            ([], {"nope": True}, r"Unknown task 'nope' in force_conditions. Available: \['check', 'check_input'"),
+            ([], {"check": "true"}, r"force_conditions\['check'\] must be True or False, got 'true'"),
+            (["check"], {"check": True}, "Task 'check' in force_conditions is disabled"),
+        ],
+    )
+    def test_force_conditions_rejects(self, disable: list[str], outcomes: dict[str, Any], match: str) -> None:
+        settings = disable_tasks(branching_settings(), disable)
+        with pytest.raises(LakeflowError, match=match):
+            force_conditions(settings, {"check": False, **outcomes})
+        assert settings == disable_tasks(branching_settings(), disable)
+
+    def test_force_conditions_without_outcomes_changes_nothing(self) -> None:
+        assert force_conditions(example_settings(), {}) == example_settings()
 
 
 class TestPipelineParams:

@@ -37,6 +37,7 @@ from pytest_databricks_lakeflow.settings import (
     sanitise,
     wrap_task,
 )
+from pytest_databricks_lakeflow.settings import force_conditions as force_condition_outcomes
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -239,6 +240,7 @@ class Lakeflow:
         run_as: RunAs = None,
         disable: Sequence[str] | None = None,
         *,
+        force_conditions: Mapping[str, bool] | None = None,
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
@@ -261,6 +263,9 @@ class Lakeflow:
                 the template's. A string with `@` names a user, any other string names a service principal by its
                 application id, and a `jobs.JobRunAs` is used as given.
             disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
+            force_conditions: The outcome each if/else condition task takes in every run of the copy, by task key:
+                `True` runs the `true` branch, `False` the `false` branch. The task's operands are replaced by
+                constants, so the branch no longer depends on the data upstream of it. The upstream tasks still run.
             children: What to do about Run Job tasks, which the copy keeps as deployed, so they run the deployed
                 child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
                 inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
@@ -279,8 +284,9 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values` or `disable` names a task that is not in
-                the job, a parameter name is reserved, an entry of `extra_dependencies` is a local path, `children`
-                is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
+                the job, `force_conditions` names a task that is not a condition task, is disabled, or has an outcome
+                that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path,
+                `children` is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
                 `for_each_task`, or `setup` or `teardown` is not a plain function with its source in a file, uses
                 variables of an enclosing function, or takes a parameter other than `spark`, `dbutils` and `params`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
@@ -291,6 +297,7 @@ class Lakeflow:
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
         disable_tasks(settings, disable or [])
+        force_condition_outcomes(settings, force_conditions or {})
         add_dependencies(settings, extra_dependencies or [])
         inject_probes(settings, capture_task_values or {}, self._helpers())
         self._inject_lifecycle(settings, notebooks)

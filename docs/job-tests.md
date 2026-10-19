@@ -27,6 +27,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).
 - `disable` lists task keys to disable in the copy, see [below](#disable-a-task).
+- `force_conditions` maps if/else condition task keys to the outcome every run of the copy takes, see [below](#force-a-branch).
 - `extra_dependencies` adds test-only packages to the copy, see [below](#test-only-dependencies).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
@@ -227,6 +228,23 @@ def test_no_rows_takes_the_false_branch(lakeflow: Lakeflow) -> None:
 ```
 
 The `==` and `!=` operators of a condition task compare their operands as strings, so a task value of `0` and a right operand of `0.0` are not equal. `<`, `>`, `<=` and `>=` compare them as numbers. To test the condition on its own, drive it with stub values in a [task test](task-tests.md#test-an-ifelse-condition).
+
+#### Force a branch
+
+To test a branch's downstream tasks without arranging upstream data that sends the run down it, `force_conditions` maps condition task keys to `True` or `False`. The copy's condition task then compares constants, `true == true` or `true == false`, so every run of the copy takes that branch whatever its operands would have said. The original operands are logged at INFO. The condition task keeps its `depends_on`, so the tasks upstream of it still run; to run one downstream task without them, use [`lakeflow.task()`](task-tests.md). Here the data says the false branch and the test takes the true one:
+
+```python
+def test_forced_true_branch(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("branching_job", params={"rows": "0"}, force_conditions={"check": True}) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.branch_taken("check") is True
+        assert run.task("check_input").ran
+        assert run.task("on_false").excluded
+        assert run.executed_tasks == ["check", "check_input", "on_true"]
+```
+
+A key that is not a task, a task that is not a condition task, a disabled condition task and an outcome that is not `True` or `False` raise `LakeflowError` before the job is created. The error for a task that is not a condition task lists the job's condition tasks.
 
 ### Errors from Spark
 

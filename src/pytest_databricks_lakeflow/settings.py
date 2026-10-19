@@ -362,6 +362,60 @@ def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSe
     return settings
 
 
+def force_conditions(settings: jobs.JobSettings, outcomes: Mapping[str, bool]) -> jobs.JobSettings:
+    """Rewrite the named condition tasks so each one evaluates to the given outcome.
+
+    Each task's operands become `true == true` or `true == false`, which `EQUAL_TO` compares as strings. Its
+    `depends_on` and `run_if` are kept, so the tasks upstream of it still run. The original operands are logged.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        outcomes: The outcome each condition task must produce, by task key.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not a task in the job, its task has no `condition_task`, the task is disabled,
+            or an outcome is not a bool.
+    """
+    if not outcomes:
+        return settings
+    tasks = {t.task_key: t for t in settings.tasks or []}
+    conditions = sorted(key for key, task in tasks.items() if task.condition_task)
+    for key, outcome in outcomes.items():
+        if key not in tasks:
+            raise LakeflowError(f"Unknown task {key!r} in force_conditions. Available: {sorted(tasks)}")
+        if tasks[key].condition_task is None:
+            raise LakeflowError(
+                f"Task {key!r} in force_conditions has no condition_task. Condition tasks: {conditions}"
+            )
+        if tasks[key].disabled:
+            # The platform fails a condition task whose upstream is disabled, and never evaluates a disabled one.
+            raise LakeflowError(f"Task {key!r} in force_conditions is disabled, so its condition is never evaluated")
+        if not isinstance(outcome, bool):
+            # bool("false") is True, so a string would silently force the true branch.
+            raise LakeflowError(f"force_conditions[{key!r}] must be True or False, got {outcome!r}")
+    for key, outcome in outcomes.items():
+        _force_condition(tasks[key], outcome)
+    return settings
+
+
+def _force_condition(task: jobs.Task, outcome: bool) -> None:
+    condition = task.condition_task
+    assert condition is not None
+    expected = str(outcome).lower()
+    log.info(
+        "Forcing condition task %r to %s; it compared %r %s %r",
+        task.task_key,
+        expected,
+        condition.left,
+        condition.op.value,
+        condition.right,
+    )
+    task.condition_task = jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right=expected)
+
+
 def pipeline_params(
     settings: jobs.JobSettings,
     *,
