@@ -914,11 +914,21 @@ class TestAddDependencies:
                 compute.Library(whl="/Workspace/Shared/libs/helpers-0.1-py3-none-any.whl"),
             ),
             (
+                "/Workspace/Users/user@example.com/libs/helpers-0.1-py3-none-any.whl",
+                compute.Library(whl="/Workspace/Users/user@example.com/libs/helpers-0.1-py3-none-any.whl"),
+            ),
+            (
                 "pkg @ https://host/pkg-1.0-py3-none-any.whl",
                 compute.Library(pypi=compute.PythonPyPiLibrary(package="pkg @ https://host/pkg-1.0-py3-none-any.whl")),
             ),
+            (
+                "pkg[extra]@https://host/pkg-1.0-py3-none-any.whl",
+                compute.Library(
+                    pypi=compute.PythonPyPiLibrary(package="pkg[extra]@https://host/pkg-1.0-py3-none-any.whl")
+                ),
+            ),
         ],
-        ids=["wheel path", "direct reference"],
+        ids=["wheel path", "wheel path under a user folder", "direct reference", "direct reference without spaces"],
     )
     def test_add_dependencies_picks_the_library_type(self, dependency: str, library: compute.Library) -> None:
         settings = add_dependencies(example_settings(), [dependency])

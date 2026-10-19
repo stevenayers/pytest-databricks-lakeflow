@@ -351,9 +351,14 @@ def _is_local_path(dependency: str) -> bool:
     return dependency.endswith(".whl") and not dependency.startswith("/") and ":" not in dependency
 
 
+# A PEP 508 direct reference starts with a project name, optional extras and "@", with or without spaces. A wheel path
+# can hold "@" too, as in /Workspace/Users/<email>/, so only the start of the string tells them apart.
+_DIRECT_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?\s*@")
+
+
 def _library(dependency: str) -> compute.Library:
-    # A PEP 508 direct reference such as "pkg @ https://host/pkg.whl" is a requirement that pip installs, not a path.
-    if dependency.endswith(".whl") and " @ " not in dependency:
+    # A direct reference such as "pkg @ https://host/pkg.whl" is a requirement that pip installs, not a path.
+    if dependency.endswith(".whl") and not _DIRECT_REFERENCE.match(dependency):
         return compute.Library(whl=dependency)
     return compute.Library(pypi=compute.PythonPyPiLibrary(package=dependency))
 

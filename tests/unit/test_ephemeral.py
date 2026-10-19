@@ -727,7 +727,7 @@ class TestCreateSettings:
             from pytest_databricks_lakeflow import LakeflowError
 
             def test_job(lakeflow):
-                task_params ={"transform": {"limit": "10"}, "load": ["--rows", "10"]}
+                task_params = {"transform": {"limit": "10"}, "load": ["--rows", "10"]}
                 with lakeflow.job("my_job", task_params=task_params, capture_task_values={"transform": ["k"]}):
                     pass
 
