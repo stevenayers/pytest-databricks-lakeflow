@@ -67,14 +67,7 @@ LIST_PARAMS = {
     "python_wheel_task": "parameters",
     "dbt_task": "commands",
 }
-TASK_PARAMS_KINDS = (
-    "notebook_task",
-    "spark_python_task",
-    "spark_jar_task",
-    "python_wheel_task",
-    "sql_task",
-    "dbt_task",
-)
+TASK_PARAMS_KINDS = tuple(sorted(MAPPING_PARAMS.keys() | LIST_PARAMS.keys()))
 
 
 @dataclass(frozen=True)
@@ -213,8 +206,7 @@ def _set_environment_version(settings: jobs.JobSettings, version: str) -> None:
     for env in settings.environments or []:
         if env.environment_key == ENV_KEY:
             continue
-        # Environment.base_environment only exists in recent databricks-sdk releases.
-        if env.spec and getattr(env.spec, "base_environment", None):
+        if env.spec and env.spec.base_environment:
             continue
         if env.spec is None:
             env.spec = compute.Environment.from_dict({})
@@ -252,8 +244,13 @@ def _single_node_clusters(settings: jobs.JobSettings) -> None:
         cluster.custom_tags = {**(cluster.custom_tags or {}), **SINGLE_NODE_TAGS}
 
 
+def job_timeout_seconds(timeout: timedelta) -> int:
+    """The job `timeout_seconds` that covers a run timeout: the timeout in whole seconds plus the grace period."""
+    return math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+
+
 def _mirror_timeout(settings: jobs.JobSettings, timeout: timedelta) -> None:
-    mirrored = math.ceil(timeout.total_seconds()) + TIMEOUT_GRACE_SECONDS
+    mirrored = job_timeout_seconds(timeout)
     if not settings.timeout_seconds or settings.timeout_seconds > mirrored:
         settings.timeout_seconds = mirrored
 
@@ -312,9 +309,10 @@ def add_dependencies(settings: jobs.JobSettings, dependencies: Sequence[str]) ->
 
     Each environment's `spec.dependencies` gains every dependency. Each notebook, Python script and Python wheel
     task that runs on a job cluster, a new cluster or an existing cluster, tasks nested in a `for_each_task`
-    included, gains a `whl` library for a dependency ending in `.whl` and a `pypi` library for any other. Serverless
-    tasks without an `environment_key` cannot take dependencies from the job settings, so they are left alone. Call
-    it before the helper environment is added, so that helper tasks do not install them.
+    included, gains a `whl` library for a wheel path ending in `.whl` and a `pypi` library for any other requirement,
+    a direct reference such as `pkg @ https://host/pkg-1.0-py3-none-any.whl` included. Serverless tasks without an
+    `environment_key` cannot take dependencies from the job settings, so they are left alone. Call it before the
+    helper environment is added, so that helper tasks do not install them.
 
     Args:
         settings: The job's settings. They are changed in place.
@@ -354,7 +352,8 @@ def _is_local_path(dependency: str) -> bool:
 
 
 def _library(dependency: str) -> compute.Library:
-    if dependency.endswith(".whl"):
+    # A PEP 508 direct reference such as "pkg @ https://host/pkg.whl" is a requirement that pip installs, not a path.
+    if dependency.endswith(".whl") and " @ " not in dependency:
         return compute.Library(whl=dependency)
     return compute.Library(pypi=compute.PythonPyPiLibrary(package=dependency))
 
@@ -422,10 +421,9 @@ def _merged_environment(
     if template is not None:
         current = template.as_dict()
     spec = compute.Environment.from_dict({**current, **override})
-    # Environment.base_environment only exists in recent databricks-sdk releases. jobs/create refuses the pair with
-    # InvalidParameterValue "Both base environment and version are provided for environment 'default'. Only one of
-    # them must be provided.", so this only reports it before anything is created.
-    if spec.environment_version and getattr(spec, "base_environment", None):
+    # jobs/create refuses the pair with InvalidParameterValue "Both base environment and version are provided for
+    # environment 'default'. Only one of them must be provided.", so this only reports it before anything is created.
+    if spec.environment_version and spec.base_environment:
         raise LakeflowError(
             f"environments[{key!r}] would set both environment_version and base_environment, which a job does not "
             "accept. Set the one you do not want to None in the override."
@@ -726,31 +724,32 @@ def apply_task_params(
 
 def _task_params_kind(task: jobs.Task, value: object) -> str:
     """Get the field of the task type that `value` edits, checking that `value` fits it."""
-    kind = ""
-    for candidate in TASK_PARAMS_KINDS:
-        if getattr(task, candidate) is not None:
-            kind = candidate
-            break
-    if not kind:
-        raise LakeflowError(
-            f"task_params cannot set the parameters of task {task.task_key!r}: it is not a notebook, Python script, "
-            "JAR, Python wheel, SQL or dbt task. Change it with modify_settings instead."
-        )
+    for kind in TASK_PARAMS_KINDS:
+        if getattr(task, kind) is not None:
+            _check_task_params_shape(task, kind, value)
+            return kind
+    raise LakeflowError(
+        f"task_params cannot set the parameters of task {task.task_key!r}: it is not a notebook, Python script, "
+        "JAR, Python wheel, SQL or dbt task. Change it with modify_settings instead."
+    )
+
+
+def _check_task_params_shape(task: jobs.Task, kind: str, value: object) -> None:
     fits = False
     if isinstance(value, Mapping):
         fits = kind in MAPPING_PARAMS and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
     elif isinstance(value, Sequence) and not isinstance(value, str):
         fits = kind in LIST_PARAMS and all(isinstance(item, str) for item in value)
-    if not fits:
-        shapes: list[str] = []
-        if kind in MAPPING_PARAMS:
-            shapes.append(f"a mapping of names to strings, merged into {kind}.{MAPPING_PARAMS[kind]}")
-        if kind in LIST_PARAMS:
-            shapes.append(f"a list of strings, which replaces {kind}.{LIST_PARAMS[kind]}")
-        raise LakeflowError(
-            f"task_params[{task.task_key!r}] must be {', or '.join(shapes)}, for task {task.task_key!r}; got {value!r}"
-        )
-    return kind
+    if fits:
+        return
+    shapes: list[str] = []
+    if kind in MAPPING_PARAMS:
+        shapes.append(f"a mapping of names to strings, merged into {kind}.{MAPPING_PARAMS[kind]}")
+    if kind in LIST_PARAMS:
+        shapes.append(f"a list of strings, which replaces {kind}.{LIST_PARAMS[kind]}")
+    raise LakeflowError(
+        f"task_params[{task.task_key!r}] must be {', or '.join(shapes)}, for task {task.task_key!r}; got {value!r}"
+    )
 
 
 def _set_task_params(code: Any, kind: str, value: Mapping[str, str] | Sequence[str]) -> None:
@@ -899,10 +898,7 @@ def wrap_task(
         LakeflowError: If the task is not in the job, the task refers to task values of a task that is not
             stubbed, or a value is too large or not JSON-serialisable.
     """
-    target = _find_task(settings, task_key)
-    if target is None:
-        available = sorted(t.task_key for t in settings.tasks or [])
-        raise LakeflowError(f"No task {task_key!r} in the job. Available: {available}")
+    target = require_task(settings, task_key)
     if task_key in upstream_task_values:
         raise LakeflowError(f"upstream_task_values cannot stub {task_key!r}, the task under test")
     referenced = set(TASK_REFERENCE.findall(json.dumps(target.as_dict())))
@@ -923,6 +919,15 @@ def wrap_task(
     if stubs or probes:
         _add_helper_compute(settings, helpers)
     return settings
+
+
+def require_task(settings: jobs.JobSettings, task_key: str) -> jobs.Task:
+    """Get the job's top-level task `task_key`, raising `LakeflowError` with the available keys if there is none."""
+    target = _find_task(settings, task_key)
+    if target is None:
+        available = sorted(t.task_key for t in settings.tasks or [])
+        raise LakeflowError(f"No task {task_key!r} in the job. Available: {available}")
+    return target
 
 
 def _find_task(settings: jobs.JobSettings, task_key: str) -> jobs.Task | None:

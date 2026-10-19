@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -12,7 +13,7 @@ from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import catalog, jobs, workspace
 
 from pytest_databricks_lakeflow import session
-from pytest_databricks_lakeflow.errors import LakeflowBundleError
+from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.plugin import parse_duration
 
 from .conftest import FakeCli, configure_lakeflow
@@ -201,6 +202,14 @@ class TestSweep:
         assert fake_ws.jobs.deleted == deleted
         assert fake_ws.jobs.list_calls == 1
         assert fake_ws.current_user.me_calls == 1
+
+    def test_xdist_sweep_error_names_the_sweep(self, tmp_path: Path) -> None:
+        state = session.SessionState(rootpath=tmp_path, run_id="this-run", state_dir=tmp_path, sweep=True)
+        # What the worker that swept first writes when its sweep raises.
+        (tmp_path / session.SWEEP_STATE_FILE).write_text(json.dumps({"error": "PermissionDenied: not yours"}))
+        message = r"^Lakeflow sweep failed in another xdist worker: PermissionDenied: not yours$"
+        with pytest.raises(LakeflowError, match=message):
+            state._sweep(as_client(FakeWorkspaceClient()), {}, 24)
 
     def test_no_sweep_without_the_flag(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.listed = sweep_candidates()
