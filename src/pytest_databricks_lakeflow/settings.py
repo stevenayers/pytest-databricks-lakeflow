@@ -500,9 +500,10 @@ def inject_probes(
         raise LakeflowError(
             f"capture_task_values names tasks that are not in the job: {unknown}. Available: {sorted(keys)}"
         )
-    probes = []
     for target, value_keys in capture_task_values.items():
         _check_keys(target, value_keys)
+    probes = []
+    for target, value_keys in capture_task_values.items():
         probes.append(_probe_task(target, value_keys, helpers))
     settings.tasks = [*(settings.tasks or []), *probes]
     _add_helper_compute(settings, helpers)

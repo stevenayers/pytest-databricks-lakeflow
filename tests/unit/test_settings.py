@@ -451,10 +451,17 @@ class TestTestMarker:
         ("parameters", "expected"),
         [
             (None, [("__pytest_test_id", NODEID)]),
-            ([{"name": "param1", "default": "hello"}], [("param1", "hello"), ("__pytest_test_id", NODEID)]),
             (
-                [{"name": "__pytest_test_id", "default": "stale"}, {"name": "param1", "default": "hello"}],
-                [("param1", "hello"), ("__pytest_test_id", NODEID)],
+                [{"name": "param1", "default": "hello"}, {"name": "schema", "default": ""}],
+                [("param1", "hello"), ("schema", ""), ("__pytest_test_id", NODEID)],
+            ),
+            (
+                [
+                    {"name": "__pytest_test_id", "default": "stale"},
+                    {"name": "param1", "default": "hello"},
+                    {"name": "schema", "default": ""},
+                ],
+                [("param1", "hello"), ("schema", ""), ("__pytest_test_id", NODEID)],
             ),
         ],
     )

@@ -51,7 +51,7 @@ def upload(ws: WorkspaceClient, folder: str) -> dict[str, str]:
     """
     folder = folder.rstrip("/")
     ws.workspace.mkdirs(folder)
-    paths = {}
+    paths: dict[str, str] = {}
     for name, source in NOTEBOOKS.items():
         path = f"{folder}/{name}"
         ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
