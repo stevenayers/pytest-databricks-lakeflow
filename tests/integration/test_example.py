@@ -1,15 +1,14 @@
-r"""The acceptance tests from the spec, run against examples/bundle in a real workspace.
+r"""Integration tests for the ``example`` bundle (tests/integration/bundles/example), run in a real workspace.
 
 Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-        uv run pytest tests/integration -n 4
+        uv run pytest tests/integration/test_example.py -n 4 --lakeflow-sweep
 """
 
 from __future__ import annotations
 
 import dataclasses
-import os
 import re
 import warnings
 from datetime import timedelta
@@ -20,9 +19,12 @@ from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("LAKEFLOW_INTEGRATION") != "1", reason="set LAKEFLOW_INTEGRATION=1 to run against a workspace"
-)
+from .conftest import lakeflow_for
+
+
+@pytest.fixture(scope="module")
+def lakeflow() -> Lakeflow:
+    return lakeflow_for("example")
 
 
 def test_job_succeeds(lakeflow: Lakeflow) -> None:
