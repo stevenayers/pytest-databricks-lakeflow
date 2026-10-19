@@ -10,16 +10,19 @@ from pytest_databricks_lakeflow import settings as settings_module
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
+    Helpers,
     check_compute,
     check_params,
     create_kwargs,
     disable_tasks,
+    inject_lifecycle,
     inject_test_marker,
     pipeline_params,
     run_job_tasks,
     sanitise,
     select,
     tag_value,
+    wrap_task,
 )
 
 from .conftest import NEEDS_REFRESH_SELECTION
@@ -36,6 +39,7 @@ ATTRIBUTION = {
 }
 SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.profile": "singleNode"}
 HAS_BASE_ENVIRONMENT = "base_environment" in compute.Environment.__dataclass_fields__
+HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 
 
 def sanitised(
@@ -53,6 +57,20 @@ def with_tasks(*tasks: dict[str, Any]) -> jobs.JobSettings:
     settings = example_settings()
     settings.tasks = [*(settings.tasks or []), *(jobs.Task.from_dict(t) for t in tasks)]
     return settings
+
+
+def three_tasks() -> jobs.JobSettings:
+    """Build a job with three tasks, `a`, then `b` after it, and `c` on its own, and a `day` parameter."""
+    return jobs.JobSettings.from_dict(
+        {
+            "parameters": [{"name": "day", "default": ""}, {"name": "__pytest_test_id", "default": "x"}],
+            "tasks": [
+                {"task_key": "a", "notebook_task": {"notebook_path": "/a"}},
+                {"task_key": "b", "depends_on": [{"task_key": "a"}], "notebook_task": {"notebook_path": "/b"}},
+                {"task_key": "c", "notebook_task": {"notebook_path": "/c"}},
+            ],
+        }
+    )
 
 
 def for_each(inner: dict[str, Any]) -> dict[str, Any]:
@@ -576,6 +594,65 @@ class TestSelect:
     def test_select_rejects_unknown_tasks(self) -> None:
         with pytest.raises(LakeflowError, match=r"Unknown task 'lod' in only. Available: \['extract', 'load'"):
             select(self.chain(), ["lod+"])
+
+    def test_select_always_adds_setup_and_teardown(self) -> None:
+        settings = inject_lifecycle(three_tasks(), "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert select(settings, ["b"]) == ["b", "__pytest_setup", "__pytest_teardown"]
+        assert select(settings, ["+b"]) == ["+b", "__pytest_teardown"]
+        assert select(inject_lifecycle(three_tasks(), "/h/setup_1", None, HELPERS), ["b"]) == ["b", "__pytest_setup"]
+
+
+class TestInjectLifecycle:
+    """inject_lifecycle runs setup before every root task and teardown after every leaf, whatever happened."""
+
+    @staticmethod
+    def dependencies(settings: jobs.JobSettings) -> dict[str, list[str]]:
+        return {t.task_key: [d.task_key for d in t.depends_on or []] for t in settings.tasks or [] if t.task_key}
+
+    def test_rewires_a_three_task_dag(self) -> None:
+        settings = inject_lifecycle(three_tasks(), "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert self.dependencies(settings) == {
+            "__pytest_setup": [],
+            "a": ["__pytest_setup"],
+            "b": ["a"],
+            "c": ["__pytest_setup"],
+            "__pytest_teardown": ["b", "c"],
+        }
+        setup, teardown = task(settings, "__pytest_setup"), task(settings, "__pytest_teardown")
+        assert setup.run_if is None
+        assert teardown.run_if == jobs.RunIf.ALL_DONE
+        for injected, path in ((setup, "/h/setup_1"), (teardown, "/h/teardown_1")):
+            assert injected.notebook_task == jobs.NotebookTask(
+                notebook_path=path, base_parameters={"__pytest_params": '["day"]'}
+            )
+            assert injected.environment_key == ENV_KEY
+        assert [e.environment_key for e in settings.environments or []] == [ENV_KEY]
+
+    def test_teardown_follows_probes_and_stubs_follow_setup(self) -> None:
+        settings = wrap_task(example_settings(), "transform", {"extract": {"row_count": 1}}, ["rows"], HELPERS)
+        settings = inject_lifecycle(settings, "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert self.dependencies(settings) == {
+            "__pytest_setup": [],
+            "extract": ["__pytest_setup"],
+            "transform": ["extract"],
+            "__pytest_probe__transform": ["transform"],
+            "__pytest_teardown": ["__pytest_probe__transform"],
+        }
+        assert [e.environment_key for e in settings.environments or []].count(ENV_KEY) == 1
+
+    def test_either_alone(self) -> None:
+        setup_only = inject_lifecycle(three_tasks(), "/h/setup_1", None, HELPERS)
+        assert [t.task_key for t in setup_only.tasks or []] == ["__pytest_setup", "a", "b", "c"]
+        teardown_only = inject_lifecycle(three_tasks(), None, "/h/teardown_1", HELPERS)
+        assert self.dependencies(teardown_only) == {"a": [], "b": ["a"], "c": [], "__pytest_teardown": ["b", "c"]}
+        assert inject_lifecycle(three_tasks(), None, None, HELPERS) == three_tasks()
+
+    def test_on_the_helper_job_cluster(self) -> None:
+        helpers = Helpers("/s", "/g", job_cluster_key="classic")
+        settings = inject_lifecycle(example_settings(), "/h/setup_1", "/h/teardown_1", helpers)
+        assert task(settings, "__pytest_setup").job_cluster_key == "classic"
+        assert task(settings, "__pytest_teardown").job_cluster_key == "classic"
+        assert ENV_KEY not in [e.environment_key for e in settings.environments or []]
 
 
 class TestDisableAndRunJobTasks:
