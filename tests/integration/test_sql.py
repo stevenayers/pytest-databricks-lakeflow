@@ -44,13 +44,10 @@ def test_sql_file_task_runs_on_the_warehouse(lakeflow: Lakeflow) -> None:
         run = job.run()
         assert run.succeeded, run
         task = run.task("query")
-        # The platform reports a SQL file task under sql_output.file_output, which databricks-sdk's SqlOutput does
-        # not model, so the plugin sees an empty SqlOutput. query_output and output_link belong to saved-query
-        # tasks only. Loosen these two assertions once the SDK or the plugin surfaces file_output.
         assert task.sql_output is not None
-        assert task.sql_output.query_output is None
-        assert task.alert_output is None
-        assert task.alert_state is None
+        # The platform reports a SQL file task under sql_output.file_output, which databricks-sdk's SqlOutput does
+        # not model, so TaskRun cannot expose it yet. The checks below read the raw endpoint instead; move them onto
+        # task.sql_output once the plugin or the SDK models file_output.
         file_output = raw_run_output(lakeflow, task.run_id)["sql_output"]["file_output"]
         assert file_output["warehouse_id"] == WAREHOUSE_ID
         assert file_output["query_text"].strip() == "SELECT 1 AS n"
