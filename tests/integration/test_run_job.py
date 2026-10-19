@@ -24,15 +24,16 @@ def lakeflow() -> Lakeflow:
 def test_run_job_task_warns_by_default(lakeflow: Lakeflow) -> None:
     with pytest.warns(UserWarning, match="Task 'trigger_child' of job 'parent_job' runs the deployed job"):
         job = lakeflow.job("parent_job")
-    job.close()
+    with job:
+        assert job.job_id is not None
 
 
-def test_refuse_raises_before_creating_a_copy(lakeflow: Lakeflow) -> None:
-    before = {j.job_id for j in lakeflow.ws.jobs.list(name=f"pytest {lakeflow.run_id}")}
+def test_refuse_raises_before_creating_a_copy(lakeflow: Lakeflow, request: pytest.FixtureRequest) -> None:
     with pytest.raises(LakeflowError, match="'trigger_child'"):
         lakeflow.job("parent_job", children="refuse")
-    after = {j.job_id for j in lakeflow.ws.jobs.list(name=f"pytest {lakeflow.run_id}")}
-    assert after == before
+    # Copies are named "[pytest] <nodeid>" and the Jobs API name filter is an exact match, so this is empty only
+    # when no copy of this test's job was created.
+    assert not list(lakeflow.ws.jobs.list(name=f"[pytest] {request.node.nodeid}"))
 
 
 def test_child_run_is_a_job_run(lakeflow: Lakeflow) -> None:
