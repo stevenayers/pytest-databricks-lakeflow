@@ -25,6 +25,9 @@ HOST = "https://example.cloud.databricks.com"
 HOUR_MS = 3_600_000
 ACCOUNT_ID = "a1"
 TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
+SKIPPED = jobs.RunLifeCycleState.SKIPPED
+# What the platform reports, on the run and on each of its task runs, when every task of the job is disabled.
+ALL_DISABLED = "Skipped because every task is disabled. Re-enable at least one task to be able to run the job."
 # The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
 # "Invalid filter expression"; the value must be in single quotes.
 LEVEL_FILTER = re.compile(r"^level='(?P<level>[A-Z]+)'$")
@@ -561,10 +564,10 @@ def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
 
 def make_run(
     run_id: int,
-    states: dict[str, str],
+    states: Mapping[str, str | None],
     result_state: str = "SUCCESS",
     code: str = "SUCCESS",
-    attempts: Mapping[str, Sequence[str]] | None = None,
+    attempts: Mapping[str, Sequence[str | None]] | None = None,
     condition_outcomes: Mapping[str, str] | None = None,
     notebooks: Collection[str] = (),
     sql_files: Mapping[str, str] | None = None,
@@ -574,6 +577,9 @@ def make_run(
 
     Like the Jobs API, a `DISABLED` task run never carries `disabled`, whether the job disabled it or `only` left it
     out: only the job's settings say which tasks are disabled.
+
+    A state of `None` gives a task run with no result state and legacy life cycle `SKIPPED`, as the platform reports
+    every task of a run it skipped.
 
     `attempts` gives the state of every attempt of the tasks it names, in order, numbered from attempt 0. Task run
     ids are `run_id * 100` plus the position of the attempt among all task runs.
@@ -600,7 +606,7 @@ def make_run(
                     task_key=key,
                     run_id=task_run_id,
                     attempt_number=attempt,
-                    state=jobs.RunState(result_state=jobs.RunResultState(state)),
+                    state=_state(state),
                     status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
                     run_page_url=f"{HOST}/jobs/runs/{task_run_id}",
                     start_time=1_000,
@@ -620,6 +626,26 @@ def make_run(
         start_time=1_000,
         end_time=6_000,
     )
+
+
+def skipped_run(run_id: int, keys: Sequence[str], notebooks: Collection[str] = ()) -> jobs.Run:
+    """Build the run the platform reports when every task of the job is disabled, with one task run per key.
+
+    As recorded on a real run: neither the run nor its task runs have a result state, their legacy life cycle is
+    `SKIPPED`, and each carries termination code `RUN_EXECUTION_ERROR` with the message in `ALL_DISABLED`. The
+    platform ends the run at once, so it starts and ends at the same time. `notebooks` makes the tasks it names
+    notebook tasks, as in `make_run`.
+    """
+    run = make_run(run_id, dict.fromkeys(keys), notebooks=notebooks)
+    details = jobs.TerminationDetails(
+        code=jobs.TerminationCodeCode.RUN_EXECUTION_ERROR,
+        message=ALL_DISABLED,
+        type=jobs.TerminationTypeType.CLIENT_ERROR,
+    )
+    status = jobs.RunStatus(state=TERMINATED, termination_details=details)
+    state = jobs.RunState(life_cycle_state=SKIPPED, state_message=ALL_DISABLED)
+    tasks = [replace(task, state=state, status=status) for task in run.tasks or []]
+    return replace(run, state=state, status=status, tasks=tasks, end_time=run.start_time)
 
 
 def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:
@@ -677,7 +703,15 @@ def _pipeline(pipeline_ids: Mapping[str, str] | None, key: str) -> jobs.Pipeline
     return jobs.PipelineTask(pipeline_id=pipeline_ids[key])
 
 
-def _details(state: str) -> jobs.TerminationDetails:
+def _state(state: str | None) -> jobs.RunState:
+    if state is None:
+        return jobs.RunState(life_cycle_state=SKIPPED)
+    return jobs.RunState(result_state=jobs.RunResultState(state))
+
+
+def _details(state: str | None) -> jobs.TerminationDetails:
+    if state is None:
+        return jobs.TerminationDetails(code=jobs.TerminationCodeCode.RUN_EXECUTION_ERROR)
     codes = {
         "FAILED": "RUN_EXECUTION_ERROR",
         "UPSTREAM_FAILED": "SKIPPED",
