@@ -200,7 +200,7 @@ class TestLifecycleJobs:
             pytester,
             """
 def test_job(lakeflow):
-    lakeflow.job("my_job", setup=seed, teardown=cleanup).run(only=["transform"])
+    lakeflow.job("my_job", setup=seed, teardown=cleanup).run(only=["load"])
 """,
         )
         result.assert_outcomes(passed=1)
@@ -219,7 +219,7 @@ def test_job(lakeflow):
         uploaded = fake_ws.workspace.uploads[setup.notebook_task.notebook_path]["content"]
         assert "def seed(spark, dbutils, params):" in uploaded
         [call] = fake_ws.jobs.run_now_calls
-        assert call["only"] == ["transform", "__pytest_setup", "__pytest_teardown"]
+        assert call["only"] == ["load", "__pytest_setup", "__pytest_teardown"]
 
     def test_task_puts_stubs_downstream_of_setup(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(
@@ -267,11 +267,11 @@ def test_b(lakeflow):
         assert len(fake_ws.jobs.created) == 3
 
     def test_neither_argument_changes_nothing(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run(only=["transform"])\n')
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run(only=["load"])\n')
         result.assert_outcomes(passed=1)
         assert list(created_tasks(fake_ws)) == ["extract", "transform", "load", "classic"]
         assert lifecycle_uploads(fake_ws) == []
-        assert fake_ws.jobs.run_now_calls[0]["only"] == ["transform"]
+        assert fake_ws.jobs.run_now_calls[0]["only"] == ["load"]
 
     def test_failed_setup_fails_the_run_and_leads_the_repr(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient

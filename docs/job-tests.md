@@ -43,6 +43,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `task_overrides` sets the timeout and retry fields of the copy's tasks, see [below](#retries-and-timeouts).
 - `extra_dependencies` adds test-only packages to the copy, see [below](#test-only-dependencies).
 - `environments` changes the copy's serverless environments, see [below](#change-the-settings-before-the-job-is-created).
+- `upstream_task_values` replaces tasks of the copy with stubs that set the task values you give, see [below](#stub-upstream-tasks).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
@@ -137,7 +138,7 @@ def lakeflow() -> Lakeflow:
 
 ## Run it
 
-`job.run(params=None, only=None, timeout=None, *, stop_after=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None)` starts a run, waits for it to finish, and returns a `JobRun`.
+`job.run(params=None, only=None, timeout=None, *, stop_after=None, performance_target=None, queue=None, full_refresh=None, full_refresh_selection=None, refresh_selection=None, replay=None)` starts a run, waits for it to finish, and returns a `JobRun`.
 
 - `params` are merged over the job's parameters for this run only.
 - `only` lists the tasks to run. `+key` adds the tasks upstream of `key`, `key+` the tasks downstream, and `+key+` both, as `run_now` does.
@@ -146,6 +147,7 @@ def lakeflow() -> Lakeflow:
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
 - `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
 - `full_refresh`, `full_refresh_selection` and `refresh_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
+- `replay`, keyword only, stubs the tasks that `only` leaves out with the task values a previous run captured. See [replay a run's task values](#replay-a-runs-task-values).
 
 Each call to `run()` sends a fresh idempotency token with the run request, so a request that the SDK retries cannot start a second run.
 
@@ -412,6 +414,36 @@ def test_subset_of_job(lakeflow: Lakeflow) -> None:
 ```
 
 Asking for a skipped task raises a `KeyError` that says it was skipped by `only`. When the job has probes or stubs, `only` is extended with the ones the selected tasks need.
+
+A task that refers to the task values of another, such as `transform` with `{{tasks.extract.values.row_count}}` in its parameters, cannot run without it: the platform would start the run and end it `INTERNAL_ERROR` with "Failed to resolve references". So `run(only=["transform"])` and `run(only=["transform+"])` raise `LakeflowError` before the run starts, naming the task and the tasks it refers to. Select those tasks too, as `only=["+transform"]` does, or stub them.
+
+### Stub upstream tasks
+
+`upstream_task_values` on `lakeflow.job()` replaces the tasks you name with stub tasks that set the task values you give, so the downstream half of a job runs against controlled values:
+
+```python
+def test_downstream_half_with_stubbed_extract(lakeflow: Lakeflow) -> None:
+    stubbed = {"extract": {"row_count": 7, "source_path": "/Volumes/x/y/z"}}
+    with lakeflow.job("my_example_job", upstream_task_values=stubbed) as job:
+        run = job.run(only=["transform+"])
+        assert run.succeeded, run
+        assert "extract" in run.injected_tasks
+```
+
+A stub keeps the key and place of the task it replaces, so the tasks after it still depend on it, `{{tasks.extract.values.row_count}}` and `dbutils.jobs.taskValues.get(taskKey="extract", ...)` resolve against it, and `only` adds it whenever a selected task depends on it: `run(only=["transform"])` sends `only=["transform", "extract"]`. The stub's outcome is in `run.injected_tasks`, not `run.tasks`. A stub drops its task's `depends_on`, so the tasks upstream of it no longer hold it back; they still run in a run without `only`. It runs on the [helper compute](task-tests.md#helper-compute), like the stubs of a task test, and its values follow the same [rules](task-tests.md#rules-for-stub-values). Because it replaces the task after `task_params`, `disable`, `force_conditions`, `extra_dependencies` and `task_overrides` are applied, what they set on that task is lost. An unknown task key raises `LakeflowError` listing the job's tasks, before anything is created.
+
+### Replay a run's task values
+
+`replay` on `run()` takes the stub values from a previous run of the same job instead of from your test. Each task that a selected task depends on and `only` leaves out becomes a stub that sets the values that task set in that run:
+
+```python
+def test_replay_downstream_half(lakeflow: Lakeflow) -> None:
+    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
+    again = lakeflow.job("my_example_job").run(only=["transform+"], replay=first)
+    assert again.succeeded, again
+```
+
+The Jobs API does not return task values, so the first run must capture them with `capture_task_values`, as for [`upstream_from`](task-tests.md#replay-a-task-from-a-previous-run) on task tests. The stubs are part of the job's settings, so `replay` needs `only` and a job that has not been created yet: pass it to the first run of a new `lakeflow.job(...)`. `LakeflowError` is raised before the run starts when `replay` comes without `only`, the job has already been created, the run is of another job, or a task to stub was not part of that run or has no captured values.
 
 ## Pipeline tasks
 

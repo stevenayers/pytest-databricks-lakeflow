@@ -115,7 +115,7 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 Everything else is on the docs site: <https://stevenayers.github.io/pytest-databricks-lakeflow/>
 
 - [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, bundle target, first test
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, repeated runs, failures, temporary schemas, shared runs
+- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, repeated runs, failures, temporary schemas, shared runs
 - [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): stubs, probes, value rules, helper compute
 - [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every `Lakeflow` argument, command-line flag and sync strategy
 - [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): the deploy and teardown lifecycle, xdist, timing

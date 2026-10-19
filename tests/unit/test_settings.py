@@ -19,6 +19,7 @@ from pytest_databricks_lakeflow.settings import (
     apply_task_params,
     check_compute,
     check_params,
+    check_references,
     check_task_params,
     create_kwargs,
     disable_tasks,
@@ -699,7 +700,7 @@ class TestTaskParams:
 
 
 class TestSelect:
-    """select adds the probes and stubs that the tasks in only need."""
+    """select adds the probes and stubs that the tasks in only need, and check_references what they refer to."""
 
     @staticmethod
     def chain() -> jobs.JobSettings:
@@ -745,6 +746,25 @@ class TestSelect:
         assert select(settings, ["b"]) == ["b", "__pytest_setup", "__pytest_teardown"]
         assert select(settings, ["+b"]) == ["+b", "__pytest_teardown"]
         assert select(inject_lifecycle(three_tasks(), "/h/setup_1", None, HELPERS), ["b"]) == ["b", "__pytest_setup"]
+
+    @pytest.mark.parametrize(
+        ("selected", "stubs", "missing"),
+        [
+            pytest.param({"transform"}, set(), "extract", id="left_out"),
+            pytest.param({"transform", "load"}, set(), "extract", id="left_out_by_key_plus"),
+            pytest.param({"transform", "extract"}, set(), None, id="selected"),
+            pytest.param({"transform"}, {"extract"}, None, id="stubbed"),
+            pytest.param({"load", "classic"}, set(), None, id="no_references"),
+        ],
+    )
+    def test_check_references_over_selected_tasks(
+        self, selected: set[str], stubs: set[str], missing: str | None
+    ) -> None:
+        if missing is None:
+            check_references(example_settings(), selected, stubs)
+            return
+        with pytest.raises(LakeflowError, match=rf"Task 'transform' refers to task values of \['{missing}'\]"):
+            check_references(example_settings(), selected, stubs)
 
 
 class TestInjectLifecycle:

@@ -808,6 +808,36 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
     Raises:
         LakeflowError: If `only` names a task that is not in the job.
     """
+    selected = selected_tasks(settings, only, stubs)
+    needed: set[str] = set()
+    stub_keys = set(stubs)
+    for task in settings.tasks or []:
+        key = task.task_key
+        if key in selected:
+            for dependency in task.depends_on or []:
+                if dependency.task_key in stub_keys:
+                    needed.add(dependency.task_key)
+        if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
+            needed.add(key)
+        if key in (SETUP_KEY, TEARDOWN_KEY):
+            needed.add(key)
+    return [*only, *sorted(needed - selected)]
+
+
+def selected_tasks(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[str] = ()) -> set[str]:
+    """Get the keys of the tasks that `only` selects, with `+key`, `key+` and `+key+` expanded.
+
+    Args:
+        settings: The job's settings.
+        only: Task keys, as `select` takes them.
+        stubs: Keys of the stub tasks, which the error message leaves out of the available tasks.
+
+    Returns:
+        The keys of the selected tasks, without the injected tasks that `select` adds.
+
+    Raises:
+        LakeflowError: If `only` names a task that is not in the job.
+    """
     upstream = {t.task_key: {d.task_key for d in t.depends_on or []} for t in settings.tasks or []}
     downstream = {key: {other for other, deps in upstream.items() if key in deps} for key in upstream}
     selected: set[str] = set()
@@ -821,16 +851,34 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
             selected |= _reachable(key, upstream)
         if entry.endswith("+"):
             selected |= _reachable(key, downstream)
-    needed: set[str] = set()
-    stub_keys = set(stubs)
-    for key in selected:
-        needed |= upstream[key] & stub_keys
-    for key in upstream:
-        if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
-            needed.add(key)
-        if key in (SETUP_KEY, TEARDOWN_KEY):
-            needed.add(key)
-    return [*only, *sorted(needed - selected)]
+    return selected
+
+
+def check_references(settings: jobs.JobSettings, selected: Collection[str], stubs: Collection[str]) -> None:
+    """Fail early when a selected task refers to the task values of a task that the run leaves out.
+
+    The platform does not check this when the run starts. It ends the run with life cycle state `INTERNAL_ERROR` and
+    "Failed to resolve references: Task value referenced by 'tasks.<key>.values.<name>' was not found."
+
+    Args:
+        settings: The job's settings.
+        selected: Keys of the tasks that `only` selects, as `selected_tasks` returns them.
+        stubs: Keys of the stub tasks, which always run when a selected task depends on them.
+
+    Raises:
+        LakeflowError: If a selected task that is not a stub refers to a task that is neither selected nor a stub.
+    """
+    for task in settings.tasks or []:
+        if task.task_key not in selected or task.task_key in stubs:
+            continue
+        referenced = set(TASK_REFERENCE.findall(json.dumps(task.as_dict())))
+        missing = sorted(referenced - set(selected) - set(stubs))
+        if missing:
+            raise LakeflowError(
+                f"Task {task.task_key!r} refers to task values of {missing}, which only leaves out, so the platform "
+                "could not resolve them. Select them in only, stub them with upstream_task_values on job(), or pass "
+                "replay to run()."
+            )
 
 
 def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
@@ -841,6 +889,50 @@ def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
             seen.add(key)
             pending.append(key)
     return seen
+
+
+def stub_upstream(
+    settings: jobs.JobSettings, upstream_task_values: Mapping[str, Mapping[str, object]], helpers: Helpers
+) -> jobs.JobSettings:
+    """Replace the named tasks with stub tasks that set the given task values, each in its task's place.
+
+    A stub keeps the key of the task it replaces, so `depends_on` entries and `{{tasks.<key>.values.<name>}}`
+    references to it resolve against the stub. It drops the task's `depends_on`, so the tasks upstream of it no
+    longer hold it back, but depends on the setup task when the job has one, as every task without `depends_on` does.
+    Every entry is checked before any task is replaced.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        upstream_task_values: The task values each stub sets, by the key of the task it replaces.
+        helpers: Where the helper notebooks are and what they run on.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not a task in the job, or a value is too large or not JSON-serialisable.
+    """
+    if not upstream_task_values:
+        return settings
+    tasks = {t.task_key: t for t in settings.tasks or []}
+    for key in upstream_task_values:
+        if key not in tasks:
+            available = sorted(k for k in tasks if not k.startswith(PREFIX))
+            raise LakeflowError(f"Unknown task {key!r} in upstream_task_values. Available: {available}")
+    for key, values in upstream_task_values.items():
+        check_values(key, values)
+    replaced: list[jobs.Task] = []
+    for task in settings.tasks or []:
+        if task.task_key not in upstream_task_values:
+            replaced.append(task)
+            continue
+        stub = _stub_task(task.task_key, upstream_task_values[task.task_key], helpers)
+        if SETUP_KEY in tasks:
+            stub.depends_on = [jobs.TaskDependency(task_key=SETUP_KEY)]
+        replaced.append(stub)
+    settings.tasks = replaced
+    _add_helper_compute(settings, helpers)
+    return settings
 
 
 def inject_probes(
@@ -943,7 +1035,13 @@ def _find_task(settings: jobs.JobSettings, task_key: str) -> jobs.Task | None:
 
 
 def upstream_values_from(
-    job_key: str, settings: jobs.JobSettings, task_key: str, run: JobRun, explicit: Collection[str] = ()
+    job_key: str,
+    settings: jobs.JobSettings,
+    task_key: str,
+    run: JobRun,
+    explicit: Collection[str] = (),
+    *,
+    argument: str = "upstream_from",
 ) -> dict[str, dict[str, object]]:
     """Take the stub values for a task's upstream tasks from the task values a previous run captured.
 
@@ -956,6 +1054,7 @@ def upstream_values_from(
         task_key: The task to replay.
         run: A run of the job that captured the upstream tasks' values.
         explicit: Upstream task keys whose values are given some other way, which are not taken from `run`.
+        argument: The name of the argument that passed `run`, for the messages.
 
     Returns:
         The captured values of each upstream task, by task key. Empty if the job has no task `task_key`.
@@ -965,7 +1064,7 @@ def upstream_values_from(
             values.
     """
     if run.job_key != job_key:
-        raise LakeflowError(f"upstream_from is a run of job {run.job_key!r}, not of {job_key!r}")
+        raise LakeflowError(f"{argument} is a run of job {run.job_key!r}, not of {job_key!r}")
     target = _find_task(settings, task_key)
     if target is None:
         return {}
@@ -975,17 +1074,17 @@ def upstream_values_from(
         if key in explicit:
             continue
         if key not in run.tasks:
-            raise LakeflowError(_no_upstream_values(key, task_key, "was not part of the run"))
+            raise LakeflowError(_no_upstream_values(argument, key, task_key, "was not part of the run"))
         values = run.tasks[key].task_values
         if not values:
-            raise LakeflowError(_no_upstream_values(key, task_key, "has no captured task values"))
+            raise LakeflowError(_no_upstream_values(argument, key, task_key, "has no captured task values"))
         upstream[key] = dict(values)
     return upstream
 
 
-def _no_upstream_values(key: str, task_key: str, reason: str) -> str:
+def _no_upstream_values(argument: str, key: str, task_key: str, reason: str) -> str:
     return (
-        f"upstream_from has no task values for {key!r}, upstream of {task_key!r}: it {reason}. Run the job with "
+        f"{argument} has no task values for {key!r}, upstream of {task_key!r}: it {reason}. Run the job with "
         f"capture_task_values={{{key!r}: [...]}} first, or pass its values in upstream_task_values."
     )
 
