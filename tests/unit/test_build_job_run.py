@@ -35,19 +35,27 @@ def build(name: str, **kwargs: Any) -> tuple[JobRun, FakeWorkspaceClient]:
     return build_from(ws, run, **kwargs), ws
 
 
+def run_id_of(run: jobs.Run, key: str, attempt: int = 0) -> int:
+    """Return the task run id of attempt `attempt` of task `key` in `run`, so an output can be keyed by it."""
+    for task in run.tasks or []:
+        if task.task_key == key and task.attempt_number == attempt:
+            assert task.run_id is not None
+            return task.run_id
+    raise AssertionError(f"run {run.run_id} has no attempt {attempt} of task {key}")
+
+
+def triggers(ws: FakeWorkspaceClient, run: jobs.Run, key: str, child_run_id: int, attempt: int = 0) -> None:
+    """Make the run job task `key` of `run` report that it triggered run `child_run_id`."""
+    output = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=child_run_id))
+    ws.jobs.outputs[run_id_of(run, key, attempt)] = output
+
+
 def built_task(output: jobs.RunOutput, key: str = "t") -> TaskRun:
     """Build a one-task run whose task ended SUCCESS with `output`, and return that task."""
     ws = FakeWorkspaceClient()
     run = make_run(1, {key: "SUCCESS"})
-    ws.jobs.outputs[100] = output
+    ws.jobs.outputs[run_id_of(run, key)] = output
     return build_from(ws, run).task(key)
-
-
-def run_id_of(run: jobs.Run, key: str) -> int:
-    """Return the task run id of task `key` in `run`, so an output can be keyed by it."""
-    task = next(t for t in run.tasks or [] if t.task_key == key)
-    assert task.run_id is not None
-    return task.run_id
 
 
 def recorded_data(name: str) -> dict[str, Any]:
@@ -58,14 +66,20 @@ def recorded_task(data: dict[str, Any], key: str) -> dict[str, Any]:
     return next(t for t in data["tasks"] if t["task_key"] == key)
 
 
-def parent_with_child(job_id: int = 123, states: dict[str, str] | None = None) -> tuple[FakeWorkspaceClient, jobs.Run]:
-    """Build a parent run whose `trigger_child` task triggered run 777 of job `job_id`, with tasks in `states`."""
+def parent_with_child(
+    job_id: int = 123, states: dict[str, str] | None = None
+) -> tuple[FakeWorkspaceClient, jobs.Run, jobs.Run]:
+    """Build a parent run whose `trigger_child` task triggered run 777 of job `job_id`, with tasks in `states`.
+
+    Returns the fake client, the parent run and the child run.
+    """
     ws = FakeWorkspaceClient()
-    ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
+    parent = make_run(1, {"trigger_child": "SUCCESS"})
+    triggers(ws, parent, "trigger_child", 777)
     child = make_run(777, states or {"load": "SUCCESS"})
     child.job_id = job_id
     ws.jobs.add_run(child)
-    return ws, make_run(1, {"trigger_child": "SUCCESS"})
+    return ws, parent, child
 
 
 class TestRecordedRuns:
@@ -208,7 +222,7 @@ class TestOutputs:
     def test_output_errors_do_not_hide_the_run(self, caplog: pytest.LogCaptureFixture) -> None:
         ws = FakeWorkspaceClient()
         run = make_run(1, {"a": "SUCCESS"})
-        ws.jobs.outputs[100] = NotFound("gone")
+        ws.jobs.outputs[run_id_of(run, "a")] = NotFound("gone")
         result = build_from(ws, run)
         assert result.succeeded
         assert result.task("a").output is None
@@ -246,8 +260,18 @@ class TestOutputs:
                 True,
                 True,
             ),
+            (
+                jobs.RunOutput(
+                    clean_rooms_notebook_output=jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput(
+                        notebook_output=jobs.NotebookOutput(result="x", truncated=True)
+                    )
+                ),
+                "The output of task 'transform' was cut at the 5 MB limit",
+                True,
+                False,
+            ),
         ],
-        ids=["output", "logs", "output_and_logs"],
+        ids=["output", "logs", "output_and_logs", "clean_room_output"],
     )
     def test_truncated_output_warns(
         self, output: jobs.RunOutput, message: str, output_truncated: bool, logs_truncated: bool
@@ -382,15 +406,17 @@ class TestAttempts:
 
     def test_attempts_from_make_run(self) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[902] = jobs.RunOutput(error="ValueError: flaky")
-        run = build_from(ws, make_run(9, {"s": "SUCCESS"}, attempts={"t": ["FAILED", "FAILED", "SUCCESS"]}))
+        raw = make_run(9, {"s": "SUCCESS"}, attempts={"t": ["FAILED", "FAILED", "SUCCESS"]})
+        ws.jobs.outputs[run_id_of(raw, "t", attempt=1)] = jobs.RunOutput(error="ValueError: flaky")
+        run = build_from(ws, raw)
         t = run.task("t")
         assert t.succeeded
-        assert (t.attempt, t.run_id) == (2, 903)
+        assert (t.attempt, t.run_id) == (2, run_id_of(raw, "t", attempt=2))
         assert [(a.attempt, a.result_state) for a in t.attempts] == [(0, "FAILED"), (1, "FAILED"), (2, "SUCCESS")]
         assert t.attempts[0].error is None
         assert t.attempts[1].raised(ValueError)
-        assert sorted(ws.jobs.output_calls) == [900, 901, 902, 903]
+        every_task_run = [run_id_of(raw, "s"), *(run_id_of(raw, "t", attempt) for attempt in range(3))]
+        assert sorted(ws.jobs.output_calls) == sorted(every_task_run)
         assert run.task("s").attempts == [replace(run.task("s"), attempts=[])]
 
     def test_task_keys_keep_the_order_the_run_lists_them(self) -> None:
@@ -407,8 +433,9 @@ class TestTimeouts:
 
     def test_timed_out_task_and_run(self) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[900] = jobs.RunOutput(error="TimeoutError: too slow")
-        run = build_from(ws, make_run(9, {"load": "TIMEDOUT"}, result_state="TIMEDOUT", code="RUN_EXECUTION_ERROR"))
+        raw = make_run(9, {"load": "TIMEDOUT"}, result_state="TIMEDOUT", code="RUN_EXECUTION_ERROR")
+        ws.jobs.outputs[run_id_of(raw, "load")] = jobs.RunOutput(error="TimeoutError: too slow")
+        run = build_from(ws, raw)
         load = run.task("load")
         assert run.timed_out
         assert load.timed_out
@@ -587,7 +614,7 @@ class TestChildRuns:
         assert built_task(jobs.RunOutput(run_job_output=jobs.RunJobOutput())).child_run_id is None
 
     def test_child_run_of_a_run_job_task(self) -> None:
-        ws, run = parent_with_child()
+        ws, run, _ = parent_with_child()
         child = build_from(ws, run, job_keys={123: "child"}).task("trigger_child").child_run
         assert child is not None
         assert (child.job_key, child.job_id, child.run_id) == ("child", 123, 777)
@@ -597,14 +624,14 @@ class TestChildRuns:
         assert [call["run_id"] for call in ws.jobs.get_run_calls] == [777]
 
     def test_child_run_key_falls_back_to_the_job_id(self) -> None:
-        ws, run = parent_with_child()
+        ws, run, _ = parent_with_child()
         child = build_from(ws, run).task("trigger_child").child_run
         assert child is not None
         assert (child.job_key, child.job_id) == ("123", 123)
 
     def test_child_run_follows_the_parent_rules_for_failure(self) -> None:
-        ws, run = parent_with_child(states={"load": "FAILED"})
-        ws.jobs.outputs[77700] = jobs.RunOutput(error="boom")
+        ws, run, child_run = parent_with_child(states={"load": "FAILED"})
+        ws.jobs.outputs[run_id_of(child_run, "load")] = jobs.RunOutput(error="boom")
         child = build_from(ws, run).task("trigger_child").child_run
         assert child is not None
         assert child.failed
@@ -612,15 +639,17 @@ class TestChildRuns:
 
     def test_child_run_is_none_for_a_run_job_task_that_did_not_run(self) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
-        run = build_from(ws, make_run(1, {"trigger_child": "UPSTREAM_FAILED"}))
+        raw = make_run(1, {"trigger_child": "UPSTREAM_FAILED"})
+        triggers(ws, raw, "trigger_child", 777)
+        run = build_from(ws, raw)
         assert run.task("trigger_child").child_run is None
         assert ws.jobs.get_run_calls == []
 
     def test_child_run_is_none_when_the_child_run_cannot_be_read(self, caplog: pytest.LogCaptureFixture) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
-        task = build_from(ws, make_run(1, {"trigger_child": "SUCCESS"})).task("trigger_child")
+        raw = make_run(1, {"trigger_child": "SUCCESS"})
+        triggers(ws, raw, "trigger_child", 777)
+        task = build_from(ws, raw).task("trigger_child")
         assert task.child_run_id == 777
         assert task.child_run is None
         assert "Could not read run 777 triggered by task trigger_child" in caplog.text
@@ -634,15 +663,16 @@ class TestChildRuns:
 
     def test_child_run_of_a_child_is_nested(self) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
-        ws.jobs.outputs[77700] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=888))
+        parent = make_run(1, {"trigger_child": "SUCCESS"})
         child = make_run(777, {"trigger_grandchild": "SUCCESS"})
         child.job_id = 123
         grandchild = make_run(888, {"load": "SUCCESS"})
         grandchild.job_id = 456
+        triggers(ws, parent, "trigger_child", 777)
+        triggers(ws, child, "trigger_grandchild", 888)
         ws.jobs.add_run(child)
         ws.jobs.add_run(grandchild)
-        run = build_from(ws, make_run(1, {"trigger_child": "SUCCESS"}), job_keys={123: "child", 456: "grandchild"})
+        run = build_from(ws, parent, job_keys={123: "child", 456: "grandchild"})
         first = run.task("trigger_child").child_run
         assert first is not None
         second = first.task("trigger_grandchild").child_run
@@ -651,7 +681,7 @@ class TestChildRuns:
         assert second.task("load").succeeded
 
     def test_child_run_puts_disabled_child_tasks_in_disabled_tasks(self) -> None:
-        ws, run = parent_with_child(states={"load": "SUCCESS", "backfill": "DISABLED"})
+        ws, run, _ = parent_with_child(states={"load": "SUCCESS", "backfill": "DISABLED"})
         child = build_from(ws, run).task("trigger_child").child_run
         assert child is not None
         assert sorted(child.disabled_tasks) == ["backfill"]
@@ -661,13 +691,13 @@ class TestChildRuns:
 
     def test_every_attempt_of_a_run_job_task_has_its_child_run(self) -> None:
         ws = FakeWorkspaceClient()
-        ws.jobs.outputs[100] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=777))
-        ws.jobs.outputs[101] = jobs.RunOutput(run_job_output=jobs.RunJobOutput(run_id=778))
+        run = make_run(1, {}, attempts={"trigger_child": ["FAILED", "SUCCESS"]})
+        triggers(ws, run, "trigger_child", 777, attempt=0)
+        triggers(ws, run, "trigger_child", 778, attempt=1)
         for child_id, state in ((777, "FAILED"), (778, "SUCCESS")):
             child = make_run(child_id, {"load": state})
             child.job_id = 123
             ws.jobs.add_run(child)
-        run = make_run(1, {}, attempts={"trigger_child": ["FAILED", "SUCCESS"]})
         task = build_from(ws, run).task("trigger_child")
         first, last = task.attempts
         assert first.child_run is not None
