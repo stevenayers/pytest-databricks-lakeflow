@@ -11,6 +11,7 @@ from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
     Helpers,
+    add_dependencies,
     check_compute,
     check_params,
     create_kwargs,
@@ -683,6 +684,56 @@ class TestDisableAndRunJobTasks:
         assert [t.task_key for t in run_job_tasks(settings)] == ["trigger_child", "each_child"]
         assert [t.task_key for t in run_job_tasks(disable_tasks(settings, ["loop"]))] == ["trigger_child"]
         assert run_job_tasks(disable_tasks(settings, ["trigger_child", "loop"])) == []
+
+
+class TestAddDependencies:
+    """add_dependencies appends test-only packages to every environment and to Python tasks on clusters."""
+
+    def test_add_dependencies_to_environments_and_cluster_tasks(self) -> None:
+        inner = {
+            "task_key": "inner",
+            "new_cluster": {"spark_version": "17.3.x"},
+            "spark_python_task": {"python_file": "/x"},
+        }
+        settings = with_tasks(for_each(inner))
+        settings = add_dependencies(settings, ["pytest>=8"])
+        [default] = settings.environments or []
+        assert default.spec is not None and default.spec.dependencies == ["pytest>=8"]
+        pytest_library = compute.Library(pypi=compute.PythonPyPiLibrary(package="pytest>=8"))
+        assert task(settings, "classic").libraries == [pytest_library]
+        assert nested_task(settings, "loop").libraries == [pytest_library]
+        for key in ("extract", "transform", "load", "loop"):
+            assert not task(settings, key).libraries, key
+
+    def test_add_dependencies_appends_to_what_the_template_declares(self) -> None:
+        settings = example_settings()
+        [default] = settings.environments or []
+        assert default.spec is not None
+        default.spec.dependencies = ["/Workspace/libs/pkg.whl"]
+        task(settings, "classic").libraries = [compute.Library(whl="/Workspace/libs/pkg.whl")]
+        add_dependencies(settings, ["pytest>=8", "chispa"])
+        assert default.spec.dependencies == ["/Workspace/libs/pkg.whl", "pytest>=8", "chispa"]
+        assert [library.as_dict() for library in task(settings, "classic").libraries or []] == [
+            {"whl": "/Workspace/libs/pkg.whl"},
+            {"pypi": {"package": "pytest>=8"}},
+            {"pypi": {"package": "chispa"}},
+        ]
+
+    def test_add_dependencies_uses_whl_for_wheel_paths(self) -> None:
+        wheel = "/Workspace/Shared/libs/helpers-0.1-py3-none-any.whl"
+        settings = add_dependencies(example_settings(), [wheel])
+        [default] = settings.environments or []
+        assert default.spec is not None and default.spec.dependencies == [wheel]
+        assert task(settings, "classic").libraries == [compute.Library(whl=wheel)]
+
+    @pytest.mark.parametrize("dependency", ["./dist/*.whl[test]", "../dist/pkg-0.1-py3-none-any.whl", "dist/pkg.whl"])
+    def test_add_dependencies_rejects_local_paths(self, dependency: str) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=r"Local paths are not yet supported in extra_dependencies") as e:
+            add_dependencies(settings, ["pytest", dependency])
+        assert repr(dependency) in str(e.value)
+        assert 'sync="deploy"' in str(e.value)
+        assert settings == example_settings(), "nothing changes before the error"
 
 
 class TestPipelineParams:

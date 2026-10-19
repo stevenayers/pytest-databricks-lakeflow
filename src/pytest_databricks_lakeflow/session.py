@@ -88,6 +88,7 @@ class SessionState:
         kept_jobs: The URL of each ephemeral job that was kept, for the terminal summary.
         kept_schemas: The full name of each temporary schema that was kept.
         cancelled_runs: The number of runs cancelled at session end.
+        warned_artifacts: The bundle targets whose wheel artifacts without `dynamic_version` have been warned about.
         worker_dir: On the xdist controller, the directory that it shares with the workers.
         uploaded_notebooks: The workspace paths of the setup and teardown notebooks this process uploaded.
     """
@@ -108,6 +109,7 @@ class SessionState:
     kept_jobs: list[str] = field(default_factory=list)
     kept_schemas: list[str] = field(default_factory=list)
     cancelled_runs: int = 0
+    warned_artifacts: set[BundleKey] = field(default_factory=set)
     worker_dir: Path | None = None
     uploaded_notebooks: set[str] = field(default_factory=set)
 
@@ -138,7 +140,7 @@ class SessionState:
 
         Returns:
             The target's state: its job templates, the errors of jobs that cannot be used, the job ids by bundle key,
-                the helper paths, and the workspace user.
+                the helper paths, the workspace user, and the wheel artifacts without `dynamic_version`.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -355,6 +357,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         check_host(key.target, _workspace_host(bundle_summary), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
         job_ids, _ = bundle.job_ids(bundle_summary)
+        unversioned = bundle.unversioned_wheel_artifacts(bundle_summary)
     else:
         if key.sync == "sync":
             bundle.sync(root, key.target, key.profile, variables)
@@ -362,6 +365,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         check_host(key.target, _workspace_host(config), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
         job_ids = {}
+        unversioned = bundle.unversioned_wheel_artifacts(config)
     user = ws.current_user.me().user_name
     folder = key.helpers_path or helpers.default_folder(user)
     helper_paths = helpers.upload(ws, folder)
@@ -372,6 +376,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         "helpers": helper_paths,
         "user": user,
         "job_ids": job_ids,
+        "unversioned_artifacts": unversioned,
     }
 
 

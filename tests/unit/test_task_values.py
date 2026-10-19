@@ -7,7 +7,15 @@ import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.settings import ENV_KEY, Helpers, check_values, escape, inject_probes, wrap_task
+from pytest_databricks_lakeflow.settings import (
+    ENV_KEY,
+    Helpers,
+    add_dependencies,
+    check_values,
+    escape,
+    inject_probes,
+    wrap_task,
+)
 
 from .conftest import configure_lakeflow
 from .fakes import FakeWorkspaceClient, example_settings, recorded
@@ -118,6 +126,18 @@ class TestHelperCompute:
         assert ENV_KEY not in environment_keys(settings)
         with pytest.raises(LakeflowError, match=r"^helpers_compute is 'gpu'.*Available: \['classic'\]"):
             wrap_task(example_settings(), "transform", UPSTREAM, [], Helpers("/s", "/g", job_cluster_key="gpu"))
+
+    @pytest.mark.parametrize(
+        "inject", [pytest.param(probe_transform, id="inject_probes"), pytest.param(wrap_transform, id="wrap_task")]
+    )
+    def test_extra_dependencies_do_not_reach_the_helper_environment(
+        self, inject: Callable[[jobs.JobSettings], jobs.JobSettings]
+    ) -> None:
+        settings = inject(add_dependencies(example_settings(), ["pytest>=8"]))
+        specs = {e.environment_key: e.spec for e in settings.environments or []}
+        default, helper = specs["default"], specs[ENV_KEY]
+        assert default is not None and default.dependencies == ["pytest>=8"]
+        assert helper is not None and helper.dependencies is None
 
     def test_helper_environment_version(self) -> None:
         settings = inject_probes(example_settings(), {"load": ["k"]}, Helpers("/s", "/g", environment_version="6"))

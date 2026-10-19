@@ -19,7 +19,7 @@ import pytest
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError, LakeflowRunFailed
 
 from .conftest import lakeflow_for
 
@@ -339,3 +339,22 @@ def test_task_setup_runs_before_the_stubs(lakeflow: Lakeflow) -> None:
         setup, stub = run.injected_tasks["__pytest_setup"], run.injected_tasks["extract"]
         assert setup.succeeded and stub.succeeded
         assert run.teardown is not None and run.teardown.succeeded, run.teardown
+
+
+def test_extra_dependencies_are_importable(lakeflow: Lakeflow) -> None:
+    with lakeflow.task(
+        "my_example_job.my_wheel_task",
+        params={"param1": "version inflection"},
+        extra_dependencies=["inflection==0.5.1"],
+    ) as task:
+        run = task.run()
+        wheel_task = run.task("my_wheel_task")
+        assert run.succeeded, wheel_task.error
+        assert "inflection 0.5.1" in wheel_task.logs
+
+
+def test_strict_artifacts_refuses_the_unversioned_example_wheel(lakeflow: Lakeflow) -> None:
+    # The example's wheel artifact has no dynamic_version, so a strict Lakeflow refuses its templates.
+    strict = dataclasses.replace(lakeflow, strict_artifacts=True)
+    with pytest.raises(LakeflowError, match=r"^Artifacts \['lakeflow_example'\] have no dynamic_version: true\."):
+        strict.template("my_example_job")

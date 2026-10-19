@@ -5,6 +5,7 @@ include:
   - resources/*.yml
 
 artifacts:
+  # No dynamic_version, so test_example.py can check the strict_artifacts error against the real bundle summary.
   lakeflow_example:
     type: whl
     build: uv build --wheel

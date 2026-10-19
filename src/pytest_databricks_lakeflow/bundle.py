@@ -142,6 +142,25 @@ def job_ids(bundle_summary: Mapping[str, Any]) -> tuple[dict[str, int], dict[str
     return ids, errors
 
 
+def unversioned_wheel_artifacts(config: Mapping[str, Any]) -> list[str]:
+    """Find the wheel artifacts that are deployed under the same file name every time.
+
+    Args:
+        config: The parsed output of `databricks bundle summary -o json` or `databricks bundle validate -o json`.
+
+    Returns:
+        The sorted names of the artifacts whose `type` is `whl`, or that have no `type` but a `build` command, and
+            whose `dynamic_version` is not true.
+    """
+    names: list[str] = []
+    for name, artifact in (config.get("artifacts") or {}).items():
+        kind = artifact.get("type")
+        is_wheel = kind == "whl" or (kind is None and bool(artifact.get("build")))
+        if is_wheel and artifact.get("dynamic_version") is not True:
+            names.append(name)
+    return sorted(names)
+
+
 def templates_from_validate(
     config: Mapping[str, Any], root: Path, strategy: str, exists: Callable[[str], bool]
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:

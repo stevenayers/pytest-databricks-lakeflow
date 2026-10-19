@@ -20,6 +20,11 @@ DEPLOY = ["bundle", "deploy", "-t", "test", "--auto-approve"]
 DEPLOY_STAGING = ["bundle", "deploy", "-t", "staging", "--auto-approve"]
 SUMMARY = ["bundle", "summary", "-t", "test", "-o", "json"]
 OTHER_HOST = "https://other.cloud.databricks.com"
+WHEEL_ARTIFACT = {"type": "whl", "build": "uv build --wheel", "path": "/b", "files": [{"source": "/b/dist/*.whl"}]}
+UNVERSIONED_MESSAGE = (
+    "Artifacts ['lakeflow_example'] have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt "
+    "wheel with the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
+)
 STAGING_FIXTURE = """
 
 @pytest.fixture(scope="session")
@@ -444,6 +449,7 @@ class TestSetup:
             "helpers": {"set_values": f"{folder}/set_values", "get_values": f"{folder}/get_values"},
             "user": "someone@example.com",
             "job_ids": {"my_job": fake_cli.deployed["my_job"]},
+            "unversioned_artifacts": [],
         }
         assert set(fake_ws.workspace.uploads) == {f"{folder}/set_values", f"{folder}/get_values"}
         assert all(upload["overwrite"] for upload in fake_ws.workspace.uploads.values())
@@ -770,6 +776,69 @@ class TestLazySetup:
         )
         pytester.runpytest().assert_outcomes(passed=1)
         assert fake_cli.calls == []
+
+
+class TestUnversionedArtifacts:
+    """Wheel artifacts without `dynamic_version` warn once per session, or fail with `strict_artifacts=True`."""
+
+    @pytest.mark.parametrize("sync", ["deploy", "none"])
+    def test_setup_records_unversioned_artifacts(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str
+    ) -> None:
+        artifacts = {"artifacts": {"pkg": WHEEL_ARTIFACT, "versioned": {**WHEEL_ARTIFACT, "dynamic_version": True}}}
+        if sync == "deploy":
+            fake_cli.summary = artifacts
+        else:
+            fake_cli.validate = artifacts
+        state = session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
+        assert state["unversioned_artifacts"] == ["pkg"]
+
+    @pytest.mark.parametrize(("dynamic_version", "warnings"), [(False, 1), (True, 0)])
+    def test_unversioned_wheel_warns_once(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        bundle_dir: Path,
+        dynamic_version: bool,
+        warnings: int,
+    ) -> None:
+        fake_cli.summary = {"artifacts": {"lakeflow_example": {**WHEEL_ARTIFACT, "dynamic_version": dynamic_version}}}
+        pytester.makepyfile(
+            """
+            import dataclasses
+
+            def test_one(lakeflow):
+                lakeflow.template("my_job")
+                lakeflow.template("my_job")
+
+            def test_two(lakeflow):
+                dataclasses.replace(lakeflow, catalog="other").template("my_job")
+            """
+        )
+        result = pytester.runpytest()
+        result.assert_outcomes(passed=2, warnings=warnings)
+        assert result.stdout.str().count(f"UserWarning: {UNVERSIONED_MESSAGE}") == warnings
+
+    def test_strict_artifacts_fails_the_first_template_lookup(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        fake_cli.summary = {"artifacts": {"lakeflow_example": WHEEL_ARTIFACT}}
+        configure_lakeflow(pytester, "strict_artifacts=True")
+        pytester.makepyfile(
+            """
+            def test_one(lakeflow):
+                lakeflow.template("my_job")
+
+            def test_two(lakeflow):
+                lakeflow.job("my_job")
+            """
+        )
+        result = pytester.runpytest("-rN")
+        result.assert_outcomes(failed=2, warnings=0)
+        assert result.stdout.str().count(f"LakeflowError: {UNVERSIONED_MESSAGE}") == 2
+        assert fake_cli.calls.count(DEPLOY) == 1
+        assert fake_ws.jobs.created == []
 
 
 class TestHelperNotebooks:

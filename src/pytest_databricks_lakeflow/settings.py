@@ -288,6 +288,58 @@ def inject_test_marker(settings: jobs.JobSettings, nodeid: str) -> jobs.JobSetti
     return settings
 
 
+def add_dependencies(settings: jobs.JobSettings, dependencies: Sequence[str]) -> jobs.JobSettings:
+    """Append test-only dependencies to every environment and to every Python task on a cluster.
+
+    Each environment's `spec.dependencies` gains every dependency. Each notebook, Python script and Python wheel
+    task that runs on a job cluster, a new cluster or an existing cluster, tasks nested in a `for_each_task`
+    included, gains a `whl` library for a dependency ending in `.whl` and a `pypi` library for any other. Serverless
+    tasks without an `environment_key` cannot take dependencies from the job settings, so they are left alone. Call
+    it before the helper environment is added, so that helper tasks do not install them.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        dependencies: PyPI requirements, or workspace or Volumes paths of wheels.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a dependency is a local path, such as `./dist/*.whl[test]`. Nothing is changed then.
+    """
+    if not dependencies:
+        return settings
+    local = [dep for dep in dependencies if _is_local_path(dep)]
+    if local:
+        raise LakeflowError(
+            f"Local paths are not yet supported in extra_dependencies: {', '.join(map(repr, local))}. Pass a PyPI "
+            "requirement or a /Workspace or /Volumes path, or declare the wheel in the bundle job, whose local "
+            'libraries Lakeflow(sync="deploy") maps to the uploaded files. Local wheels are tracked in '
+            "https://github.com/stevenayers/pytest-databricks-lakeflow/issues/55."
+        )
+    for env in settings.environments or []:
+        if env.spec is None:
+            env.spec = compute.Environment.from_dict({})
+        env.spec.dependencies = [*(env.spec.dependencies or []), *dependencies]
+    for task in _with_nested(settings.tasks):
+        runs_python = task.notebook_task or task.spark_python_task or task.python_wheel_task
+        if runs_python and _on_cluster(task):
+            task.libraries = [*(task.libraries or []), *(_library(dep) for dep in dependencies)]
+    return settings
+
+
+def _is_local_path(dependency: str) -> bool:
+    if dependency.startswith(("./", "../")):
+        return True
+    return dependency.endswith(".whl") and not dependency.startswith("/") and ":" not in dependency
+
+
+def _library(dependency: str) -> compute.Library:
+    if dependency.endswith(".whl"):
+        return compute.Library(whl=dependency)
+    return compute.Library(pypi=compute.PythonPyPiLibrary(package=dependency))
+
+
 def disable_tasks(settings: jobs.JobSettings, keys: Sequence[str]) -> jobs.JobSettings:
     """Set `disabled` on the named tasks, so the job skips them.
 

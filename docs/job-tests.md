@@ -27,6 +27,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).
 - `disable` lists task keys to disable in the copy, see [below](#disable-a-task).
+- `extra_dependencies` adds test-only packages to the copy, see [below](#test-only-dependencies).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
@@ -63,6 +64,44 @@ def test_without_load(lakeflow: Lakeflow) -> None:
 ```
 
 A disabled task ends `DISABLED` and lands in `run.disabled_tasks`, and `run.task("load")` raises a `KeyError` that says `Disabled in the job: ['load']`. Tasks the bundle already disables land there too. An unknown key raises `LakeflowError` listing the available tasks, and no job is created. Dashboard and SQL alert subscriptions are already paused in every copy, see `side_effects` in [Configuration](configuration.md).
+
+### Test-only dependencies
+
+Job code under test sometimes needs packages that must not ship in the production wheel, such as a fixtures package or `chispa`. `extra_dependencies` adds them to the copy only:
+
+```python
+def test_with_test_helpers(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", extra_dependencies=["chispa>=0.10"]) as job:
+        assert job.run().succeeded
+```
+
+Each entry is a PyPI requirement, or the `/Workspace` or `/Volumes` path of a wheel. It is appended to the `dependencies` of every environment in the copy, and to the `libraries` of every notebook, Python script and Python wheel task that runs on a cluster (a job cluster, a `new_cluster` or an `existing_cluster_id`), as a `whl` library for a path ending in `.whl` and a `pypi` library for anything else. Tasks nested in a `for_each_task` get them too. `lakeflow.task()` takes the same argument. The helper environment `__pytest_serverless` and the stub and probe tasks do not get them.
+
+Serverless notebook tasks without an `environment_key` cannot take dependencies from the job settings, so they are left unchanged; install the package with `%pip install` in the notebook, or give the task an environment in the bundle. Local paths such as `./dist/*.whl[test]` are not supported yet and raise `LakeflowError` before anything is created. Declare a local wheel in the bundle job instead, where `sync="deploy"` maps it to the uploaded file.
+
+The copy's settings can be changed further with [`modify_settings`](#change-the-settings-before-the-job-is-created). Two recipes that come up with dependencies, pinning the branch of a job that runs from Git and replacing the libraries of one task:
+
+```python
+import pytest
+from databricks.sdk.service import compute, jobs
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+def pin_branch_and_libraries(settings: jobs.JobSettings, item: pytest.Item) -> None:
+    if settings.git_source is not None:
+        settings.git_source.git_branch = "feature/new-loader"
+        settings.git_source.git_tag = None
+        settings.git_source.git_commit = None
+    for task in settings.tasks or []:
+        if task.task_key == "load":
+            task.libraries = [compute.Library(pypi=compute.PythonPyPiLibrary(package="requests==2.32.3"))]
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(modify_settings=pin_branch_and_libraries)
+```
 
 ## Run it
 
