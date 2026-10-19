@@ -254,6 +254,35 @@ def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
         assert transform["row_count"] == "7", "the stub sets the row count the full run's extract set"
 
 
+def test_downstream_half_with_stubbed_extract(lakeflow: Lakeflow) -> None:
+    stubbed = {"extract": {"row_count": 3, "source_path": "/Volumes/x/y/z"}}
+    with lakeflow.job("my_example_job", upstream_task_values=stubbed) as job:
+        run = job.run(only=["transform+"])
+        assert run.succeeded, run
+        assert "extract" in run.injected_tasks
+        assert sorted(run.tasks) == ["load", "transform"]
+        transform = run.task("transform").parameters
+        assert isinstance(transform, dict)
+        assert transform["row_count"] == "3"
+        # Without the stub, only=["transform"] ends INTERNAL_ERROR: "Failed to resolve references".
+        run = job.run(only=["transform"])
+        assert run.succeeded, run
+        assert sorted(run.tasks) == ["transform"]
+
+
+def test_replay_downstream_half_from_a_full_run(lakeflow: Lakeflow) -> None:
+    first = lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}).run()
+    assert first.succeeded, first
+    run = lakeflow.job("my_example_job").run(only=["transform+"], replay=first)
+    assert run.succeeded, run
+    assert sorted(run.injected_tasks) == ["extract"]
+    transform = run.task("transform").parameters
+    assert isinstance(transform, dict)
+    assert transform["row_count"] == "7", "the stub sets the row count the full run's extract set"
+    with pytest.raises(LakeflowError, match=r"refers to task values of \['extract'\]"):
+        lakeflow.job("my_example_job").run(only=["transform"])
+
+
 def test_permissions_are_applied(lakeflow: Lakeflow) -> None:
     # The creator already owns the job, so grant to a group rather than to the current user.
     shared = dataclasses.replace(lakeflow, permissions=[{"group_name": "users", "permission_level": "CAN_MANAGE_RUN"}])

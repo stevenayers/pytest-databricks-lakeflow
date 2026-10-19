@@ -1138,6 +1138,27 @@ class TestRunOptions:
         result.assert_outcomes(passed=1)
         assert [call["only"] for call in fake_ws.jobs.run_now_calls] == [["+transform"], None]
 
+    @pytest.mark.parametrize("only", [["transform"], ["transform+"]])
+    def test_only_with_an_unresolved_reference_fails_before_run_now(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, only: list[str]
+    ) -> None:
+        result = run_tests(
+            pytester,
+            f"""
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                job = lakeflow.job("my_job")
+                with pytest.raises(LakeflowError, match=r"refers to task values of \\['extract'\\]"):
+                    job.run(only={only!r})
+                job.run(only=["+transform"])
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert [call["only"] for call in fake_ws.jobs.run_now_calls] == [["+transform"]]
+
     def test_run_sends_a_fresh_idempotency_token(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
         result = run_tests(

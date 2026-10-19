@@ -16,8 +16,10 @@ from pytest_databricks_lakeflow.settings import (
     add_dependencies,
     check_values,
     escape,
+    inject_lifecycle,
     inject_probes,
     merge_environments,
+    stub_upstream,
     upstream_values_from,
     wrap_task,
 )
@@ -147,6 +149,50 @@ class TestWrapTask:
     def test_rejects(self, task_key: str, upstream: dict[str, dict[str, object]], message: str) -> None:
         with pytest.raises(LakeflowError, match=message):
             wrap_task(example_settings(), task_key, upstream, [], HELPERS)
+
+
+class TestStubUpstream:
+    """`stub_upstream` replaces the named tasks of a whole job with stubs, in place."""
+
+    def test_stub_upstream_replaces_tasks_in_place(self) -> None:
+        settings = stub_upstream(example_settings(), UPSTREAM, HELPERS)
+        assert keys(settings) == ["extract", "transform", "load", "classic"]
+        stub, transform = (settings.tasks or [])[:2]
+        assert stub.notebook_task == jobs.NotebookTask(
+            notebook_path="/h/set_values", base_parameters={"__pytest_values": escape(UPSTREAM["extract"])}
+        )
+        assert stub.environment_key == ENV_KEY
+        assert stub.depends_on is None
+        assert transform.depends_on == [jobs.TaskDependency(task_key="extract")]
+        assert ENV_KEY in environment_keys(settings)
+        assert stub_upstream(example_settings(), {}, HELPERS) == example_settings()
+
+    def test_stub_upstream_drops_depends_on_but_keeps_the_setup_task(self) -> None:
+        settings = inject_lifecycle(example_settings(), "/h/setup_1", None, HELPERS)
+        stub_upstream(settings, {"transform": {"stage": "done"}}, HELPERS)
+        stub = next(t for t in settings.tasks or [] if t.task_key == "transform")
+        assert stub.depends_on == [jobs.TaskDependency(task_key="__pytest_setup")]
+
+    @pytest.mark.parametrize(
+        ("upstream", "message"),
+        [
+            pytest.param(
+                {"extrct": {"row_count": 1}},
+                r"Unknown task 'extrct' in upstream_task_values. Available: \['classic', 'extract', 'load'",
+                id="unknown_task",
+            ),
+            pytest.param(
+                {"extract": {"row_count": "x" * 49_153}},
+                "'row_count' for task 'extract' is 49155 characters as JSON",
+                id="value_too_large",
+            ),
+        ],
+    )
+    def test_stub_upstream_rejects_unknown_tasks(self, upstream: dict[str, dict[str, object]], message: str) -> None:
+        settings = example_settings()
+        with pytest.raises(LakeflowError, match=message):
+            stub_upstream(settings, {"load": {"rows": 1}, **upstream}, HELPERS)
+        assert settings == example_settings(), "nothing is changed when an entry is rejected"
 
 
 class TestInjectProbes:
@@ -423,6 +469,107 @@ class TestEndToEnd:
         assert [t.task_key for t in replay["tasks"]] == ["extract", "audit", "transform"]
         assert stub_values(replay, "extract") == '{"row_count": 0}'
         assert stub_values(replay, "audit") == '{"checked": true}'
+
+    def test_job_stubs_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"extract": "SUCCESS", "transform": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            def test_job(lakeflow):
+                with lakeflow.job("my_job", upstream_task_values={"extract": {"row_count": 10}}) as job:
+                    run = job.run(only=["transform"])
+                assert run.succeeded
+                assert sorted(run.injected_tasks) == ["extract"]
+                assert "extract" not in run.tasks
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        assert [t.task_key for t in created["tasks"]] == ["extract", "transform", "load", "classic"]
+        assert stub_values(created, "extract") == escape({"row_count": 10})
+        assert created["tasks"][1].depends_on == [jobs.TaskDependency(task_key="extract")]
+        assert fake_ws.jobs.run_now_calls[0]["only"] == ["transform", "extract"]
+
+    def test_replay_fills_stubs_from_a_previous_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        fake_ws.jobs.queue(make_run(78, {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                assert first.task("extract").task_values == {"row_count": 42}
+                again = lakeflow.job("my_job").run(only=["transform+"], replay=first)
+                assert again.succeeded
+                assert sorted(again.injected_tasks) == ["extract"]
+                assert sorted(again.tasks) == ["load", "transform"]
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        replay = fake_ws.jobs.created[1]
+        assert [t.task_key for t in replay["tasks"]] == ["extract", "transform", "load", "classic"]
+        assert stub_values(replay, "extract") == '{"row_count": 42}'
+        assert replay["tasks"][0].disable_auto_optimization
+        assert fake_ws.jobs.run_now_calls[1]["only"] == ["transform+", "extract"]
+
+    def test_replay_stubs_no_task_upstream_of_teardown(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        states = {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS", "__pytest_teardown": "SUCCESS"}
+        fake_ws.jobs.queue(make_run(78, states))
+        pytester.makepyfile(
+            """
+            def cleanup(dbutils, params):
+                pass
+
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                again = lakeflow.job("my_job", teardown=cleanup).run(only=["transform+"], replay=first)
+                assert again.succeeded
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        replay = fake_ws.jobs.created[1]
+        assert [t.task_key for t in replay["tasks"]] == ["extract", "transform", "load", "classic", "__pytest_teardown"]
+        assert stub_values(replay, "extract") == '{"row_count": 42}'
+        classic = replay["tasks"][3]
+        assert classic.notebook_task.notebook_path.endswith("/src/classic"), "upstream of teardown only, so no stub"
+        assert fake_ws.jobs.run_now_calls[1]["only"] == ["transform+", "extract"]
+
+    def test_replay_on_a_created_job_fails_clearly(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        pytester.makepyfile(
+            """
+            import dataclasses
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def rejects(message):
+                return pytest.raises(LakeflowError, match=message)
+
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                with lakeflow.job("my_job") as job:
+                    with rejects(r"replay.*before the job is created.*job \\d+ of 'my_job' already exists"):
+                        job.run(only=["transform"], replay=first)
+                job = lakeflow.job("my_job")
+                with rejects("replay stubs the tasks that only leaves out, so it needs only"):
+                    job.run(replay=first)
+                other = dataclasses.replace(first, job_key="other_job")
+                with rejects("replay is a run of job 'other_job', not of 'my_job'"):
+                    job.run(only=["transform"], replay=other)
+                with rejects("replay has no task values for 'transform', upstream of 'load': it has no captured"):
+                    job.run(only=["load"], replay=first)
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.created) == 2, "a rejected replay creates nothing"
+        assert len(fake_ws.jobs.run_now_calls) == 1
 
 
 class TestEnvironmentCap:

@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     require_task,
     run_job_tasks,
     sanitise,
+    stub_upstream,
     upstream_values_from,
     wrap_task,
 )
@@ -258,6 +259,7 @@ class Lakeflow:
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        upstream_task_values: Mapping[str, Mapping[str, object]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -310,6 +312,13 @@ class Lakeflow:
                 `timeout_seconds`, which applies to each attempt, `max_retries`, `min_retry_interval_millis` and
                 `retry_on_timeout`. They are applied before the probes, setup and teardown tasks are added, so those
                 cannot be named.
+            upstream_task_values: Tasks of the copy to replace with stubs, by task key, with the task values each stub
+                sets, such as `{"extract": {"row_count": 10}}`. A stub keeps the task's key and place, so the tasks
+                downstream of it still depend on it and their `{{tasks.<key>.values.<name>}}` references resolve
+                against it, and `run(only=...)` adds it whenever a selected task depends on it. It drops the task's
+                `depends_on`, so the tasks upstream of it still run on a full run but no longer hold it back. It
+                is applied after `task_params`, `disable`, `force_conditions`, `extra_dependencies` and
+                `task_overrides`, so what they set on that task is lost. It appears in `JobRun.injected_tasks`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -328,7 +337,8 @@ class Lakeflow:
                 `spark`, `dbutils` and `params`, or has a decorator.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
-                name starting with `__pytest_`.
+                name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
+                a value that is too large or not JSON-serialisable.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -342,6 +352,7 @@ class Lakeflow:
         force_condition_outcomes(settings, force_conditions or {})
         add_dependencies(settings, extra_dependencies or [])
         override_tasks(settings, task_overrides or {})
+        stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
         self._inject_lifecycle(settings, notebooks)
         return self._ephemeral(
@@ -350,7 +361,7 @@ class Lakeflow:
             settings,
             params=params,
             capture_task_values=capture_task_values,
-            stubs=(),
+            stubs=list(upstream_task_values or {}),
             name=name,
             run_as=run_as,
             children=children,
