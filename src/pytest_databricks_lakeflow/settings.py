@@ -422,7 +422,9 @@ def _merged_environment(
     if template is not None:
         current = template.as_dict()
     spec = compute.Environment.from_dict({**current, **override})
-    # Environment.base_environment only exists in recent databricks-sdk releases.
+    # Environment.base_environment only exists in recent databricks-sdk releases. jobs/create refuses the pair with
+    # InvalidParameterValue "Both base environment and version are provided for environment 'default'. Only one of
+    # them must be provided.", so this only reports it before anything is created.
     if spec.environment_version and getattr(spec, "base_environment", None):
         raise LakeflowError(
             f"environments[{key!r}] would set both environment_version and base_environment, which a job does not "

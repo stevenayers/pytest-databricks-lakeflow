@@ -12,6 +12,7 @@ Run them with:
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 from datetime import timedelta
 
@@ -75,8 +76,11 @@ def test_the_plugin_timeout_cancels_the_run_and_is_mirrored_on_the_job(lakeflow:
         # timeout plus 60 seconds.
         assert settings.timeout_seconds == 80
         started = time.monotonic()
-        with pytest.raises(LakeflowTimeout, match="did not finish within 0:00:20 and was cancelled"):
+        with pytest.raises(LakeflowTimeout, match="did not finish within 0:00:20 and was cancelled") as excinfo:
             job.run()
+        # The sleep task was RUNNING at the last poll when observed; serverless can take longer than 20 seconds to
+        # start it, so a task still waiting for compute is accepted too.
+        assert re.search(r"\nTasks when cancelled: sleep (RUNNING|PENDING|QUEUED)$", str(excinfo.value)), excinfo.value
         assert time.monotonic() - started < 120
         assert job.runs == []
         assert not quick.active_runs
