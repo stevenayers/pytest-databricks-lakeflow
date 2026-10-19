@@ -251,7 +251,8 @@ def stale_uploads(config: Mapping[str, Any], root: Path, modified_at: Callable[[
     remote_of: dict[str, str] = {}
     for job in config.get("resources", {}).get("jobs", {}).values():
         for pattern in _local_libraries(job):
-            for match in _matches(pattern, root):
+            local, _ = split_extras(pattern)
+            for match in _matches(local, root):
                 remote_of[match] = _remote(artifact_path, match)
     stale: list[str] = []
     for match, remote in remote_of.items():

@@ -775,6 +775,16 @@ class TestSelect:
         transform.notebook_task.base_parameters = {"upstream": f"{{{{tasks.extract.{field}}}}}"}
         check_references(settings, {"transform"}, set())
 
+    def test_check_references_counts_only_the_stubs_that_run(self) -> None:
+        settings = example_settings()
+        load = task(settings, "load")
+        assert load.python_wheel_task is not None
+        load.python_wheel_task.named_parameters = {"rows": "{{tasks.extract.values.row_count}}"}
+        assert select(settings, ["load"], stubs={"extract"}) == ["load"], "load does not depend on the stub directly"
+        with pytest.raises(LakeflowError, match=r"Task 'load' refers to task values of \['extract'\]"):
+            check_references(settings, {"load"}, {"extract"})
+        check_references(settings, {"load", "transform"}, {"extract"})
+
 
 class TestInjectLifecycle:
     """inject_lifecycle runs setup before every root task and teardown after every leaf, whatever happened."""

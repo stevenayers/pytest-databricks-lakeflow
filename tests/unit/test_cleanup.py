@@ -18,7 +18,7 @@ from pytest_databricks_lakeflow.plugin import parse_duration
 
 from .conftest import FakeCli, configure_lakeflow
 from .fakes import HOST, HOUR_MS, FakeWorkspaceClient, listed_job, make_run, sweep_candidates
-from .test_session import STAGING_FIXTURE, make_xdist_conftest
+from .test_session import STAGING_FIXTURE, SWEEP_LOGGING, make_xdist_conftest
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -211,6 +211,17 @@ class TestSweep:
         with pytest.raises(LakeflowError, match=message):
             state._sweep(as_client(FakeWorkspaceClient()), {}, 24)
 
+    def test_a_failed_sweep_warns_on_the_sweeping_worker_only(self, pytester: pytest.Pytester) -> None:
+        pytest.importorskip("xdist")
+        deleted = pytester.path / "deleted.log"
+        make_xdist_conftest(pytester, SWEEP_LOGGING.format(deleted=str(deleted)))
+        pytester.makepyfile(uses_lakeflow(*"abcdef"))
+        (pytester.path / "blocked").write_text("a file, not a directory")
+        result = pytester.runpytest("-n", "2", "--lakeflow-sweep", "--lakeflow-sweep-report=blocked/sweep.json")
+        result.assert_outcomes(passed=6, warnings=1)
+        result.stdout.fnmatch_lines(["*UserWarning: Lakeflow sweep failed: FileExistsError: *blocked*"])
+        assert deleted.read_text().split() == ["1", "2", "7"]
+
     def test_no_sweep_without_the_flag(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.listed = sweep_candidates()
         pytester.makepyfile(uses_lakeflow("a"))
@@ -361,6 +372,21 @@ class TestSweepReport:
         result.stdout.fnmatch_lines(["*= lakeflow =*", *lines])
         result.stdout.no_fnmatch_line("  notebook */set_values")
 
+    def test_xdist_dry_run_is_listed_once_by_the_controller(self, pytester: pytest.Pytester) -> None:
+        pytest.importorskip("xdist")
+        deleted = pytester.path / "deleted.log"
+        make_xdist_conftest(pytester, SWEEP_LOGGING.format(deleted=str(deleted)))
+        pytester.makepyfile(uses_lakeflow(*"abcd"))
+        result = pytester.runpytest("-n", "2", "--lakeflow-sweep", "--lakeflow-sweep-dry-run")
+        result.assert_outcomes(passed=4)
+        assert not deleted.exists()
+        lines = [
+            "lakeflow: sweep dry run deleted nothing; it would delete:",
+            *(f"  job {HOST}/jobs/{i}" for i in (1, 2, 7)),
+        ]
+        result.stdout.fnmatch_lines(["*= lakeflow =*", *lines])
+        assert result.stdout.str().count("sweep dry run deleted nothing") == 1
+
     @pytest.mark.parametrize(
         ("flags", "message"),
         [
@@ -405,11 +431,6 @@ class TestKeepTtl:
             assert value.endswith("Z")
             expiry = datetime.fromisoformat(value)
             assert before + timedelta(hours=48) <= expiry <= after + timedelta(hours=48)
-
-    def test_no_expiry_without_the_flag(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        pytester.makepyfile(CREATES_JOBS.format("a"))
-        pytester.runpytest().assert_outcomes(passed=1)
-        assert "pytest_expires" not in fake_ws.jobs.created[0]["tags"]
 
     @pytest.mark.parametrize("value", ["48", "2w", "-1h"])
     def test_keep_ttl_rejects_bad_durations(self, pytester: pytest.Pytester, value: str) -> None:

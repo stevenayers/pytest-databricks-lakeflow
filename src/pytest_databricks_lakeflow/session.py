@@ -10,6 +10,7 @@ import secrets
 import subprocess
 import time
 import urllib.parse
+import warnings
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -263,11 +264,17 @@ class SessionState:
             nonlocal swept_here
             swept_here = True
             folder = folder_of_helpers(state)
-            report = sweep(ws, self.run_id, sweep_hours, folder, self.sweep_options, user=state.get("user"))
+            try:
+                report = sweep(ws, self.run_id, sweep_hours, folder, self.sweep_options, user=state.get("user"))
+            # The sweep only tidies up, so its failure fails no test. It is not shared as an error, so the other
+            # xdist workers carry on without it.
+            except Exception as e:
+                warnings.warn(f"Lakeflow sweep failed: {type(e).__name__}: {e}", stacklevel=2)
+                return {"failed": True}
             return report.as_dict()
 
         report = shared_state(path, produce, "sweep")
-        if swept_here and report["dry_run"]:
+        if swept_here and report.get("dry_run"):
             self.sweep_dry_run = _dry_run_lines(report, ws.config.host)
 
     def expiry_tag(self) -> dict[str, str]:

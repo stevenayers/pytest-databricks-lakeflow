@@ -86,10 +86,10 @@ def previous_run(
     )
 
 
-def queue_capturing_run(fake_ws: FakeWorkspaceClient, values: Mapping[str, object]) -> None:
-    """Queue a full run of my_job whose probe on extract captured `values`."""
+def queue_capturing_run(fake_ws: FakeWorkspaceClient, values: Mapping[str, object], probed: str = "extract") -> None:
+    """Queue a full run of my_job whose probe on the task `probed` captured `values`."""
     states = {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS", "classic": "SUCCESS"}
-    run = make_run(5, {**states, "__pytest_probe__extract": "SUCCESS"})
+    run = make_run(5, {**states, f"__pytest_probe__{probed}": "SUCCESS"})
     probe_output = jobs.NotebookOutput(result=json.dumps({"values": dict(values), "missing": []}))
     fake_ws.jobs.queue(run, {504: jobs.RunOutput(notebook_output=probe_output)})
 
@@ -544,6 +544,28 @@ class TestEndToEnd:
         classic = replay["tasks"][3]
         assert classic.notebook_task.notebook_path.endswith("/src/classic"), "upstream of teardown only, so no stub"
         assert fake_ws.jobs.run_now_calls[1]["only"] == ["transform+", "extract"]
+
+    def test_replay_keeps_teardown_after_the_tasks_a_stub_cuts_loose(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"k": 1}, probed="transform")
+        fake_ws.jobs.queue(make_run(78, {"transform": "SUCCESS", "load": "SUCCESS", "__pytest_teardown": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            def cleanup(dbutils, params):
+                pass
+
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"transform": ["k"]}).run()
+                assert lakeflow.job("my_job", teardown=cleanup).run(only=["load"], replay=first).succeeded
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        replay = {t.task_key: t for t in fake_ws.jobs.created[1]["tasks"]}
+        assert stub_values(fake_ws.jobs.created[1], "transform") == '{"k": 1}'
+        assert replay["transform"].depends_on is None
+        teardown = [d.task_key for d in replay["__pytest_teardown"].depends_on]
+        assert teardown == ["extract", "load", "classic"], "extract no longer has a task after it but the teardown"
 
     def test_replay_on_a_created_job_fails_clearly(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient

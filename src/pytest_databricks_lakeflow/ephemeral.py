@@ -40,6 +40,7 @@ from pytest_databricks_lakeflow.settings import (
     name_lifecycle_params,
     pipeline_params,
     require_task,
+    rewire_teardown,
     select,
     selected_tasks,
     stub_upstream,
@@ -354,6 +355,8 @@ class EphemeralJob:
                 "values in upstream_task_values on job() instead."
             )
         stub_upstream(self.settings, upstream, helpers)
+        # The stubs drop their depends_on after inject_lifecycle chose the teardown's, so it is chosen again.
+        rewire_teardown(self.settings)
         for key in upstream:
             stub = require_task(self.settings, key)
             # sanitise has already run, so the stubs get what it gives serverless helper tasks.
@@ -561,7 +564,9 @@ class EphemeralJob:
         """Cancel active runs, then delete the job unless the keep rules say to keep it.
 
         With `--lakeflow-report-dir`, each cancelled run is polled until it has ended, for at most 60 seconds, and
-        listed in the report.json of the test that started it.
+        listed in the report.json of the test that is running, whose report is still to be written: for a job that a
+        module- or session-scoped fixture closes, the test being torn down. Outside a test the run is not polled.
+        The job is deleted even when the polling is interrupted.
 
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.
@@ -569,10 +574,18 @@ class EphemeralJob:
         if self._closed:
             return
         self._closed = True
-        for run_id in sorted(self._active):
-            item = self._active[run_id]
+        cancelled = sorted(self._active)
+        for run_id in cancelled:
             self._cancel(run_id)
-            self._report_cancelled(_Polling(run_id, item))
+        item = session.current().item
+        try:
+            if item is not None:
+                for run_id in cancelled:
+                    self._report_cancelled(_Polling(run_id, item))
+        finally:
+            self._delete_unless_kept(failed)
+
+    def _delete_unless_kept(self, failed: bool) -> None:
         if self.job_id is None:
             return
         state = session.current()
