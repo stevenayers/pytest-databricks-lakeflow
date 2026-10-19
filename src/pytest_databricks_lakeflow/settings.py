@@ -571,6 +571,8 @@ def pipeline_params(
     full_refresh: bool | None,
     full_refresh_selection: Sequence[str] | None,
     refresh_selection: Sequence[str] | None,
+    refresh_flow_selection: Sequence[str] | None,
+    reset_checkpoint_selection: Sequence[str] | None,
 ) -> jobs.PipelineParams | None:
     """Build the pipeline refresh options of one run.
 
@@ -579,32 +581,39 @@ def pipeline_params(
         full_refresh: Whether pipeline tasks run a full refresh.
         full_refresh_selection: The tables that pipeline tasks fully refresh.
         refresh_selection: The tables that pipeline tasks refresh.
+        refresh_flow_selection: The flows that pipeline tasks refresh.
+        reset_checkpoint_selection: The streaming flows whose checkpoints pipeline tasks reset.
 
     Returns:
         The options for `run_now`, or `None` when every argument is `None`.
 
     Raises:
         LakeflowError: If an argument is set and no task, nested `for_each_task` tasks included, is a pipeline task,
-            a selection is a string rather than a list of table names, or a selection is set and the installed
+            a selection is a string rather than a list of names, or a selection is set and the installed
             databricks-sdk cannot send it.
     """
-    selections = {"full_refresh_selection": full_refresh_selection, "refresh_selection": refresh_selection}
+    selections = {
+        "full_refresh_selection": full_refresh_selection,
+        "refresh_selection": refresh_selection,
+        "refresh_flow_selection": refresh_flow_selection,
+        "reset_checkpoint_selection": reset_checkpoint_selection,
+    }
     if full_refresh is None and all(value is None for value in selections.values()):
         return None
     for key, value in selections.items():
         if isinstance(value, str):
-            raise LakeflowError(f"{key} must be a list of table names, not a string: {value!r}")
+            raise LakeflowError(f"{key} must be a list of names, not a string: {value!r}")
     unsupported = sorted(k for k, v in selections.items() if v is not None and k not in PIPELINE_PARAMS_FIELDS)
     if unsupported:
         raise LakeflowError(
-            f"full_refresh_selection and refresh_selection need databricks-sdk 0.110.0 or later; got {unsupported}. "
-            "Upgrade databricks-sdk to pass them."
+            "full_refresh_selection, refresh_selection, refresh_flow_selection and reset_checkpoint_selection need "
+            f"databricks-sdk 0.110.0 or later; got {unsupported}. Upgrade databricks-sdk to pass them."
         )
     if not any(task.pipeline_task for task in _with_nested(settings.tasks)):
         keys = sorted(task.task_key for task in settings.tasks or [] if task.task_key)
         raise LakeflowError(
-            f"full_refresh, full_refresh_selection and refresh_selection apply to pipeline tasks, but the job has "
-            f"no pipeline task. Tasks: {keys}"
+            "full_refresh, full_refresh_selection, refresh_selection, refresh_flow_selection and "
+            f"reset_checkpoint_selection apply to pipeline tasks, but the job has no pipeline task. Tasks: {keys}"
         )
     chosen = {key: list(value) for key, value in selections.items() if value is not None}
     return jobs.PipelineParams(full_refresh=full_refresh, **chosen)

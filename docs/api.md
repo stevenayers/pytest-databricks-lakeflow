@@ -62,6 +62,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 
 ::: pytest_databricks_lakeflow.SqlResult
 
+## `PipelineUpdate`
+
+::: pytest_databricks_lakeflow.PipelineUpdate
+
 ## `NotebookView`
 
 ::: pytest_databricks_lakeflow.NotebookView

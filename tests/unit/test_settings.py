@@ -1119,6 +1119,9 @@ class TestForceConditions:
         assert force_conditions(example_settings(), {}) == example_settings()
 
 
+SELECTIONS = ["full_refresh_selection", "refresh_selection", "refresh_flow_selection", "reset_checkpoint_selection"]
+
+
 class TestPipelineParams:
     """pipeline_params builds the refresh options of a run and checks they can apply."""
 
@@ -1129,19 +1132,18 @@ class TestPipelineParams:
             full_refresh=kwargs.get("full_refresh"),
             full_refresh_selection=kwargs.get("full_refresh_selection"),
             refresh_selection=kwargs.get("refresh_selection"),
+            refresh_flow_selection=kwargs.get("refresh_flow_selection"),
+            reset_checkpoint_selection=kwargs.get("reset_checkpoint_selection"),
         )
 
     def test_pipeline_params_full_refresh(self) -> None:
         assert self.refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
 
     @NEEDS_REFRESH_SELECTION
-    def test_pipeline_params_selections(self) -> None:
-        assert self.refresh(pipeline_settings(), refresh_selection=["bronze_orders"]) == jobs.PipelineParams(
-            refresh_selection=["bronze_orders"]
-        )
-        assert self.refresh(pipeline_settings(), full_refresh_selection=("silver",)) == jobs.PipelineParams(
-            full_refresh_selection=["silver"]
-        )
+    @pytest.mark.parametrize("name", SELECTIONS)
+    def test_pipeline_params_selections(self, name: str) -> None:
+        expected = jobs.PipelineParams.from_dict({name: ["bronze_orders"]})
+        assert self.refresh(pipeline_settings(), **{name: ("bronze_orders",)}) == expected
 
     def test_pipeline_params_none_without_arguments(self) -> None:
         assert self.refresh(pipeline_settings()) is None
@@ -1151,15 +1153,15 @@ class TestPipelineParams:
         monkeypatch.setattr(settings_module, "PIPELINE_PARAMS_FIELDS", frozenset({"full_refresh"}))
         assert self.refresh(pipeline_settings(), full_refresh=True) == jobs.PipelineParams(full_refresh=True)
         message = (
-            r"full_refresh_selection and refresh_selection need databricks-sdk 0.110.0 or later; "
-            r"got \['refresh_selection'\]"
+            r"full_refresh_selection, refresh_selection, refresh_flow_selection and reset_checkpoint_selection need "
+            r"databricks-sdk 0.110.0 or later; got \['refresh_selection', 'reset_checkpoint_selection'\]"
         )
         with pytest.raises(LakeflowError, match=message):
-            self.refresh(pipeline_settings(), refresh_selection=["bronze"])
+            self.refresh(pipeline_settings(), refresh_selection=["bronze"], reset_checkpoint_selection=["t"])
 
-    @pytest.mark.parametrize("name", ["full_refresh_selection", "refresh_selection"])
+    @pytest.mark.parametrize("name", SELECTIONS)
     def test_pipeline_params_reject_a_bare_string_selection(self, name: str) -> None:
-        with pytest.raises(LakeflowError, match=rf"{name} must be a list of table names, not a string: 'bronze'"):
+        with pytest.raises(LakeflowError, match=rf"{name} must be a list of names, not a string: 'bronze'"):
             self.refresh(pipeline_settings(), **{name: "bronze"})
 
     def test_pipeline_params_need_a_pipeline_task(self) -> None:

@@ -9,14 +9,14 @@ import warnings
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import Enum
 from html import unescape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import jobs
+from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
 
@@ -550,6 +550,68 @@ def _list(value: object) -> list[Any]:
 
 
 @dataclass(frozen=True)
+class PipelineUpdate:
+    """The update of a pipeline that a pipeline task started.
+
+    The pipeline is the deployed one, not a copy. The Jobs API does not say which update a pipeline task started, so
+    the plugin lists the pipeline's updates once the run finished and takes the one created while the task ran,
+    preferring one whose `cause` is `JOB_TASK`.
+
+    Attributes:
+        pipeline_id: The pipeline's id.
+        update_id: The update's id.
+        state: The update's state, such as `COMPLETED`, `FAILED` or `CANCELED`.
+        cause: What started the update: `JOB_TASK` for an update that a pipeline task started.
+        full_refresh: Whether the update was a full refresh of every table.
+    """
+
+    pipeline_id: str
+    update_id: str
+    state: str | None
+    cause: str | None
+    full_refresh: bool
+    _ws: WorkspaceClient = field(repr=False, compare=False)
+    _since: int = field(repr=False, compare=False)
+
+    def events(self, level: str | None = None) -> list[pipelines.PipelineEvent]:
+        """Read the events the update logged, newest first, with `pipelines.list_pipeline_events`.
+
+        The platform lists the events of every update of the pipeline, newest first, so the events of other updates
+        are dropped and the listing stops at the first event logged before the task started.
+
+        Args:
+            level: Only events of this level, such as `ERROR`, `WARN` or `INFO`. Every level when `None`.
+
+        Returns:
+            The events, each a `databricks.sdk.service.pipelines.PipelineEvent` with `level`, `event_type`,
+            `message` and, for an error, `error`.
+        """
+        query = None
+        if level is not None:
+            # The platform refuses `level="ERROR"` as an invalid filter expression; the value needs single quotes.
+            query = f"level='{level}'"
+        found: list[pipelines.PipelineEvent] = []
+        for event in self._ws.pipelines.list_pipeline_events(self.pipeline_id, filter=query):
+            logged = _event_millis(event.timestamp)
+            if logged is not None and logged < self._since:
+                break
+            if event.origin is not None and event.origin.update_id == self.update_id:
+                found.append(event)
+        return found
+
+
+def _event_millis(timestamp: str | None) -> int | None:
+    # A pipeline event's timestamp is ISO 8601 text such as `2026-10-19T19:00:28.187Z`.
+    if not timestamp:
+        return None
+    try:
+        when = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    return int(when.timestamp() * 1000)
+
+
+@dataclass(frozen=True)
 class TaskRun:
     """The outcome of one task in a job run.
 
@@ -613,6 +675,10 @@ class TaskRun:
         sql_result: The columns and rows a SQL file task returned, read from `runs/get-output` once the run
             finished. `None` for any other task, including a saved query task, for a task that did not run, and when
             the output could not be read, which logs a warning.
+        pipeline_update: The pipeline update that a pipeline task started, found once the run finished among the
+            pipeline's updates by its creation time, which lies between the task's start and end. `None` for any
+            other task, for a task that did not run, and when no update was created in that time or the updates
+            could not be read, which logs a warning.
     """
 
     task_key: str
@@ -645,6 +711,7 @@ class TaskRun:
     clean_rooms_notebook_output: jobs.CleanRoomsNotebookTaskCleanRoomsNotebookTaskOutput | None = None
     notebook: NotebookView | None = None
     sql_result: SqlResult | None = None
+    pipeline_update: PipelineUpdate | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -983,7 +1050,8 @@ def serialise(run: JobRun) -> dict[str, Any]:
     `execution_seconds` and `cleanup_seconds`; `error` is a dict of `type`, `message`, `trace`, `root_cause` and
     `code`, or `None`; `task_values` is a plain dict and `missing_task_value_reasons` holds the reason for each of
     `missing_task_values`; the outputs of SQL, alert, dbt, run-job, dashboard and clean room tasks are the dicts of
-    the Jobs API. The run also gets `succeeded`.
+    the Jobs API; `pipeline_update` is a dict of `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or
+    `None`. The run also gets `succeeded`.
 
     `logs` and the exported `notebook` are left out, because logs can reach 5 MB per task. Instead `logs_file` and
     `notebook_file` name where `--lakeflow-report-dir` saves them, relative to the test's report directory:
@@ -1052,6 +1120,16 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
     sql_result = None
     if task.sql_result is not None:
         sql_result = asdict(task.sql_result)
+    pipeline_update = None
+    if task.pipeline_update is not None:
+        update = task.pipeline_update
+        pipeline_update = {
+            "pipeline_id": update.pipeline_id,
+            "update_id": update.update_id,
+            "state": update.state,
+            "cause": update.cause,
+            "full_refresh": update.full_refresh,
+        }
     return {
         "task_key": task.task_key,
         "run_id": task.run_id,
@@ -1084,6 +1162,7 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
         "clean_rooms_notebook_output": _as_dict(task.clean_rooms_notebook_output),
         "notebook_file": notebook_file,
         "sql_result": sql_result,
+        "pipeline_update": pipeline_update,
     }
 
 
@@ -1166,13 +1245,20 @@ def build_job_run(
                 ran.append(task_run)
     resolved = fetch_resolved_values(ws, ran)
     sql_results = fetch_sql_results(ws, ran)
+    pipeline_updates = fetch_pipeline_updates(ws, ran)
 
     attempts: dict[str, list[TaskRun]] = {}
     for key, task_runs in task_runs_by_key.items():
         attempts[key] = []
         for task_run in task_runs:
             run_id = task_run.run_id or 0
-            attempt = _task_run(task_run, known_outputs.get(run_id), resolved.get(run_id), sql_results.get(run_id))
+            attempt = _task_run(
+                task_run,
+                known_outputs.get(run_id),
+                resolved.get(run_id),
+                sql_results.get(run_id),
+                pipeline_updates.get(run_id),
+            )
             attempts[key].append(_with_child_run(ws, attempt, job_keys or {}, notebook_export))
 
     injected: dict[str, TaskRun] = {}
@@ -1403,6 +1489,67 @@ def fetch_sql_results(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dic
         return results
 
 
+def fetch_pipeline_updates(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, PipelineUpdate]:
+    """Find the pipeline update that each pipeline task run started, by task run id.
+
+    The Jobs API does not report it: a task run's `pipeline_task` is the task's settings, and `runs/get-output` of a
+    pipeline task holds only metadata and the error "Please refer to the logs for this pipeline in the pipelines
+    page.", even when the task succeeded. So the pipeline's updates are listed, and the one created between the task
+    run's start and end is taken, one whose `cause` is `JOB_TASK` first. A task run whose update is not found is left
+    out, with a warning.
+    """
+    updates: dict[int, PipelineUpdate] = {}
+    for task in tasks:
+        if task.pipeline_task is None or not task.pipeline_task.pipeline_id:
+            continue
+        update = _pipeline_update(ws, task, task.pipeline_task.pipeline_id)
+        if update is not None:
+            updates[task.run_id or 0] = update
+    return updates
+
+
+def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) -> PipelineUpdate | None:
+    try:
+        listed = ws.pipelines.list_updates(pipeline_id)
+    except DatabricksError as e:
+        log.warning(
+            "Could not read the updates of pipeline %s for task %s (run %s): %s",
+            pipeline_id,
+            task.task_key,
+            task.run_id,
+            e,
+        )
+        return None
+    start = task.start_time or 0
+    end = task.end_time or 0
+    in_window: list[pipelines.UpdateInfo] = []
+    for info in listed.updates or []:
+        if info.creation_time is not None and start <= info.creation_time <= end:
+            in_window.append(info)
+    if not in_window:
+        log.warning(
+            "Found no update of pipeline %s started in the time window of task %s (run %s)",
+            pipeline_id,
+            task.task_key,
+            task.run_id,
+        )
+        return None
+    chosen = in_window[0]
+    for info in in_window:
+        if info.cause == pipelines.UpdateInfoCause.JOB_TASK:
+            chosen = info
+            break
+    return PipelineUpdate(
+        pipeline_id=pipeline_id,
+        update_id=chosen.update_id or "",
+        state=_enum(chosen.state),
+        cause=_enum(chosen.cause),
+        full_refresh=bool(chosen.full_refresh),
+        _ws=ws,
+        _since=start,
+    )
+
+
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
     if output is None or _result_state(task) in NOT_RUN:
@@ -1418,6 +1565,7 @@ def _task_run(
     out: jobs.RunOutput | None,
     resolved: jobs.ResolvedValues | None,
     sql_result: SqlResult | None,
+    pipeline_update: PipelineUpdate | None,
 ) -> TaskRun:
     out = out or jobs.RunOutput()
     key = task.task_key or ""
@@ -1456,6 +1604,7 @@ def _task_run(
         dashboard_output=out.dashboard_output,
         clean_rooms_notebook_output=out.clean_rooms_notebook_output,
         sql_result=sql_result,
+        pipeline_update=pipeline_update,
     )
 
 
