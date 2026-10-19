@@ -17,6 +17,7 @@ from .fakes import (
     DATA,
     HOST,
     FakeWorkspaceClient,
+    branching_settings,
     example_settings,
     make_run,
     parent_settings,
@@ -563,6 +564,48 @@ def disable_classic(settings, item):
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job", disable=["nope"]).run()\n')
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*Unknown task 'nope' in disable. Available: ['classic', 'extract', 'load', *"])
+        assert fake_ws.jobs.created == []
+
+
+class TestForcedConditions:
+    """Forcing the outcome of if/else condition tasks in the copy."""
+
+    def test_forced_condition_takes_the_chosen_branch(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["branching_job"] = fake_ws.jobs.add(branching_settings())
+        states = {"check_input": "SUCCESS", "check": "SUCCESS", "on_true": "SUCCESS", "on_false": "EXCLUDED"}
+        fake_ws.jobs.queue(make_run(77, states, condition_outcomes={"check": "true"}))
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                run = lakeflow.job("branching_job", params={"rows": "0"}, force_conditions={"check": True}).run()
+                assert run.branch_taken("check") is True
+                assert run.task("on_false").excluded
+                assert run.executed_tasks == ["check", "check_input", "on_true"]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        tasks = {t.task_key: t for t in created["tasks"]}
+        forced = jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right="true")
+        assert tasks["check"].condition_task == forced
+        assert tasks["on_true"].depends_on == [jobs.TaskDependency(task_key="check", outcome="true")]
+
+    def test_force_conditions_rejects_tasks_without_a_condition(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["branching_job"] = fake_ws.jobs.add(branching_settings())
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("branching_job", force_conditions={"check_input": True}).run()
+            """,
+        )
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines(["*Task 'check_input' in force_conditions has no condition_task*"])
         assert fake_ws.jobs.created == []
 
 

@@ -532,3 +532,36 @@ def parent_settings() -> jobs.JobSettings:
             ],
         }
     )
+
+
+def branching_settings() -> jobs.JobSettings:
+    """Build an if/else job like the `branches` bundle: `check` compares a value `check_input` sets, two branches."""
+    nb = "/Workspace/Users/someone@example.com/.bundle/lakeflow_branches/test/files/src/notebooks"
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] branching_job",
+            "parameters": [{"name": "rows", "default": "0"}],
+            "tasks": [
+                {"task_key": "check_input", "notebook_task": {"notebook_path": f"{nb}/check_input"}},
+                {
+                    "task_key": "check",
+                    "depends_on": [{"task_key": "check_input"}],
+                    "condition_task": {
+                        "op": "GREATER_THAN",
+                        "left": "{{tasks.check_input.values.rows}}",
+                        "right": "0",
+                    },
+                },
+                {
+                    "task_key": "on_true",
+                    "depends_on": [{"task_key": "check", "outcome": "true"}],
+                    "notebook_task": {"notebook_path": f"{nb}/on_true"},
+                },
+                {
+                    "task_key": "on_false",
+                    "depends_on": [{"task_key": "check", "outcome": "false"}],
+                    "notebook_task": {"notebook_path": f"{nb}/on_false"},
+                },
+            ],
+        }
+    )
