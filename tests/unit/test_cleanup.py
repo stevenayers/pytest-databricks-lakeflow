@@ -658,7 +658,13 @@ class TestTerminalSummary:
         path = f"{FOLDER}/debug/my_job__transform__77"
         url = f"{HOST}/#notebook/{fake_ws.workspace.object_ids[path]}"
         result.stdout.fnmatch_lines(
-            ["*= lakeflow =*", "lakeflow: 1 job kept", "*", "lakeflow: 1 debug notebook written", f"  {url}"]
+            [
+                "*= lakeflow =*",
+                "lakeflow: 1 job kept",
+                "*",
+                "lakeflow: 1 debug notebook written",
+                f"  {url} (test_lists_debug_notebooks.py::test_failed, task 'transform')",
+            ]
         )
 
     def test_xdist_controller_summarises_debug_notebooks(self, pytester: pytest.Pytester) -> None:

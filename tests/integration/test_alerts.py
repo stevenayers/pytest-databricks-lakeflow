@@ -59,4 +59,7 @@ def test_alert_task_whose_query_fails_reports_error(lakeflow: Lakeflow) -> None:
         assert (task.result_state, task.termination_code) == ("FAILED", "RUN_EXECUTION_ERROR")
         assert task.termination_message is not None
         assert "Query execution failed" in task.termination_message
+        # runs/get-output reports no error for an alert task, so the error falls back to the termination message.
+        assert task.error is not None
+        assert (task.error.type, task.error.message) == (None, task.termination_message)
         assert task.alert_state == "ERROR"

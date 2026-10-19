@@ -653,7 +653,8 @@ class TaskRun:
         logs: stdout and stderr of a Python script, wheel or JAR task. Empty for notebook tasks, whose printed text
             is in `notebook`.
         logs_truncated: Whether `logs` holds only the last 5 MB.
-        error: The task's error, or `None` if it succeeded or did not run.
+        error: The task's error, or `None` if it succeeded or did not run. For a failed alert task, which the Jobs
+            API reports no error for, the task's termination message with `type` `None`.
         task_values: Task values captured by a probe.
         missing_task_values: Keys that were requested from the probe but not captured.
         attempt: The attempt number, 0 for the first attempt.
@@ -1618,12 +1619,38 @@ def _updates_since(ws: WorkspaceClient, pipeline_id: str, start: int) -> list[pi
 
 def error_line(task: jobs.RunTask, output: jobs.RunOutput | None) -> str | None:
     """The first line of the error a terminated task run reported, or `None` when it reported none or did not run."""
-    if output is None or not _ran(_result_state(task)):
+    if output is None:
         return None
-    error = TaskError.from_output(output.error, output.error_trace)
+    error = _task_error(task, output)
     if error is None:
         return None
     return _first_line(str(error))
+
+
+def _task_error(task: jobs.RunTask, out: jobs.RunOutput) -> TaskError | None:
+    state = _result_state(task)
+    if not _ran(state):
+        return None
+    # runs/get-output of every pipeline task run carries the error "Please refer to the logs for this pipeline in the
+    # pipelines page.", also when the task ended SUCCESS.
+    if task.pipeline_task is not None and state == "SUCCESS":
+        return None
+    error = TaskError.from_output(out.error, out.error_trace)
+    if error is None and task.alert_task is not None and state != "SUCCESS":
+        return _alert_error(task)
+    return error
+
+
+def _alert_error(task: jobs.RunTask) -> TaskError | None:
+    # runs/get-output of an alert task whose query failed holds only the alert state, with no error: the reason is
+    # in the task run's termination message, which the legacy state message repeats.
+    details = task.status.termination_details if task.status else None
+    message = details.message if details else None
+    if not message and task.state:
+        message = task.state.state_message
+    if not message:
+        return None
+    return TaskError(type=None, message=message, trace="")
 
 
 def _task_run(
@@ -1641,9 +1668,6 @@ def _task_run(
     output_truncated = bool(notebook and notebook.truncated)
     logs_truncated = bool(out.logs_truncated)
     _warn_when_truncated(key, output_truncated=output_truncated, logs_truncated=logs_truncated)
-    error = None
-    if _ran(state):
-        error = TaskError.from_output(out.error, out.error_trace)
     return TaskRun(
         task_key=key,
         run_id=task.run_id or 0,
@@ -1656,7 +1680,7 @@ def _task_run(
         output_truncated=output_truncated,
         logs=out.logs or "",
         logs_truncated=logs_truncated,
-        error=error,
+        error=_task_error(task, out),
         attempt=task.attempt_number or 0,
         parameters=_parameters(resolved),
         timing=Timing.from_run(task),
