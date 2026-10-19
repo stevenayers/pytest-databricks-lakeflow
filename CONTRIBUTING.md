@@ -51,12 +51,15 @@ tests/integration/
             resources/*.job.yml
             src/notebooks/*.py
         run_job/                 # name: lakeflow_run_job, a parent job whose run_job task triggers child_job
+            databricks.yml
+            resources/*.job.yml
+            src/notebooks/*.py
         sql/                     # name: lakeflow_sql, a SQL file task on the warehouse from LAKEFLOW_WAREHOUSE_ID
             databricks.yml
             resources/*.job.yml
             src/queries/*.sql
     test_example.py              # one module per bundle, named after it
-    test_run_job.py
+    test_run_job.py              # child_run and the children= option against the run_job bundle
     test_sql.py
 ```
 
