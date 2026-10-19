@@ -1,0 +1,1 @@
+SELECT :label AS label

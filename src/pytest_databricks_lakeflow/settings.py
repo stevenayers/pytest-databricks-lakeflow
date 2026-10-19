@@ -50,7 +50,12 @@ MAX_PARAMETER_DEFAULT_BYTES = 4096
 MAX_ENVIRONMENTS = 10
 MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
+# jobs/create refuses any reference to a task that is not in the job: "Invalid reference:
+# 'tasks.ghost.result_state'. Task 'ghost' does not exist."
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
+# Of the references to a task that run_now(only=...) leaves out, only task values fail the run. The others resolve
+# against the task's DISABLED run: result_state to "disabled", error_code to "Disabled", run_id to its run id.
+TASK_VALUES_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.values\.")
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
@@ -889,7 +894,7 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
     for task in settings.tasks or []:
         if task.task_key not in selected or task.task_key in stubs:
             continue
-        referenced = set(TASK_REFERENCE.findall(json.dumps(task.as_dict())))
+        referenced = set(TASK_VALUES_REFERENCE.findall(json.dumps(task.as_dict())))
         missing = sorted(referenced - running)
         if missing:
             raise LakeflowError(

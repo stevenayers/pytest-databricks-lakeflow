@@ -36,6 +36,8 @@ def test_sql_file_task_runs_on_the_warehouse(lakeflow: Lakeflow) -> None:
         run = job.run(only=["query"])
         assert run.succeeded, run
         task = run.task("query")
+        # The query declares no parameters, but the platform adds every job parameter to each SQL file task.
+        assert task.parameters == {"n": "3"}
         assert task.sql_output is not None
         result = task.sql_result
         assert result is not None
@@ -78,3 +80,20 @@ def test_sql_result_keeps_parameter_markers(lakeflow: Lakeflow) -> None:
         assert result is not None
         assert result.query_text is not None and result.query_text.strip() == "SELECT :n AS n"
         assert result.first_row == {"n": "7"}
+
+
+def test_task_params_merge_into_sql_parameters(lakeflow: Lakeflow) -> None:
+    task_params = {"labelled": {"label": "from-task-params"}, "parameterised": {"n": "9"}}
+    with pytest.warns(UserWarning, match="sets 'n', also a job parameter of 'sql_job'. The job value wins"):
+        job = lakeflow.job("sql_job", task_params=task_params)
+    with job:
+        run = job.run(only=["labelled", "parameterised"])
+        assert run.succeeded, run
+        labelled = run.task("labelled")
+        assert labelled.parameters == {"label": "from-task-params", "n": "3"}
+        assert labelled.sql_result is not None
+        assert labelled.sql_result.first_row == {"label": "from-task-params"}
+        parameterised = run.task("parameterised")
+        assert parameterised.parameters == {"n": "3"}, "the job parameter wins over the task parameter of the same name"
+        assert parameterised.sql_result is not None
+        assert parameterised.sql_result.first_row == {"n": "3"}

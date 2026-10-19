@@ -767,6 +767,14 @@ class TestSelect:
         with pytest.raises(LakeflowError, match=rf"Task 'transform' refers to task values of \['{missing}'\]"):
             check_references(example_settings(), selected, stubs)
 
+    @pytest.mark.parametrize("field", ["result_state", "error_code", "run_id"])
+    def test_check_references_allows_other_references_to_a_left_out_task(self, field: str) -> None:
+        settings = example_settings()
+        transform = (settings.tasks or [])[1]
+        assert transform.notebook_task is not None
+        transform.notebook_task.base_parameters = {"upstream": f"{{{{tasks.extract.{field}}}}}"}
+        check_references(settings, {"transform"}, set())
+
 
 class TestInjectLifecycle:
     """inject_lifecycle runs setup before every root task and teardown after every leaf, whatever happened."""
