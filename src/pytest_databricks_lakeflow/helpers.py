@@ -46,7 +46,11 @@ NOTEBOOKS = {"set_values": SET_VALUES, "get_values": GET_VALUES}
 
 # The source of `fn`, then a call that passes the arguments it declares. Job parameters are read from the widgets
 # named in the `__pytest_params` widget, because the platform pushes every job parameter to every notebook task.
+# The future import keeps annotations unevaluated: serverless environment 4 runs Python 3.12, which evaluates them
+# when the def runs, and the names they use, such as SparkSession, are not imported in the notebook.
 LIFECYCLE = """# Databricks notebook source
+from __future__ import annotations
+
 import json
 
 {source}
@@ -96,7 +100,8 @@ def lifecycle_notebook(fn: Callable[..., object], argument: str) -> str:
 
     Raises:
         LakeflowError: If `fn` is not a plain function defined with `def`, uses variables of an enclosing
-            function, takes a parameter other than `spark`, `dbutils` and `params`, or has no source to read.
+            function, takes a parameter other than `spark`, `dbutils` and `params`, has no source to read, or has a
+            decorator.
     """
     if not inspect.isfunction(fn):
         raise LakeflowError(
@@ -123,6 +128,11 @@ def lifecycle_notebook(fn: Callable[..., object], argument: str) -> str:
             f"Cannot read the source of {argument}={name}: {e}. Define it in a file, not in a REPL or notebook cell, "
             "so the plugin can ship its source."
         ) from None
+    if source.startswith("@"):
+        raise LakeflowError(
+            f"{argument}={name} has a decorator, which would be shipped with its source to the job's compute, where "
+            "it does not exist. Remove the decorator."
+        )
     call = f"{name}({', '.join(f'{arg}={LIFECYCLE_VALUES[arg]}' for arg in declared)})"
     return LIFECYCLE.format(source=source, widget=PARAMS_WIDGET, call=call)
 

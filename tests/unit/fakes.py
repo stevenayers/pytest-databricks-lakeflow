@@ -240,8 +240,10 @@ class FakeDbutils:
 def run_notebook(source: str, widgets: Mapping[str, str], spark: object = None) -> str | None:
     """Run a generated notebook's source with `spark` and a `FakeDbutils`, and return its exit value or `None`."""
     namespace = {"spark": spark, "dbutils": FakeDbutils(widgets)}
+    # dont_inherit, so the source runs without the future imports of this module, as it does on the cluster.
+    code = compile(source, "<notebook>", "exec", dont_inherit=True)
     try:
-        exec(compile(source, "<notebook>", "exec"), namespace)
+        exec(code, namespace)
     except NotebookExit as e:
         return e.value
     return None

@@ -12,7 +12,7 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.helpers import PARAMS_WIDGET, lifecycle_notebook
 
-from .fakes import FakeWorkspaceClient, make_run, run_notebook
+from .fakes import FakeDbutils, FakeWorkspaceClient, make_run, run_notebook
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
 
@@ -42,6 +42,19 @@ def quiet(dbutils):
 
 def reads_params(params):
     return params
+
+
+def annotated(dbutils: FakeDbutils, params: dict[str, str]) -> dict[str, str]:
+    return params
+
+
+def registered(fn: Callable[..., object]) -> Callable[..., object]:
+    return fn
+
+
+@registered
+def decorated(spark):
+    pass
 
 
 def make_closure() -> Callable[..., object]:
@@ -112,6 +125,12 @@ class TestNotebookSource:
         output = run_notebook(lifecycle_notebook(returns_a_date, "setup"), WIDGETS)
         assert output == '{"day": "2026-10-19"}'
 
+    def test_annotations_naming_what_the_notebook_does_not_import(self) -> None:
+        source = lifecycle_notebook(annotated, "setup")
+        output = run_notebook(source, WIDGETS)
+        assert output is not None and json.loads(output) == {"param1": "hello", "schema": "dev.s"}
+        assert source.startswith("# Databricks notebook source\nfrom __future__ import annotations\n")
+
     def test_nested_functions_are_dedented(self) -> None:
         def nested(spark):
             return "nested"
@@ -143,6 +162,7 @@ class TestRejectedFunctions:
                 id="unknown_parameter",
             ),
             pytest.param(takes_anything, r"setup=takes_anything takes \['\*args'\]", id="varargs"),
+            pytest.param(decorated, r"setup=decorated has a decorator.*Remove the decorator", id="decorator"),
         ],
     )
     def test_rejects(self, fn: Callable[..., object], message: str) -> None:

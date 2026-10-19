@@ -13,6 +13,7 @@ import re
 import warnings
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from databricks.sdk.errors import NotFound
@@ -21,6 +22,9 @@ from databricks.sdk.service import jobs
 from pytest_databricks_lakeflow import Lakeflow, LakeflowRunFailed
 
 from .conftest import lakeflow_for
+
+if TYPE_CHECKING:
+    from databricks.sdk.dbutils import RemoteDbUtils
 
 
 @pytest.fixture(scope="module")
@@ -243,7 +247,8 @@ def seed_orders(spark, dbutils, params):
     return {"schema": schema, "param1": params["param1"]}
 
 
-def remove_landing_file(dbutils, params):
+# Annotated with a name the notebook does not import, to show the cluster does not evaluate annotations.
+def remove_landing_file(dbutils: RemoteDbUtils, params: dict[str, str]) -> bool:
     return dbutils.fs.rm(f"/Volumes/{params['schema'].replace('.', '/')}/landing/orders.csv")
 
 
