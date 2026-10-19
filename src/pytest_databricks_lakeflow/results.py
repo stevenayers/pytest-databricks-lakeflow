@@ -8,7 +8,7 @@ import urllib.parse
 import warnings
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from html import unescape
@@ -968,6 +968,146 @@ def failing_parameters(run: JobRun) -> dict[str, str]:
         if text:
             formatted[task.task_key] = text
     return formatted
+
+
+def serialise(run: JobRun) -> dict[str, Any]:
+    """Turn a run into a dict that `json.dumps` accepts, as `--lakeflow-report-dir` writes it to `report.json`.
+
+    Every field of the run and of each `TaskRun` is kept, including `attempts` and a nested `child_run`, with these
+    changes: `duration` becomes `duration_seconds` and each `timing` a dict of `queue_seconds`, `setup_seconds`,
+    `execution_seconds` and `cleanup_seconds`; `error` is a dict of `type`, `message`, `trace`, `root_cause` and
+    `code`, or `None`; `task_values` is a plain dict and `missing_task_value_reasons` holds the reason for each of
+    `missing_task_values`; the outputs of SQL, alert, dbt, run-job, dashboard and clean room tasks are the dicts of
+    the Jobs API. The run also gets `succeeded`.
+
+    `logs` and the exported `notebook` are left out, because logs can reach 5 MB per task. Instead `logs_file` and
+    `notebook_file` name where `--lakeflow-report-dir` saves them, relative to the test's report directory:
+    `<run_id>/<task_key>.log` and `<run_id>/<task_key>.html`, with `.attempt-<n>` before the suffix for an attempt
+    that was retried. Each is `None` when the task has no logs or no exported notebook.
+
+    Args:
+        run: The run.
+
+    Returns:
+        The run as a JSON-serialisable dict.
+    """
+    data, _ = serialise_with_files(run)
+    return data
+
+
+def serialise_with_files(run: JobRun) -> tuple[dict[str, Any], dict[str, str]]:
+    """Serialise a run as `serialise` does, and collect the logs and notebook HTML it names, by file name."""
+    files: dict[str, str] = {}
+    return _serialise_run(run, files), files
+
+
+def _serialise_run(run: JobRun, files: dict[str, str]) -> dict[str, Any]:
+    def tasks(group: Mapping[str, TaskRun]) -> dict[str, Any]:
+        return {key: _serialise_task(task, run.run_id, key, files) for key, task in group.items()}
+
+    return {
+        "job_key": run.job_key,
+        "job_id": run.job_id,
+        "run_id": run.run_id,
+        "run_url": run.run_url,
+        "result_state": run.result_state,
+        "succeeded": run.succeeded,
+        "termination_code": run.termination_code,
+        "termination_message": run.termination_message,
+        "duration_seconds": run.duration.total_seconds(),
+        "tasks": tasks(run.tasks),
+        "injected_tasks": tasks(run.injected_tasks),
+        "skipped_tasks": tasks(run.skipped_tasks),
+        "disabled_tasks": tasks(run.disabled_tasks),
+        "parameters": run.parameters,
+        "timing": _serialise_timing(run.timing),
+        "effective_performance_target": run.effective_performance_target,
+    }
+
+
+def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]) -> dict[str, Any]:
+    # `stem` names the side files: the task key, plus the attempt number for an attempt that was retried.
+    logs_file = None
+    if task.logs:
+        logs_file = f"{run_id}/{stem}.log"
+        files[logs_file] = task.logs
+    notebook_file = None
+    if task.notebook is not None:
+        notebook_file = f"{run_id}/{stem}.html"
+        files[notebook_file] = task.notebook.html
+    attempts: list[dict[str, Any]] = []
+    for index, attempt in enumerate(task.attempts):
+        attempt_stem = stem
+        if index < len(task.attempts) - 1:
+            attempt_stem = f"{stem}.attempt-{attempt.attempt}"
+        attempts.append(_serialise_task(attempt, run_id, attempt_stem, files))
+    child_run = None
+    if task.child_run is not None:
+        child_run = _serialise_run(task.child_run, files)
+    sql_result = None
+    if task.sql_result is not None:
+        sql_result = asdict(task.sql_result)
+    return {
+        "task_key": task.task_key,
+        "run_id": task.run_id,
+        "result_state": task.result_state,
+        "termination_code": task.termination_code,
+        "termination_message": task.termination_message,
+        "run_url": task.run_url,
+        "duration_seconds": task.duration.total_seconds(),
+        "output": task.output,
+        "output_truncated": task.output_truncated,
+        "logs_file": logs_file,
+        "logs_truncated": task.logs_truncated,
+        "error": _serialise_error(task.error),
+        "task_values": dict(task.task_values),
+        "missing_task_values": list(task.missing_task_values),
+        "missing_task_value_reasons": dict(task.task_values.reasons),
+        "attempt": task.attempt,
+        "parameters": task.parameters,
+        "attempts": attempts,
+        "timing": _serialise_timing(task.timing),
+        "effective_performance_target": task.effective_performance_target,
+        "condition_outcome": task.condition_outcome,
+        "sql_output": _as_dict(task.sql_output),
+        "alert_output": _as_dict(task.alert_output),
+        "dbt_output": _as_dict(task.dbt_output),
+        "run_job_output": _as_dict(task.run_job_output),
+        "child_run_id": task.child_run_id,
+        "child_run": child_run,
+        "dashboard_output": _as_dict(task.dashboard_output),
+        "clean_rooms_notebook_output": _as_dict(task.clean_rooms_notebook_output),
+        "notebook_file": notebook_file,
+        "sql_result": sql_result,
+    }
+
+
+def _serialise_error(error: TaskError | None) -> dict[str, Any] | None:
+    if error is None:
+        return None
+    return {
+        "type": error.type,
+        "message": error.message,
+        "trace": error.trace,
+        "root_cause": error.root_cause,
+        "code": error.code,
+    }
+
+
+def _serialise_timing(timing: Timing) -> dict[str, float]:
+    return {
+        "queue_seconds": timing.queue.total_seconds(),
+        "setup_seconds": timing.setup.total_seconds(),
+        "execution_seconds": timing.execution.total_seconds(),
+        "cleanup_seconds": timing.cleanup.total_seconds(),
+    }
+
+
+def _as_dict(output: Any) -> dict[str, Any] | None:
+    # The task outputs are databricks-sdk dataclasses, which turn themselves into the API's JSON.
+    if output is None:
+        return None
+    return output.as_dict()
 
 
 def build_job_run(

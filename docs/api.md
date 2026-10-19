@@ -1,6 +1,6 @@
 # API reference
 
-Everything on this page is importable from `pytest_databricks_lakeflow`. The `lakeflow` fixture and the command-line flags are registered by the plugin's `pytest11` entry point.
+Everything on this page is importable from `pytest_databricks_lakeflow`, apart from `serialise`, which is in `pytest_databricks_lakeflow.results`. The `lakeflow` fixture and the command-line flags are registered by the plugin's `pytest11` entry point.
 
 ## The `lakeflow` fixture
 
@@ -17,6 +17,7 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 | `--no-lakeflow-keep-failed` | Delete the ephemeral job even when its test fails. |
 | `--lakeflow-sweep` | At session start, delete your leftover ephemeral jobs from other runs that are older than `sweep_hours`. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
+| `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](configuration.md#report-directory). |
 
 ## `Lakeflow`
 
@@ -61,6 +62,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments.
 ## `NotebookCell`
 
 ::: pytest_databricks_lakeflow.NotebookCell
+
+## `serialise`
+
+::: pytest_databricks_lakeflow.results.serialise
 
 ## Errors
 
