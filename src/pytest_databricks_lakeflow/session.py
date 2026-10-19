@@ -22,13 +22,13 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import pytest
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import NotFound
+from databricks.sdk.errors import BadRequest, NotFound, PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import jobs, workspace
+from databricks.sdk.service import iam, jobs, workspace
 from filelock import FileLock
 
 from pytest_databricks_lakeflow import bundle, helpers
-from pytest_databricks_lakeflow.errors import LakeflowError
+from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.settings import tag_value
 
 if TYPE_CHECKING:
@@ -53,6 +53,11 @@ EXPIRES_TAG = "pytest_expires"
 EXPIRES_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 LIFECYCLE_NOTEBOOK = re.compile(rf"(setup|teardown)_[0-9a-f]{{{helpers.NOTEBOOK_DIGEST_CHARS}}}")
 SCHEMA_SUFFIX = "[0-9a-f]{8}"
+SP_USER_ROLE = "roles/servicePrincipal.user"
+RUN_AS_FIX = (
+    "Deploy as that principal, set run_as to ${workspace.current_user.userName}, or deploy the bundle yourself and "
+    'use Lakeflow(sync="none").'
+)
 PYTEST_SCHEMA = re.compile(rf"pytest_[a-z0-9_]+_{SCHEMA_SUFFIX}")
 T = TypeVar("T")
 
@@ -488,6 +493,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
     variables = dict(key.variables)
     bundle.check_cli_version(root)
     if key.sync == "deploy":
+        check_run_as(ws, bundle.validate(root, key.target, key.profile, variables), key.target)
         bundle.deploy(root, key.target, key.profile, variables, flags=key.deploy_flags)
         bundle_summary = bundle.summary(root, key.target, key.profile, variables)
         check_host(key.target, _workspace_host(bundle_summary), ws.config.host)
@@ -523,6 +529,104 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         "root": str(root),
         "stale_uploads": stale,
     }
+
+
+def check_run_as(ws: WorkspaceClient, config: Mapping[str, Any], target: str) -> None:
+    """Check that the identity deploying the bundle can deploy the run_as of its target and of each of its jobs.
+
+    A user other than the deploying identity is refused, and so is a service principal on which the deploying
+    identity does not have the Service Principal User role. A service principal whose role cannot be read is let
+    through, so `bundle deploy` reports the problem if there is one.
+
+    Args:
+        ws: The workspace client, which acts as the identity the CLI deploys as.
+        config: The parsed output of `databricks bundle validate -o json`.
+        target: The bundle target.
+
+    Raises:
+        LakeflowBundleError: If a run_as cannot be deployed by this identity.
+    """
+    sources = _run_as_sources(config, target)
+    if not sources:
+        return
+    identity = ws.current_user.me().user_name or ""
+    for source, run_as in sources:
+        user_name = run_as.get("user_name")
+        application_id = run_as.get("service_principal_name")
+        if user_name and user_name.casefold() != identity.casefold():
+            raise LakeflowBundleError(
+                f"{source} sets run_as {user_name}, but this session deploys as {identity}. {RUN_AS_FIX}"
+            )
+        if application_id and check_sp_user_role(ws, application_id) is False:
+            raise LakeflowBundleError(
+                f"{source} sets run_as {application_id}, but this session deploys as {identity}, which does not have "
+                f"the Service Principal User role on it. Ask a manager of that service principal to grant you the "
+                f"role. {RUN_AS_FIX}"
+            )
+
+
+def _run_as_sources(config: Mapping[str, Any], target: str) -> list[tuple[str, Mapping[str, str]]]:
+    """The run_as of the target and of each job that sets a different one, each with what sets it."""
+    # `bundle validate` copies the target's run_as into every job that sets none.
+    target_run_as = config.get("run_as") or {}
+    sources: list[tuple[str, Mapping[str, str]]] = []
+    if target_run_as:
+        sources.append((f"Target {target!r}", target_run_as))
+    for key, job in sorted(((config.get("resources") or {}).get("jobs") or {}).items()):
+        run_as = job.get("run_as") or {}
+        if run_as and run_as != target_run_as:
+            sources.append((f"Job {key!r} of target {target!r}", run_as))
+    return sources
+
+
+def check_sp_user_role(ws: WorkspaceClient, application_id: str) -> bool | None:
+    """Check whether the identity of the workspace client may make jobs that run as a service principal.
+
+    That needs the Service Principal User role, granted to the identity itself or to one of its groups. Workspace
+    admins need it too, and the Service Principal Manager role does not include it.
+
+    Args:
+        ws: The workspace client.
+        application_id: The service principal's application id, as `run_as.service_principal_name` takes it.
+
+    Returns:
+        Whether the identity has the role, `True` when it is that service principal, or `None` when the client has
+            no account id or the service principal's rule set cannot be read.
+    """
+    me = ws.current_user.me()
+    if application_id == me.user_name:
+        return True
+    account_id = ws.config.account_id
+    if not account_id:
+        return None
+    # Rule set names take the application id; the workspace's numeric service principal id is a BadRequest, and so
+    # is an application id the account does not know.
+    name = f"accounts/{account_id}/servicePrincipals/{application_id}/ruleSets/default"
+    try:
+        rule_set = ws.account_access_control_proxy.get_rule_set(name=name, etag="")
+    except (BadRequest, NotFound, PermissionDenied) as e:
+        log.debug("Could not read the rule set of service principal %s: %s", application_id, e)
+        return None
+    principals = _principals_of(me)
+    for rule in rule_set.grant_rules or []:
+        if rule.role == SP_USER_ROLE and principals & set(rule.principals or []):
+            return True
+    return False
+
+
+def _principals_of(me: iam.User) -> set[str]:
+    """The names under which a rule set can grant a role to this identity: itself and each of its groups."""
+    user_name = me.user_name or ""
+    principals: set[str] = set()
+    if "@" in user_name:
+        principals.add(f"users/{user_name}")
+    else:
+        # A service principal's user name is its application id.
+        principals.add(f"servicePrincipals/{user_name}")
+    for group in me.groups or []:
+        if group.display:
+            principals.add(f"groups/{group.display}")
+    return principals
 
 
 def _workspace_host(config: Mapping[str, Any]) -> str | None:

@@ -17,6 +17,9 @@ targets:
     default: true
     workspace:
       root_path: ~/.bundle/${bundle.name}/test
+    # Checked against the deploying identity before `bundle deploy`, see test_run_as_self_passes_the_pre_deploy_check.
+    run_as:
+      user_name: ${workspace.current_user.userName}
     presets:
       trigger_pause_status: PAUSED
       tags:

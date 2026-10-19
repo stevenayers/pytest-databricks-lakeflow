@@ -9,18 +9,29 @@ from typing import Any, cast
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import PermissionDenied
 
 from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 
 from .conftest import AZURE_DEVOPS, GITHUB, FakeCli, configure_lakeflow, git, make_repository, set_ci
-from .fakes import HOST, FakeWorkspaceClient, example_settings
+from .fakes import ACCOUNT_ID, HOST, FakeWorkspaceClient, example_settings, sp_rule_set
 
 UNIT_TESTS = Path(__file__).parent
 DEPLOY = ["bundle", "deploy", "-t", "test", "--auto-approve"]
 DEPLOY_STAGING = ["bundle", "deploy", "-t", "staging", "--auto-approve"]
 SUMMARY = ["bundle", "summary", "-t", "test", "-o", "json"]
+VALIDATE = ["bundle", "validate", "-t", "test", "-o", "json"]
 OTHER_HOST = "https://other.cloud.databricks.com"
+APP_ID = "0000-app-id"
+SP_RUN_AS = {"service_principal_name": APP_ID}
+SP_USER = "roles/servicePrincipal.user"
+SP_MANAGER = "roles/servicePrincipal.manager"
+SP_FIX = "Ask a manager of that service principal to grant you the role."
+RUN_AS_FIX = (
+    "Deploy as that principal, set run_as to ${workspace.current_user.userName}, or deploy the bundle yourself and "
+    'use Lakeflow(sync="none").'
+)
 WHEEL_ARTIFACT = {"type": "whl", "build": "uv build --wheel", "path": "/b", "files": [{"source": "/b/dist/*.whl"}]}
 UNVERSIONED_MESSAGE = (
     "Artifacts ['lakeflow_example'] have no dynamic_version: true. Serverless caches wheels by file name, so a rebuilt "
@@ -57,6 +68,8 @@ def fake_cli(args, root, profile=None):
         return "Databricks CLI v1.7.0"
     if args[:2] == ["bundle", "summary"]:
         return json.dumps({{"resources": {{"jobs": {{"my_job": {{"id": "1000"}}}}}}}})
+    if args[:2] == ["bundle", "validate"]:
+        return "{{}}"
     return ""
 
 
@@ -488,6 +501,7 @@ class TestSetup:
         state = session.setup(as_client(fake_ws), bundle_key(bundle_dir, profile="dev"))
         assert fake_cli.invocations == [
             (["--version"], bundle_dir, None),
+            (VALIDATE, bundle_dir, "dev"),
             (DEPLOY, bundle_dir, "dev"),
             (SUMMARY, bundle_dir, "dev"),
         ]
@@ -535,7 +549,7 @@ class TestSetup:
         session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync="sync"))
         assert [call[:2] for call in fake_cli.calls] == [["--version"], ["bundle", "sync"], ["bundle", "validate"]]
 
-    @pytest.mark.parametrize(("sync", "commands"), [("deploy", 2), ("sync", 2), ("none", 1)])
+    @pytest.mark.parametrize(("sync", "commands"), [("deploy", 3), ("sync", 2), ("none", 1)])
     def test_setup_passes_variables_to_every_cli_call(
         self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str, commands: int
     ) -> None:
@@ -557,8 +571,8 @@ class TestSetup:
     ) -> None:
         key = bundle_key(bundle_dir, variables=variables, deploy_flags=("--fail-on-active-runs",))
         session.setup(as_client(fake_ws), key)
-        assert fake_cli.calls[1] == [*DEPLOY, *as_vars, "--fail-on-active-runs"]
-        assert fake_cli.calls[2] == [*SUMMARY, *as_vars]
+        assert fake_cli.calls[2] == [*DEPLOY, *as_vars, "--fail-on-active-runs"]
+        assert fake_cli.calls[3] == [*SUMMARY, *as_vars]
 
     def test_template_copies_are_independent(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
@@ -655,6 +669,120 @@ class TestHostCheck:
         )
         assert fake_cli.calls.count(DEPLOY) == 1
         assert fake_ws.jobs.gets == []
+
+
+class TestRunAsCheck:
+    """Before `bundle deploy`, setup checks that the deploying identity can deploy the target's and jobs' run_as."""
+
+    @pytest.mark.parametrize(
+        ("validate", "message"),
+        [
+            pytest.param(
+                {"run_as": SP_RUN_AS, "resources": {"jobs": {"my_job": {"run_as": SP_RUN_AS}}}},
+                f"Target 'test' sets run_as {APP_ID}, but this session deploys as someone@example.com, which does "
+                f"not have the Service Principal User role on it. {SP_FIX} {RUN_AS_FIX}",
+                id="target-service-principal",
+            ),
+            pytest.param(
+                {"run_as": {"user_name": "other@example.com"}},
+                f"Target 'test' sets run_as other@example.com, but this session deploys as someone@example.com. "
+                f"{RUN_AS_FIX}",
+                id="target-user",
+            ),
+            pytest.param(
+                {"resources": {"jobs": {"mine": {}, "other": {"run_as": {"user_name": "other@example.com"}}}}},
+                f"Job 'other' of target 'test' sets run_as other@example.com, but this session deploys as "
+                f"someone@example.com. {RUN_AS_FIX}",
+                id="job-user",
+            ),
+        ],
+    )
+    def test_setup_refuses_a_foreign_run_as(
+        self,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        bundle_dir: Path,
+        validate: dict[str, Any],
+        message: str,
+    ) -> None:
+        fake_ws.account_access_control_proxy.grant(APP_ID, SP_MANAGER, "users/someone@example.com")
+        fake_ws.account_access_control_proxy.grant(APP_ID, SP_USER, "users/other@example.com", "groups/other")
+        fake_cli.validate = validate
+        with pytest.raises(LakeflowBundleError) as excinfo:
+            session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert str(excinfo.value) == message
+        assert DEPLOY not in fake_cli.calls
+
+    @pytest.mark.parametrize(
+        "principal", ["users/someone@example.com", "groups/data-eng"], ids=["user", "group-of-the-user"]
+    )
+    def test_setup_accepts_run_as_with_the_user_role(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, principal: str
+    ) -> None:
+        fake_ws.current_user.groups = ["data-eng"]
+        fake_ws.account_access_control_proxy.grant(APP_ID, SP_USER, principal)
+        fake_cli.validate = {"run_as": SP_RUN_AS, "resources": {"jobs": {"my_job": {"run_as": SP_RUN_AS}}}}
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert [call[:2] for call in fake_cli.calls] == [
+            ["--version"],
+            ["bundle", "validate"],
+            ["bundle", "deploy"],
+            ["bundle", "summary"],
+        ]
+        assert fake_ws.account_access_control_proxy.names == [sp_rule_set(APP_ID)]
+
+    @pytest.mark.parametrize(
+        "run_as",
+        [{"user_name": "someone@example.com"}, {"user_name": "Someone@Example.com"}, None],
+        ids=["self", "self-other-case", "none"],
+    )
+    def test_setup_accepts_run_as_self(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, run_as: dict[str, str] | None
+    ) -> None:
+        fake_cli.validate = {"run_as": run_as, "resources": {"jobs": {"my_job": example_settings().as_dict()}}}
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert DEPLOY in fake_cli.calls
+        assert fake_ws.account_access_control_proxy.names == []
+
+    @pytest.mark.parametrize(
+        ("account_id", "rule_set"),
+        [
+            pytest.param(None, None, id="no-account-id"),
+            pytest.param(ACCOUNT_ID, PermissionDenied("not an account member"), id="rule-set-denied"),
+            pytest.param(ACCOUNT_ID, None, id="unknown-service-principal"),
+        ],
+    )
+    def test_role_check_is_skipped_without_an_account_id(
+        self,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        bundle_dir: Path,
+        account_id: str | None,
+        rule_set: Exception | None,
+    ) -> None:
+        fake_ws.config.account_id = account_id
+        if rule_set is not None:
+            fake_ws.account_access_control_proxy.rule_sets[sp_rule_set(APP_ID)] = rule_set
+        fake_cli.validate = {"run_as": SP_RUN_AS}
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert DEPLOY in fake_cli.calls
+
+    @pytest.mark.parametrize("sync", ["sync", "none"])
+    def test_sync_and_none_never_run_the_check(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path, sync: str
+    ) -> None:
+        fake_cli.validate = {"run_as": {"user_name": "other@example.com"}}
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir, sync=sync))
+        assert fake_ws.account_access_control_proxy.names == []
+
+    def test_setup_accepts_a_service_principal_deploying_as_itself(
+        self, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        fake_ws.current_user.user_name = APP_ID
+        fake_cli.validate = {"run_as": SP_RUN_AS}
+        session.setup(as_client(fake_ws), bundle_key(bundle_dir))
+        assert DEPLOY in fake_cli.calls
+        assert fake_ws.account_access_control_proxy.names == []
 
 
 class TestLazySetup:
@@ -770,7 +898,7 @@ class TestLazySetup:
         configure_lakeflow(pytester, 'deploy_flags=["--fail-on-active-runs"]')
         pytester.makepyfile("def test_one(lakeflow):\n    assert lakeflow.template('my_job').tasks\n")
         pytester.runpytest().assert_outcomes(passed=1)
-        assert fake_cli.calls[1] == [*DEPLOY, "--fail-on-active-runs"]
+        assert fake_cli.calls[2] == [*DEPLOY, "--fail-on-active-runs"]
 
     def test_lakeflows_with_different_deploy_flags_deploy_separately(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
