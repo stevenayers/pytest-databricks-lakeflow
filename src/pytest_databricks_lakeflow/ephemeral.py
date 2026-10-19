@@ -385,9 +385,7 @@ def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jo
     label = task.task_key or "?"
     if task.attempt_number:
         label = f"{label} (attempt {task.attempt_number})"
-    line = f"{label}: {state}"
-    if previous:
-        line = f"{label}: {previous} -> {state}"
+    line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
     if not done:
         return line
     elapsed = duration(task.start_time, task.end_time)

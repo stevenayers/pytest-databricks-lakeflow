@@ -735,13 +735,14 @@ class TestRunOptions:
                     with pytest.raises(LakeflowTimeout):
                         job.run(timeout=timedelta(0))
                     assert job.run().run_id != 77
+                    assert job.run().run_id != 77
             """,
         )
         result.assert_outcomes(passed=1)
         tokens = [call["idempotency_token"] for call in fake_ws.jobs.run_now_calls]
-        assert len(tokens) == 2
+        assert len(tokens) == 3
         assert all(tokens)
-        assert tokens[0] != tokens[1]
+        assert len(set(tokens)) == 3
         assert all(len(token) <= 64 for token in tokens)
 
     @pytest.mark.parametrize(
@@ -860,15 +861,16 @@ class TestTimeouts:
     @pytest.mark.parametrize(
         ("arguments", "call"),
         [
-            pytest.param("", "job.run(timeout=timedelta(0))", id="run"),
+            pytest.param(None, "job.run(timeout=timedelta(0))", id="run"),
             pytest.param("timeout=timedelta(0)", "job.run()", id="lakeflow"),
         ],
     )
     def test_timeout_cancels_the_run(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str, call: str
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str | None, call: str
     ) -> None:
         fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
-        configure_lakeflow(pytester, arguments)
+        if arguments is not None:
+            configure_lakeflow(pytester, arguments)
         result = run_tests(
             pytester,
             f"""
@@ -890,12 +892,13 @@ class TestTimeouts:
 
     @pytest.mark.parametrize(
         ("arguments", "job_timeout"),
-        [pytest.param("", 1860, id="default"), pytest.param("timeout=timedelta(minutes=1)", 120, id="one-minute")],
+        [pytest.param(None, 1860, id="default"), pytest.param("timeout=timedelta(minutes=1)", 120, id="one-minute")],
     )
     def test_run_timeout_longer_than_the_job_fails_clearly(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str, job_timeout: int
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str | None, job_timeout: int
     ) -> None:
-        configure_lakeflow(pytester, arguments)
+        if arguments is not None:
+            configure_lakeflow(pytester, arguments)
         result = run_tests(
             pytester,
             f"""
