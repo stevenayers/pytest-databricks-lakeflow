@@ -29,6 +29,7 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `disable` lists task keys to disable in the copy, see [below](#disable-a-task).
 - `force_conditions` maps if/else condition task keys to the outcome every run of the copy takes, see [below](#force-a-branch).
 - `extra_dependencies` adds test-only packages to the copy, see [below](#test-only-dependencies).
+- `environments` changes the copy's serverless environments, see [below](#change-the-settings-before-the-job-is-created).
 
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
@@ -553,7 +554,17 @@ The plugin reads the child run with `get_run` once the parent run has finished. 
 
 ## Change the settings before the job is created
 
-`modify_settings` is called with each ephemeral job's `JobSettings` and the test's `pytest.Item`, just before the job is created. Change the settings in place:
+To change the serverless environments of one copy, pass `environments` to `lakeflow.job()` or `lakeflow.task()`. It maps environment keys to fields of the environment's spec:
+
+```python
+def test_on_environment_5(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", environments={"default": {"environment_version": "5"}}) as job:
+        assert job.run().succeeded
+```
+
+For a key the job already has, each field you pass replaces the template's field and the others are kept. `dependencies` replaces the whole list, the wheel from the bundle included, so `{"default": {"dependencies": ["/Volumes/main/libs/wheels/my_pkg-0.2.0-py3-none-any.whl"]}}` swaps the job's wheel for another one; to add packages to the list, use [`extra_dependencies`](#test-only-dependencies), which `environments` overrides when both set `dependencies` on the same environment. A key the job does not have adds a new environment, such as `{"gpu": {"environment_version": "4", "dependencies": ["torch"]}}`; moving a task onto it is a job for `modify_settings`. An `environment_version` here wins over `Lakeflow(environment_version=...)` for that environment. The fields are those of `compute.Environment`: `environment_version`, `base_environment`, `dependencies`, `java_dependencies`, and the others your databricks-sdk knows. `LakeflowError` is raised before the job is created for a key starting with `__pytest_`, which the plugin reserves, for a field the spec does not have, for an environment that would set both `environment_version` and `base_environment` (set the one you do not want to `None`), and when the job would have more than 10 environments, the helper environment `__pytest_serverless` included.
+
+For anything else, `modify_settings` is called with each ephemeral job's `JobSettings` and the test's `pytest.Item`, just before the job is created. Change the settings in place:
 
 ```python
 import pytest

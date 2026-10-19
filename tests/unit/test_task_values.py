@@ -17,6 +17,7 @@ from pytest_databricks_lakeflow.settings import (
     check_values,
     escape,
     inject_probes,
+    merge_environments,
     upstream_values_from,
     wrap_task,
 )
@@ -422,3 +423,16 @@ class TestEndToEnd:
         assert [t.task_key for t in replay["tasks"]] == ["extract", "audit", "transform"]
         assert stub_values(replay, "extract") == '{"row_count": 0}'
         assert stub_values(replay, "audit") == '{"checked": true}'
+
+
+class TestEnvironmentCap:
+    """Per-job environments count towards the cap of ten together with the helper environment."""
+
+    def test_merge_environments_respects_the_cap(self) -> None:
+        settings = inject_probes(with_environment_count(9), {"load": ["k"]}, HELPERS)
+        with pytest.raises(LakeflowError, match="10") as e:
+            merge_environments(settings, {"extra": {"environment_version": "4"}})
+        assert "'default', 'env1'" in str(e.value) and f"'{ENV_KEY}', 'extra'" in str(e.value)
+        settings = inject_probes(with_environment_count(8), {"load": ["k"]}, HELPERS)
+        merged = merge_environments(settings, {"extra": {"environment_version": "4"}})
+        assert environment_keys(merged)[-2:] == [ENV_KEY, "extra"]
