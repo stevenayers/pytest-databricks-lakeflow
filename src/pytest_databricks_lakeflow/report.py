@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -12,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from pytest_databricks_lakeflow.ephemeral import REPORTS, RUNS
+from pytest_databricks_lakeflow.ephemeral import DEBUG_NOTEBOOKS, REPORTS, RUNS
 from pytest_databricks_lakeflow.results import serialise_with_files
 
 if TYPE_CHECKING:
@@ -56,13 +57,16 @@ def clear(report_dir: Path) -> None:
 def write(report_dir: Path, item: pytest.Item) -> None:
     """Write `report.json` and the side files of the runs `item` waited for, if it waited for any.
 
-    The runs are then dropped from the item, which pytest keeps until the session ends. Any error from serialising
-    or writing them is logged as a warning, so the report never fails the test nor ends the session.
+    A test that waited for no run but wrote a debug notebook, as the last test of a module whose fixture closes the
+    job, gets a report too. The runs are then dropped from the item, which pytest keeps until the session ends. Any
+    error from serialising or writing them is logged as a warning, so the report never fails the test nor ends the
+    session.
     """
     runs = item.stash.get(RUNS, [])
-    if not runs:
+    if not runs and DEBUG_NOTEBOOKS not in item.stash:
         return
-    del item.stash[RUNS]
+    if runs:
+        del item.stash[RUNS]
     directory = report_dir / directory_name(item.nodeid)
     # An error raised from this hook would end the session with INTERNALERROR.
     try:
@@ -83,7 +87,8 @@ def _build(item: pytest.Item, runs: list[tuple[EphemeralJob, JobRun]]) -> tuple[
     outcome: dict[str, str] = {}
     for when, test_report in item.stash.get(REPORTS, {}).items():
         outcome[when] = test_report.outcome
-    report = {"nodeid": item.nodeid, "outcome": outcome, "runs": entries}
+    notebooks = [dataclasses.asdict(notebook) for notebook in item.stash.get(DEBUG_NOTEBOOKS, [])]
+    report = {"nodeid": item.nodeid, "outcome": outcome, "runs": entries, "debug_notebooks": notebooks}
     return report, files
 
 

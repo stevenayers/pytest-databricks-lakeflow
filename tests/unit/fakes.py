@@ -28,6 +28,13 @@ TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
 SKIPPED = jobs.RunLifeCycleState.SKIPPED
 # What the platform reports, on the run and on each of its task runs, when every task of the job is disabled.
 ALL_DISABLED = "Skipped because every task is disabled. Re-enable at least one task to be able to run the job."
+# The error `runs/get-output` reports for every pipeline task run, also one that ended SUCCESS.
+PIPELINE_LOGS = "Please refer to the logs for this pipeline in the pipelines page."
+# The termination message of an alert task whose query failed, as recorded on the alerts bundle.
+ALERT_FAILED = (
+    "An error occurred during execution of task Alert task: Query execution failed. Please check the alert query "
+    "text and evaluation conditions first."
+)
 # The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
 # "Invalid filter expression"; the value must be in single quotes.
 LEVEL_FILTER = re.compile(r"^level='(?P<level>[A-Z]+)'$")
@@ -673,6 +680,38 @@ def queue_failed_run(ws: FakeWorkspaceClient, states: Mapping[str, str | None] |
     if states is None:
         states = {"transform": "FAILED"}
     ws.jobs.queue(make_run(77, states, "FAILED", "RUN_EXECUTION_ERROR"))
+
+
+def failed_alert_run(run_id: int, key: str = "broken") -> jobs.Run:
+    """Build the run of one alert task, `key`, whose query failed, as recorded on the alerts bundle.
+
+    The task ends FAILED with termination code `RUN_EXECUTION_ERROR`, type `CLIENT_ERROR` and the message in
+    `ALERT_FAILED`, which is also its state message, and the run's life cycle is `INTERNAL_ERROR`. The task's
+    `runs/get-output` holds only `alert_output.alert_state` `ERROR`, with no error: see `failed_alert_output`.
+    """
+    run = make_run(run_id, {key: "FAILED"}, "FAILED", "RUN_EXECUTION_ERROR")
+    details = jobs.TerminationDetails(
+        code=jobs.TerminationCodeCode.RUN_EXECUTION_ERROR,
+        message=ALERT_FAILED,
+        type=jobs.TerminationTypeType.CLIENT_ERROR,
+    )
+    status = jobs.RunStatus(state=TERMINATED, termination_details=details)
+    state = jobs.RunState(
+        life_cycle_state=jobs.RunLifeCycleState.TERMINATED,
+        result_state=jobs.RunResultState.FAILED,
+        state_message=ALERT_FAILED,
+    )
+    alert = jobs.AlertTask(alert_id="3926452559074312", warehouse_id="0123456789abcdef")
+    tasks = [replace(task, state=state, status=status, alert_task=alert) for task in run.tasks or []]
+    run_state = jobs.RunState(
+        life_cycle_state=jobs.RunLifeCycleState.INTERNAL_ERROR, result_state=jobs.RunResultState.FAILED
+    )
+    return replace(run, state=run_state, status=status, tasks=tasks)
+
+
+def failed_alert_output() -> jobs.RunOutput:
+    """The `runs/get-output` of the alert task of `failed_alert_run`: an alert state and no error."""
+    return jobs.RunOutput(alert_output=jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.ERROR))
 
 
 def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:

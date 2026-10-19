@@ -315,9 +315,9 @@ class Lakeflow:
                 `True` runs the `true` branch, `False` the `false` branch. The task's operands are replaced by
                 constants, so the branch no longer depends on the data upstream of it. The upstream tasks still run.
             children: What to do about Run Job tasks, which the copy keeps as deployed, so they run the deployed
-                child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled nor
-                inside a disabled `for_each_task`. `"refuse"` raises `LakeflowError` instead, before anything is
-                created.
+                child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled,
+                downstream of a disabled task nor inside a disabled `for_each_task`. `"refuse"` raises
+                `LakeflowError` instead, before anything is created.
             setup: A function, a list of SQL statements or a `.py` file to run first, as the task `__pytest_setup`,
                 which every task without `depends_on` comes to depend on. Its outcome is `JobRun.setup`.
             teardown: A function, a list of SQL statements or a `.py` file to run last, as the task
@@ -359,23 +359,25 @@ class Lakeflow:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
                 that is not in the job, `task_overrides` sets a field it does not take, `force_conditions` names a
-                task that is not a condition task, is disabled, or has an outcome that is not a bool, a parameter
-                name is reserved, an entry of `extra_dependencies` is a local path that does not start with `./` or
-                `../`, matches no file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras
-                while the copy has a Python task on a cluster, `children` is `"refuse"` and the copy has a Run Job task
-                that is not disabled nor inside a disabled `for_each_task`, `environments` names a key starting with
-                `__pytest_`, holds an entry that is not a mapping or a field that a
-                serverless environment does not take, sets both `environment_version` and `base_environment` on one
-                environment, or brings the job past 10 environments, or `setup` or `teardown` is not a plain function
-                with its source in a file, uses variables of an enclosing function, takes a parameter other than
-                `spark`, `dbutils` and `params`, or has a decorator. Also if `setup` or `teardown` is a string or an
+                task that is not a condition task, is disabled or downstream of a disabled task, or has an outcome
+                that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path
+                that does not start with `./` or `../`, matches no file, has no uploaded copy or is used with
+                `sync="sync"`, or is a wheel with extras while the copy has a Python task on a cluster, `children` is
+                `"refuse"` and the copy has a Run Job task that is not disabled, downstream of a disabled task nor
+                inside a disabled `for_each_task`, `environments` names a key starting with `__pytest_`, holds an
+                entry that is not a mapping or a field that a serverless environment does not take, sets both
+                `environment_version` and `base_environment` on one environment, or brings the job past 10
+                environments, or `setup` or `teardown` is not a plain function with its source in a file, uses
+                variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params`, or
+                has a decorator. Also if `setup` or `teardown` is a string or an
                 empty list, a statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither
                 declared nor in `params`, or a path is missing or not a `.py` file.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
                 Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
                 a value that is too large or not JSON-serialisable, an output that contains `{{` or is not
-                JSON-serialisable, or no output for a path that a task of the copy refers to.
+                JSON-serialisable, or no output for a path that a task of the copy refers to. When the job is created,
+                also if a task of the copy refers to the output of a notebook task that is not a stub.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
