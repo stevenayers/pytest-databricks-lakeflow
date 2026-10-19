@@ -14,7 +14,7 @@ from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.helpers import KEYS_WIDGET, PARAMS_WIDGET, TASK_KEY_WIDGET, VALUES_WIDGET
-from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX, SETUP_KEY, TEARDOWN_KEY
+from pytest_databricks_lakeflow.results import PREFIX, PROBE_PREFIX, SETUP_KEY, TEARDOWN_KEY, JobRun
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -671,6 +671,54 @@ def wrap_task(
     if stubs or probes:
         _add_helper_compute(settings, helpers)
     return settings
+
+
+def upstream_values_from(
+    job_key: str, settings: jobs.JobSettings, task_key: str, run: JobRun, explicit: Collection[str] = ()
+) -> dict[str, dict[str, object]]:
+    """Take the stub values for a task's upstream tasks from the task values a previous run captured.
+
+    The upstream tasks are those the task depends on in `settings`. The platform returns no task values with a run,
+    so only values that a probe captured, with `capture_task_values`, are in `run`.
+
+    Args:
+        job_key: The bundle resource key of the job the task belongs to.
+        settings: The job's settings, before the task is wrapped.
+        task_key: The task to replay.
+        run: A run of the job that captured the upstream tasks' values.
+        explicit: Upstream task keys whose values are given some other way, which are not taken from `run`.
+
+    Returns:
+        The captured values of each upstream task, by task key. Empty if the job has no task `task_key`.
+
+    Raises:
+        LakeflowError: If `run` is a run of another job, or an upstream task was not part of it or has no captured
+            values.
+    """
+    if run.job_key != job_key:
+        raise LakeflowError(f"upstream_from is a run of job {run.job_key!r}, not of {job_key!r}")
+    target = next((t for t in settings.tasks or [] if t.task_key == task_key), None)
+    if target is None:
+        return {}
+    upstream: dict[str, dict[str, object]] = {}
+    for dependency in target.depends_on or []:
+        key = dependency.task_key
+        if key in explicit:
+            continue
+        if key not in run.tasks:
+            raise LakeflowError(_no_upstream_values(key, task_key, "was not part of the run"))
+        values = run.tasks[key].task_values
+        if not values:
+            raise LakeflowError(_no_upstream_values(key, task_key, "has no captured task values"))
+        upstream[key] = dict(values)
+    return upstream
+
+
+def _no_upstream_values(key: str, task_key: str, reason: str) -> str:
+    return (
+        f"upstream_from has no task values for {key!r}, upstream of {task_key!r}: it {reason}. Run the job with "
+        f"capture_task_values={{{key!r}: [...]}} first, or pass its values in upstream_task_values."
+    )
 
 
 def inject_lifecycle(

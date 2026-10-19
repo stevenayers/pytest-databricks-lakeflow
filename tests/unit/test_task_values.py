@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
+from datetime import timedelta
+from typing import Any
 
 import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError
+from pytest_databricks_lakeflow.results import JobRun, TaskRun, TaskValues
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
     Helpers,
@@ -14,11 +17,12 @@ from pytest_databricks_lakeflow.settings import (
     check_values,
     escape,
     inject_probes,
+    upstream_values_from,
     wrap_task,
 )
 
 from .conftest import configure_lakeflow
-from .fakes import FakeWorkspaceClient, example_settings, recorded
+from .fakes import FakeWorkspaceClient, example_settings, make_run, recorded
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
@@ -45,6 +49,53 @@ def probe_transform(settings: jobs.JobSettings) -> jobs.JobSettings:
 
 def wrap_transform(settings: jobs.JobSettings) -> jobs.JobSettings:
     return wrap_task(settings, "transform", UPSTREAM, [], HELPERS)
+
+
+def task_run(key: str, values: Mapping[str, object]) -> TaskRun:
+    return TaskRun(
+        task_key=key,
+        run_id=1,
+        result_state="SUCCESS",
+        termination_code=None,
+        termination_message=None,
+        run_url=f"https://example.com/{key}",
+        duration=timedelta(seconds=1),
+        task_values=TaskValues(values),
+    )
+
+
+def previous_run(
+    values: Mapping[str, Mapping[str, object]], job_key: str = "my_job", skipped: Collection[str] = ()
+) -> JobRun:
+    """Build a finished run whose tasks captured `values`, by task key, with the tasks in `skipped` left out by only."""
+    return JobRun(
+        job_key=job_key,
+        job_id=1,
+        run_id=2,
+        run_url="https://example.com/run",
+        result_state="SUCCESS",
+        termination_code="SUCCESS",
+        termination_message=None,
+        duration=timedelta(seconds=3),
+        tasks={key: task_run(key, task_values) for key, task_values in values.items()},
+        injected_tasks={},
+        skipped_tasks={key: task_run(key, {}) for key in skipped},
+    )
+
+
+def queue_capturing_run(fake_ws: FakeWorkspaceClient, values: Mapping[str, object]) -> None:
+    """Queue a full run of my_job whose probe on extract captured `values`."""
+    states = {"extract": "SUCCESS", "transform": "SUCCESS", "load": "SUCCESS", "classic": "SUCCESS"}
+    run = make_run(5, {**states, "__pytest_probe__extract": "SUCCESS"})
+    probe_output = jobs.NotebookOutput(result=json.dumps({"values": dict(values), "missing": []}))
+    fake_ws.jobs.queue(run, {504: jobs.RunOutput(notebook_output=probe_output)})
+
+
+def stub_values(created: Mapping[str, Any], key: str) -> str:
+    tasks: list[jobs.Task] = created["tasks"]
+    stub = next(t for t in tasks if t.task_key == key)
+    assert stub.notebook_task is not None and stub.notebook_task.base_parameters is not None
+    return stub.notebook_task.base_parameters["__pytest_values"]
 
 
 class TestWrapTask:
@@ -179,6 +230,48 @@ class TestTaskValues:
             inject_probes(example_settings(), {"load": ["k" * 513]}, HELPERS)
 
 
+class TestUpstreamFrom:
+    """`upstream_values_from` takes the stub values for a task's upstream tasks from a run that captured them."""
+
+    def test_upstream_values_from_a_previous_run(self) -> None:
+        run = previous_run({"extract": {"row_count": 42}, "load": {"rows": 1}})
+        assert upstream_values_from("my_job", example_settings(), "transform", run) == {"extract": {"row_count": 42}}
+
+    @pytest.mark.parametrize(
+        ("run", "message"),
+        [
+            pytest.param(
+                previous_run({"extract": {}}),
+                r"upstream_from has no task values for 'extract'.*capture_task_values=\{'extract': \[",
+                id="empty_values",
+            ),
+            pytest.param(
+                previous_run({"transform": {}}, skipped=["extract"]),
+                r"'extract'.*was not part of the run.*capture_task_values",
+                id="left_out_by_only",
+            ),
+        ],
+    )
+    def test_upstream_from_needs_captured_values(self, run: JobRun, message: str) -> None:
+        with pytest.raises(LakeflowError, match=message):
+            upstream_values_from("my_job", example_settings(), "transform", run)
+
+    def test_explicit_task_keys_are_not_read_from_the_run(self) -> None:
+        run = previous_run({"extract": {}})
+        assert upstream_values_from("my_job", example_settings(), "transform", run, explicit=["extract"]) == {}
+
+    def test_upstream_from_rejects_another_job(self) -> None:
+        run = previous_run({"extract": {"row_count": 42}}, job_key="other")
+        with pytest.raises(LakeflowError, match=r"upstream_from is a run of job 'other', not of 'my_job'"):
+            upstream_values_from("my_job", example_settings(), "transform", run)
+
+    def test_replayed_values_go_through_check_values(self) -> None:
+        run = previous_run({"extract": {"row_count": "x" * 49_153}})
+        upstream = upstream_values_from("my_job", example_settings(), "transform", run)
+        with pytest.raises(LakeflowError, match="'row_count' for task 'extract' is 49155 characters as JSON"):
+            wrap_task(example_settings(), "transform", upstream, [], HELPERS)
+
+
 @pytest.mark.usefixtures("fake_cli", "bundle_dir")
 class TestEndToEnd:
     """`Lakeflow.task()` and `Lakeflow.job()` wire the stubs, probes and helper compute into the created job."""
@@ -282,3 +375,50 @@ class TestEndToEnd:
         assert stub.task_key == "extract"
         assert (stub.existing_cluster_id, stub.job_cluster_key) == ("0123-456789-abcdef", None)
         assert "job_clusters" not in created
+
+    def test_replay_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        fake_ws.jobs.queue(*recorded("probe_success"))
+        pytester.makepyfile(
+            """
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                assert first.task("extract").task_values == {"row_count": 42}
+                again = lakeflow.task("my_job.transform", upstream_from=first, capture_task_values=["stage"]).run()
+                assert again.succeeded
+                assert sorted(again.injected_tasks) == ["__pytest_probe__transform", "extract"]
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        replay = fake_ws.jobs.created[1]
+        assert [t.task_key for t in replay["tasks"]] == ["extract", "transform", "__pytest_probe__transform"]
+        assert replay["tasks"][0].notebook_task.base_parameters["__pytest_values"] == '{"row_count": 42}'
+
+    def test_explicit_values_win_over_upstream_from(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_capturing_run(fake_ws, {"row_count": 42})
+        pytester.makepyfile(
+            """
+            import dataclasses
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_replay(lakeflow):
+                first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
+                explicit = {"extract": {"row_count": 0}, "audit": {"checked": True}}
+                with lakeflow.task("my_job.transform", upstream_from=first, upstream_task_values=explicit):
+                    pass
+                other = dataclasses.replace(first, job_key="other_job")
+                with pytest.raises(LakeflowError, match="run of job 'other_job', not of 'my_job'"):
+                    lakeflow.task("my_job.transform", upstream_from=other)
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.created) == 2, "the run of another job creates nothing"
+        replay = fake_ws.jobs.created[1]
+        assert [t.task_key for t in replay["tasks"]] == ["extract", "audit", "transform"]
+        assert stub_values(replay, "extract") == '{"row_count": 0}'
+        assert stub_values(replay, "audit") == '{"checked": true}'
