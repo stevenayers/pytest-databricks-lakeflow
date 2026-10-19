@@ -373,6 +373,34 @@ def test_task_params_override_one_task(lakeflow: Lakeflow) -> None:
         assert extract["param2"] == "world", "the job parameter wins over the task parameter of the same name"
 
 
+def test_task_params_set_named_wheel_parameters(lakeflow: Lakeflow) -> None:
+    task_params = {"my_wheel_task": {"greeting": "from-task-params", "param1": "from-task-params"}}
+    with pytest.warns(UserWarning, match="sets 'param1', also a job parameter of 'my_example_job'. The job value wins"):
+        job = lakeflow.job("my_example_job", task_params=task_params)
+    with job:
+        run = job.run(only=["my_wheel_task"])
+        assert run.succeeded, run
+        wheel = run.task("my_wheel_task")
+        # The platform passes every job parameter to a wheel task with named parameters, and the job value wins.
+        received = {"greeting": "from-task-params", "param1": "hello", "param2": "world", "schema": "", "mode": "full"}
+        assert wheel.parameters == received
+        assert "Named: --greeting=from-task-params --mode=full --param1=hello --param2=world --schema=" in wheel.logs
+
+
+def test_only_resolves_the_result_state_of_a_task_left_out(lakeflow: Lakeflow) -> None:
+    def refer_to_extract(settings: jobs.JobSettings, item: pytest.Item) -> None:
+        for task in settings.tasks or []:
+            if task.task_key == "load" and task.notebook_task is not None:
+                task.notebook_task.base_parameters = {"upstream": "{{tasks.extract.result_state}}"}
+
+    with dataclasses.replace(lakeflow, modify_settings=refer_to_extract).job("my_example_job") as job:
+        run = job.run(only=["load"])
+        assert run.succeeded, run
+        load = run.task("load").parameters
+        assert isinstance(load, dict)
+        assert load["upstream"] == "disabled", "only checks task values; the platform resolves other references"
+
+
 def seed_orders(spark, dbutils, params):
     schema = params["schema"]
     spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")

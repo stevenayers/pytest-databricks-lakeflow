@@ -29,3 +29,10 @@ resources:
               n: "{{job.parameters.n}}"
             file:
               path: ../src/queries/parameterised.sql
+        - task_key: labelled
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            parameters:
+              label: from-bundle
+            file:
+              path: ../src/queries/labelled.sql
