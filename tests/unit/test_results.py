@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
-from pytest_databricks_lakeflow.results import JobRun, TaskError, TaskRun, TaskValues, Timing, format_parameters
+from pytest_databricks_lakeflow.results import (
+    JobRun,
+    NotebookView,
+    TaskError,
+    TaskRun,
+    TaskValues,
+    Timing,
+    format_parameters,
+    parse_notebook_export,
+)
 
-from .fakes import DATA
+from .fakes import DATA, notebook_export
 
 SAMPLES: list[dict[str, Any]] = json.loads((DATA / "task_errors.json").read_text())
+FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
 UNLINKED = [s for s in SAMPLES if not s["name"].endswith("_linked")]
 LINKED = [s for s in SAMPLES if s["name"].endswith("_linked")]
 LOWERCASE_TAGGED = [
@@ -48,6 +60,9 @@ File <command-1>, line 5
 
 ValueError: outer
 """
+
+
+HTML_OUTPUT = '<div class="ansiout">rows &gt; 0\nsecond\n</div>'
 
 
 def task(key: str, state: str | None = "SUCCESS", **kwargs: Any) -> TaskRun:
@@ -353,8 +368,12 @@ class TestReprs:
         assert "params" not in repr(job_run([task("c", "FAILED", error=TaskError(None, "boom", ""))]))
 
     def test_outputs_are_left_out_of_the_repr(self) -> None:
+        notebook = parse_notebook_export(FAILED_EXPORT)
         t = task("a", run_job_output=jobs.RunJobOutput(run_id=42), dbt_output=jobs.DbtOutput(artifacts_link="l"))
+        t = replace(t, notebook=notebook)
         assert repr(t) == "TaskRun('a', SUCCESS, https://example.com/a)"
+        assert repr(job_run([t])) == "JobRun('my_job', SUCCESS, https://example.com/run, failing=[])"
+        assert repr(notebook) == "NotebookView(cells=4, failed_cell=2)"
 
 
 class TestRaiseForFailure:
@@ -440,3 +459,88 @@ class TestTiming:
         timing = Timing.from_run(run_task)
         assert timing == Timing(timedelta(milliseconds=500), timedelta(seconds=1), timedelta(seconds=2.5), timedelta(0))
         assert timing.total == timedelta(seconds=4)
+
+
+class TestNotebookExport:
+    """parse_notebook_export reads the cells, printed text and failing cell of an exported notebook."""
+
+    def test_parse_notebook_export_cells_and_stdout(self) -> None:
+        # Recorded from the example bundle's transform task run with param1="forbidden".
+        notebook = parse_notebook_export(FAILED_EXPORT)
+        assert notebook.html == FAILED_EXPORT
+        assert [cell.index for cell in notebook.cells] == [0, 1, 2, 3]
+        assert notebook.cells[0].code.startswith("import time\n")
+        assert notebook.cells[1].code.startswith("# The printed lines reach the test")
+        printed = "transform: checking forbidden against /Volumes/example/raw/landing\ntransform: 7 rows expected\n"
+        assert notebook.cells[1].output == printed
+        assert [cell.output for cell in notebook.cells] == ["", printed, "", ""]
+        assert notebook.stdout == printed
+
+    def test_failed_cell_names_the_exception(self) -> None:
+        notebook = parse_notebook_export(FAILED_EXPORT)
+        failed = notebook.failed_cell
+        assert failed is notebook.cells[2]
+        assert failed.code.startswith('dbutils.jobs.taskValues.set(key="stage", value="validation")')
+        assert failed.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
+        # The platform marks the cell after the failure as an error with the summary "Command skipped".
+        assert notebook.cells[3].error is None
+        assert [cell.error is None for cell in notebook.cells] == [True, True, False, True]
+
+    def test_parse_handles_list_results_and_missing_results(self) -> None:
+        commands = [
+            {
+                "position": 2.0,
+                "command": "display(df)",
+                "results": {
+                    "type": "listResults",
+                    "data": [
+                        {"type": "html", "data": "<b>bold</b> &amp; more"},
+                        {"type": "ansi", "name": "stdout", "data": "\x1b[31mred\x1b[39m <kept>\n"},
+                    ],
+                },
+            },
+            {"position": 1.0, "command": "print('rows')", "results": {"type": "html", "data": HTML_OUTPUT}},
+            {"position": 3.0, "command": "x = 1"},
+            {"position": 4.0, "command": "df.collect()", "results": {"type": "table", "data": [[1, "a"]]}},
+            {
+                "position": 5.0,
+                "command": "raise KeyError('k')\nprint('never')",
+                "results": {"type": "error", "data": '<span class="ansi-red-fg">KeyError</span>: &#39;k&#39;'},
+            },
+        ]
+        notebook = parse_notebook_export(notebook_export(commands))
+        assert [cell.code for cell in notebook.cells] == [
+            "print('rows')",
+            "display(df)",
+            "x = 1",
+            "df.collect()",
+            "raise KeyError('k')\nprint('never')",
+        ]
+        outputs = ["rows > 0\nsecond\n", "bold & more\nred <kept>\n", "", "", ""]
+        assert [cell.output for cell in notebook.cells] == outputs
+        assert notebook.cells[0].output_html == HTML_OUTPUT
+        assert notebook.stdout == "rows > 0\nsecond\nbold & more\nred <kept>\n"
+        assert notebook.failed_cell is notebook.cells[4]
+        assert notebook.failed_cell.error == "KeyError: 'k'"
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            pytest.param("<html><body>no model here</body></html>", id="missing"),
+            pytest.param("<script>var __DATABRICKS_NOTEBOOK_MODEL = '!!not base64';</script>", id="unreadable"),
+        ],
+    )
+    def test_parse_without_marker_warns_and_keeps_html(self, html: str) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            notebook = parse_notebook_export(html)
+        assert (notebook.cells, notebook.html, notebook.stdout, notebook.failed_cell) == ([], html, "", None)
+        assert len(caught) == 1
+        assert caught[0].category is UserWarning
+        assert "__DATABRICKS_NOTEBOOK_MODEL" in str(caught[0].message)
+
+    def test_save_writes_the_exported_html(self, tmp_path: Path) -> None:
+        notebook = NotebookView(html="<html>exported</html>")
+        saved = notebook.save(tmp_path / "build" / "lakeflow" / "transform.html")
+        assert saved == tmp_path / "build" / "lakeflow" / "transform.html"
+        assert saved.read_text() == "<html>exported</html>"

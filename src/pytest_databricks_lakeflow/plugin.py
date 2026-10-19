@@ -10,7 +10,7 @@ import pytest
 
 from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.client import Lakeflow
-from pytest_databricks_lakeflow.ephemeral import PROGRESS, REPORTS, cancel_run
+from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, cancel_run
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 from pytest_databricks_lakeflow.session import (
     SessionState,
@@ -109,6 +109,8 @@ def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, pytest.TestR
     item.stash.setdefault(REPORTS, {})[str(report.when)] = report
     lines = [f"{name}: {value}" for name, value in item.user_properties if name.startswith("lakeflow_")]
     lines.extend(item.stash.get(PROGRESS, []))
+    if report.failed:
+        lines.extend(item.stash.get(NOTEBOOKS, []))
     if lines:
         report.sections.append(("lakeflow", "\n".join(lines)))
     return report
