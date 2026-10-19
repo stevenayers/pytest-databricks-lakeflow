@@ -14,6 +14,7 @@ from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
 from pytest_databricks_lakeflow.results import (
     JobRun,
     NotebookView,
+    SqlResult,
     TaskError,
     TaskRun,
     TaskValues,
@@ -60,6 +61,35 @@ File <command-1>, line 5
 
 ValueError: outer
 """
+
+
+# The `file_output` of the `sql` bundle's `types` task, as the workspace returned it: a NULL value is `{}`.
+TYPES_FILE_OUTPUT = {
+    "query_result": {
+        "columns": [
+            {"name": "n", "type": "int"},
+            {"name": "m", "type": "null"},
+            {"name": "d", "type": "decimal"},
+            {"name": "day", "type": "date"},
+            {"name": "b", "type": "boolean"},
+        ],
+        "rows": [
+            {
+                "values": [
+                    {"string_value": "1"},
+                    {},
+                    {"string_value": "1.5"},
+                    {"string_value": "2026-01-01"},
+                    {"string_value": "true"},
+                ]
+            }
+        ],
+        "truncated": False,
+    },
+    "query_text": "SELECT 1 AS n, NULL AS m, 1.5 AS d, DATE '2026-01-01' AS day, true AS b\n",
+    "sql_statements": [{"lookup_key": "CiQwMWYx"}],
+    "warehouse_id": "w1",
+}
 
 
 HTML_OUTPUT = '<div class="ansiout">rows &gt; 0\nsecond\n</div>'
@@ -266,6 +296,7 @@ class TestTaskRunStates:
         outputs = (t.sql_output, t.alert_output, t.dbt_output, t.run_job_output, t.dashboard_output)
         assert outputs == (None,) * 5
         assert t.clean_rooms_notebook_output is None
+        assert t.sql_result is None
 
 
 class TestTaskValues:
@@ -302,6 +333,39 @@ class TestOutputJson:
     def test_output_json_when_truncated(self) -> None:
         with pytest.raises(ValueError, match="Output of task 't' was cut at 5 MB"):
             _ = task("t", output='{"a": 1}', output_truncated=True).output_json
+
+
+class TestSqlResult:
+    """SqlResult reads the query result of a SQL file task from the raw runs/get-output response."""
+
+    def test_from_output_maps_missing_string_values_to_none(self) -> None:
+        result = SqlResult.from_output("types", {"sql_output": {"file_output": TYPES_FILE_OUTPUT}})
+        assert result is not None
+        assert result.columns == ["n", "m", "d", "day", "b"]
+        assert result.types == ["int", "null", "decimal", "date", "boolean"]
+        assert result.rows == [{"n": "1", "m": None, "d": "1.5", "day": "2026-01-01", "b": "true"}]
+        assert result.first_row["m"] is None
+        assert result.warehouse_id == "w1"
+        assert result.query_text == TYPES_FILE_OUTPUT["query_text"]
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            pytest.param({}, id="no-sql-output"),
+            pytest.param({"sql_output": {"query_output": {}}}, id="saved-query"),
+            pytest.param({"sql_output": {"file_output": {"warehouse_id": "w1"}}}, id="no-query-result"),
+        ],
+    )
+    def test_from_output_is_none_without_a_query_result(self, output: dict[str, Any]) -> None:
+        assert SqlResult.from_output("query", output) is None
+
+    def test_first_row_raises_when_there_are_no_rows(self) -> None:
+        empty = {"query_result": {"columns": [{"name": "n", "type": "int"}], "rows": [], "truncated": False}}
+        result = SqlResult.from_output("query", {"sql_output": {"file_output": empty}})
+        assert result is not None
+        assert result.rows == []
+        with pytest.raises(LakeflowError, match="Task 'query' returned no rows"):
+            _ = result.first_row
 
 
 class TestJobRun:

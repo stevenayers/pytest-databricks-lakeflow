@@ -3,9 +3,29 @@ resources:
     sql_job:
       name: sql_job
       description: SQL task job for the pytest-databricks-lakeflow integration tests.
+      parameters:
+        - name: n
+          default: "3"
       tasks:
         - task_key: query
           sql_task:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ../src/queries/count.sql
+        - task_key: types
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/queries/types.sql
+        - task_key: wide
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/queries/wide.sql
+        - task_key: parameterised
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            parameters:
+              n: "{{job.parameters.n}}"
+            file:
+              path: ../src/queries/parameterised.sql
