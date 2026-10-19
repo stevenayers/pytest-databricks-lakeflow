@@ -440,6 +440,32 @@ class FakeWorkspaceClient:
         self.profiles: list[str | None] = []
 
 
+# What `WorkspaceClient(profile=...)` raises on a databricks-cli profile when another process refreshes the CLI's
+# token at the same moment, recorded from eight concurrent clients (#140); the real text goes on with the Config.
+TOKEN_RACE = (
+    "default auth: databricks-cli: cannot get access token: Error: forced token refresh: cache update: exit status 45. "
+    "Try logging in again with `databricks auth login --profile dev` before retrying."
+)
+
+
+class ContendedTokenCache:
+    """Stands in for `WorkspaceClient` while other xdist workers refresh the same databricks-cli token.
+
+    The first `collisions` clients fail as the real SDK does; later ones return `client`.
+    """
+
+    def __init__(self, collisions: int, client: object = "client") -> None:
+        self.collisions = collisions
+        self.client = client
+        self.profiles: list[str | None] = []
+
+    def __call__(self, profile: str | None = None) -> object:
+        self.profiles.append(profile)
+        if len(self.profiles) <= self.collisions:
+            raise ValueError(TOKEN_RACE)
+        return self.client
+
+
 class NotebookExit(Exception):
     """Raised by `FakeDbutils.notebook.exit`, which ends a notebook like the real one does."""
 
