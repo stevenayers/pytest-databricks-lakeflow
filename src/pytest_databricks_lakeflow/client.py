@@ -309,7 +309,7 @@ class Lakeflow:
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         upstream = dict(upstream_task_values or {})
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
-        capture = {}
+        capture: dict[str, list[str]] = {}
         if capture_task_values:
             capture = {task_key: list(capture_task_values)}
         return self._ephemeral(
