@@ -33,11 +33,13 @@ def directory_name(nodeid: str) -> str:
 def write(report_dir: Path, item: pytest.Item) -> None:
     """Write `report.json` and the side files of the runs `item` waited for, if it waited for any.
 
-    An `OSError` is logged as a warning, so the report never fails the test.
+    The runs are then dropped from the item, which pytest keeps until the session ends. An `OSError` is logged as a
+    warning, so the report never fails the test.
     """
     runs = item.stash.get(RUNS, [])
     if not runs:
         return
+    del item.stash[RUNS]
     directory = report_dir / directory_name(item.nodeid)
     entries: list[dict[str, Any]] = []
     files: dict[str, str] = {}
@@ -63,4 +65,6 @@ def _write_files(directory: Path, report: dict[str, Any], files: dict[str, str])
     for name, content in files.items():
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        # errors="replace", because a log can hold a lone surrogate that UTF-8 cannot encode, and an error raised
+        # from this hook ends the session with INTERNALERROR.
+        path.write_text(content, encoding="utf-8", errors="replace")

@@ -35,6 +35,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_test_marker,
     merge_environments,
     override_tasks,
+    require_task,
     run_job_tasks,
     sanitise,
     upstream_values_from,
@@ -420,6 +421,8 @@ class Lakeflow:
         if not job_key or not task_key:
             raise LakeflowError(f"Expected 'job_key.task_key', got {ref!r}")
         settings = self.template(job_key)
+        # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
+        require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
         check_task_params(job_key, settings, task_params or {}, params or {})
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])

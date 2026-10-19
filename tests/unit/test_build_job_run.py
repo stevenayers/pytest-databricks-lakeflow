@@ -682,15 +682,17 @@ class TestSqlResults:
 
     def test_raw_output_is_fetched_only_for_sql_file_tasks(self) -> None:
         ws = FakeWorkspaceClient()
-        states = {"extract": "SUCCESS", "query": "FAILED", "later": "UPSTREAM_FAILED"}
-        sql_files = {"query": QUERY_FILE, "later": QUERY_FILE}
+        states = {"extract": "SUCCESS", "query": "SUCCESS", "broken": "FAILED", "later": "UPSTREAM_FAILED"}
+        sql_files = {"query": QUERY_FILE, "broken": QUERY_FILE, "later": QUERY_FILE}
         raw = make_run(1, states, "FAILED", notebooks={"extract"}, sql_files=sql_files)
         ws.jobs.raw_outputs[run_id_of(raw, "query")] = SQL_FILE_OUTPUT
+        ws.jobs.raw_outputs[run_id_of(raw, "broken")] = {"error": "[PARSE_SYNTAX_ERROR] Syntax error at 'SELEC'"}
         run = build_from(ws, raw)
-        assert [call["query"] for call in ws.api_client.calls] == [{"run_id": run_id_of(raw, "query")}]
+        fetched = sorted(call["query"]["run_id"] for call in ws.api_client.calls)
+        assert fetched == sorted([run_id_of(raw, "query"), run_id_of(raw, "broken")])
         assert run.task("query").sql_result is not None
-        assert run.task("extract").sql_result is None
-        assert run.task("later").sql_result is None
+        for key in ("extract", "broken", "later"):
+            assert run.task(key).sql_result is None, key
 
     def test_sql_result_survives_an_unreadable_task_run(self, caplog: pytest.LogCaptureFixture) -> None:
         ws = FakeWorkspaceClient()

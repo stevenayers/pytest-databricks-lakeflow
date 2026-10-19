@@ -1494,6 +1494,7 @@ def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[s
     if resolved.notebook_task is not None:
         return resolved.notebook_task.base_parameters
     if resolved.sql_task is not None:
+        # The platform adds every job parameter here on each SQL file task, also on one that declares no parameters.
         return resolved.sql_task.parameters
     if resolved.python_wheel_task is not None:
         wheel = resolved.python_wheel_task

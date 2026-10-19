@@ -261,7 +261,7 @@ class SessionState:
             report = sweep(ws, self.run_id, sweep_hours, folder, self.sweep_options, user=state.get("user"))
             return report.as_dict()
 
-        report = shared_state(path, produce)
+        report = shared_state(path, produce, "sweep")
         if swept_here and report["dry_run"]:
             self.sweep_dry_run = _dry_run_lines(report, ws.config.host)
 
@@ -418,21 +418,24 @@ def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
     return bundle.require_root((rootpath / bundle_root).resolve())
 
 
-def shared_state(path: Path | None, produce: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+def shared_state(
+    path: Path | None, produce: Callable[[], dict[str, Any]], what: str = "session setup"
+) -> dict[str, Any]:
     """Call `produce` once, even under xdist.
 
-    The first worker to take the lock produces the state and writes it to `path`, and the others read it. A setup
-    error is shared the same way.
+    The first worker to take the lock produces the state and writes it to `path`, and the others read it. An error
+    from `produce` is shared the same way.
 
     Args:
         path: A file in a directory shared by the session's xdist workers, or `None` without xdist.
         produce: Builds the state. It must be JSON-serialisable.
+        what: What `produce` does, for the error the other workers raise.
 
     Returns:
         The state.
 
     Raises:
-        LakeflowError: If setup failed in another worker.
+        LakeflowError: If `produce` failed in another worker.
     """
     if path is None:
         return produce()
@@ -447,7 +450,7 @@ def shared_state(path: Path | None, produce: Callable[[], dict[str, Any]]) -> di
                 raise
             path.write_text(json.dumps(state))
     if "error" in state:
-        raise LakeflowError(f"Lakeflow session setup failed in another xdist worker: {state['error']}")
+        raise LakeflowError(f"Lakeflow {what} failed in another xdist worker: {state['error']}")
     return state
 
 

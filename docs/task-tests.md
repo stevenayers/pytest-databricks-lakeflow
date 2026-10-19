@@ -134,7 +134,7 @@ The stub is in `run.injected_tasks`, not `run.tasks`, so `executed_tasks` lists 
 
 Stubs, probes and the setup and teardown tasks are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`, and overwritten on each upload.
 
-By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its environment version. The default version is `"4"`.
+By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its environment version. The default version is `"4"`. It applies to every job of that `Lakeflow`, and `environments=` cannot change `__pytest_serverless`. For one job whose setup function needs a newer runtime, derive a `Lakeflow` with another version, which shares the session's deploy: `dataclasses.replace(lakeflow, helpers_environment_version="5").task("my_example_job.load", setup=seed_orders)`.
 
 A job holds at most 10 environments. When the template already has 10 and none of them is `__pytest_serverless`, the plugin raises `LakeflowError` before creating the job, listing the template's environment keys: one must go from the bundle job to make room for the helper environment, or pass `helpers_compute` to run the helper tasks on a job cluster.
 
