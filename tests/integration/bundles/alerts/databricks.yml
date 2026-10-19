@@ -1,0 +1,20 @@
+bundle:
+  name: lakeflow_alerts
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    description: The id of the SQL warehouse that evaluates the alerts. Passed by the tests from LAKEFLOW_WAREHOUSE_ID.
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest

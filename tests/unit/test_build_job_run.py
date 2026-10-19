@@ -156,6 +156,16 @@ class TestRecordedRuns:
         assert all(line.strip() for line in run.task("same_a").log_lines)
         assert run.task("extract").logs == ""
 
+    def test_alert_task_states(self) -> None:
+        # Recorded from the alerts bundle: the platform reports an alert task's state in runs/get-output
+        # `alert_output.alert_state`, which databricks-sdk models, and marks the task SUCCESS whether or not it fired.
+        run, _ = build("alert_states")
+        assert run.succeeded
+        fires, quiet = run.task("fires"), run.task("quiet")
+        assert (fires.succeeded, fires.alert_state) == (True, "TRIGGERED")
+        assert (quiet.succeeded, quiet.alert_state) == (True, "OK")
+        assert fires.alert_output == jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.TRIGGERED)
+
 
 class TestTaskValues:
     """Probe outputs become task values, with a reason for every value that is missing."""
@@ -618,6 +628,10 @@ class TestTaskOutputs:
                 jobs.RunOutput(alert_output=jobs.AlertTaskOutput(alert_state=jobs.AlertEvaluationState.TRIGGERED)),
                 "TRIGGERED",
                 id="alert-task",
+            ),
+            # What the alerts bundle's `broken` task returned: its query raised, and the task ended FAILED.
+            pytest.param(
+                jobs.RunOutput.from_dict({"alert_output": {"alert_state": "ERROR"}}), "ERROR", id="alert-task-error"
             ),
             pytest.param(
                 jobs.RunOutput(

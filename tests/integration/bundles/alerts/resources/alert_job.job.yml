@@ -1,0 +1,18 @@
+resources:
+  jobs:
+    alert_job:
+      name: alert_job
+      description: Alert task job for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: fires
+          alert_task:
+            alert_id: ${resources.alerts.fires.id}
+            warehouse_id: ${var.warehouse_id}
+        - task_key: quiet
+          alert_task:
+            alert_id: ${resources.alerts.quiet.id}
+            warehouse_id: ${var.warehouse_id}
+        - task_key: broken
+          alert_task:
+            alert_id: ${resources.alerts.broken.id}
+            warehouse_id: ${var.warehouse_id}

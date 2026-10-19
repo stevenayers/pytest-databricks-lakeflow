@@ -778,12 +778,15 @@ class TaskRun:
 
     @property
     def alert_state(self) -> str | None:
-        """The state an alert evaluated to, such as `TRIGGERED`, `OK` or `UNKNOWN`.
+        """The state an alert evaluated to: `TRIGGERED`, `OK`, `ERROR` or `UNKNOWN`.
 
         Read from `alert_output` for an alert task, else from `sql_output.alert_output` for a legacy SQL alert task.
         `None` for any other task or when the platform reported no state. An alert task succeeds whether or not the
-        alert triggered, so assert on this rather than on `succeeded`.
+        alert triggered, so assert on this rather than on `succeeded`. `ERROR` means the alert could not be
+        evaluated, for example because its query failed; the task then fails too.
         """
+        # Observed on an alert task run: runs/get-output carries `alert_output.alert_state`, which databricks-sdk
+        # models, with `TRIGGERED`, `OK`, or `ERROR` when the alert's query failed.
         if self.alert_output is not None and self.alert_output.alert_state is not None:
             return _enum(self.alert_output.alert_state)
         if self.sql_output is not None and self.sql_output.alert_output is not None:

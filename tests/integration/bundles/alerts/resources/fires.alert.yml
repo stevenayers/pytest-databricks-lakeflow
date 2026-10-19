@@ -1,0 +1,19 @@
+# Evaluates a query whose result never changes, so this alert always triggers. It has no notification subscriptions
+# and its schedule is paused, so it evaluates only when an alert task runs it.
+resources:
+  alerts:
+    fires:
+      display_name: pytest alert fires
+      query_text: SELECT 1 AS n
+      warehouse_id: ${var.warehouse_id}
+      evaluation:
+        source:
+          name: n
+        comparison_operator: GREATER_THAN
+        threshold:
+          value:
+            double_value: 0
+      schedule:
+        quartz_cron_schedule: "0 0 0 1 1 ?"
+        timezone_id: UTC
+        pause_status: PAUSED
