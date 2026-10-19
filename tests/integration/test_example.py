@@ -295,6 +295,21 @@ def test_per_job_environment_version(lakeflow: Lakeflow) -> None:
         assert spec.dependencies and spec.dependencies[0].endswith(".whl"), "the bundle's wheel is kept"
 
 
+def test_task_params_override_one_task(lakeflow: Lakeflow) -> None:
+    task_params = {"my_wheel_task": ["from-task-params"], "extract": {"limit": "10", "param2": "from-task-params"}}
+    with pytest.warns(UserWarning, match="sets 'param2', also a job parameter of 'my_example_job'. The job value wins"):
+        job = lakeflow.job("my_example_job", task_params=task_params)
+    with job:
+        run = job.run(only=["extract", "my_wheel_task"])
+        assert run.succeeded, run
+        assert run.task("my_wheel_task").parameters == ["from-task-params"]
+        assert "Success! from-task-params" in run.task("my_wheel_task").logs
+        extract = run.task("extract").parameters
+        assert isinstance(extract, dict)
+        assert extract["limit"] == "10"
+        assert extract["param2"] == "world", "the job parameter wins over the task parameter of the same name"
+
+
 def seed_orders(spark, dbutils, params):
     schema = params["schema"]
     spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")

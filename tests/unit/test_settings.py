@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import timedelta
@@ -14,12 +15,15 @@ from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
     Helpers,
     add_dependencies,
+    apply_task_params,
     check_compute,
     check_params,
+    check_task_params,
     create_kwargs,
     disable_tasks,
     force_conditions,
     inject_lifecycle,
+    inject_probes,
     inject_test_marker,
     merge_environments,
     pipeline_params,
@@ -574,6 +578,133 @@ class TestCreateChecks:
         assert kwargs["name"] == settings.name
         assert kwargs["tasks"] == settings.tasks
         assert set(kwargs) <= set(jobs.JobSettings.__dataclass_fields__)
+
+
+class TestTaskParams:
+    """apply_task_params edits one task's parameters in the shape its type takes, and check_task_params warns."""
+
+    def test_apply_task_params_merges_notebook_base_parameters(self) -> None:
+        overrides = {"transform": {"limit": "10", "day": "{{job.parameters.param1}}"}}
+        settings = apply_task_params("my_job", example_settings(), overrides)
+        notebook = task(settings, "transform").notebook_task
+        assert notebook is not None
+        assert notebook.base_parameters == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "limit": "10",
+            "day": "{{job.parameters.param1}}",
+        }
+        assert task(settings, "extract") == task(example_settings(), "extract")
+
+    def test_apply_task_params_wheel_named_or_positional(self) -> None:
+        settings = example_settings()
+        wheel = task(settings, "load").python_wheel_task
+        assert wheel is not None
+        wheel.named_parameters = {"day": "1"}
+        apply_task_params("my_job", settings, {"load": ["--rows", "10"]})
+        assert (wheel.parameters, wheel.named_parameters) == (["--rows", "10"], None)
+        apply_task_params("my_job", settings, {"load": {"rows": "10"}})
+        assert (wheel.parameters, wheel.named_parameters) == (None, {"rows": "10"})
+        apply_task_params("my_job", settings, {"load": {"day": "2"}})
+        assert wheel.named_parameters == {"rows": "10", "day": "2"}
+
+    @pytest.mark.parametrize(
+        ("code", "value", "expected"),
+        [
+            (
+                {"sql_task": {"warehouse_id": "w", "file": {"path": "/q.sql"}, "parameters": {"n": "1", "m": "2"}}},
+                {"n": "3"},
+                {"sql_task": {"warehouse_id": "w", "file": {"path": "/q.sql"}, "parameters": {"n": "3", "m": "2"}}},
+            ),
+            (
+                {"spark_python_task": {"python_file": "/x.py", "parameters": ["--all"]}},
+                ["--rows", "10"],
+                {"spark_python_task": {"python_file": "/x.py", "parameters": ["--rows", "10"]}},
+            ),
+            (
+                {"spark_jar_task": {"main_class_name": "x", "parameters": ["--all"]}},
+                ["--rows", "10"],
+                {"spark_jar_task": {"main_class_name": "x", "parameters": ["--rows", "10"]}},
+            ),
+            (
+                {"dbt_task": {"commands": ["dbt deps", "dbt build"]}},
+                ["dbt build --select orders"],
+                {"dbt_task": {"commands": ["dbt build --select orders"]}},
+            ),
+        ],
+        ids=["sql-merged", "spark-python-replaced", "jar-replaced", "dbt-replaced"],
+    )
+    def test_apply_task_params_merges_mappings_and_replaces_lists(
+        self, code: dict[str, Any], value: Any, expected: dict[str, Any]
+    ) -> None:
+        settings = apply_task_params("my_job", with_tasks({"task_key": "code", **code}), {"code": value})
+        assert task(settings, "code") == jobs.Task.from_dict({"task_key": "code", **expected})
+
+    @pytest.mark.parametrize(
+        ("code", "value", "match"),
+        [
+            (
+                None,
+                ["--rows", "10"],
+                r"task_params\['extract'\] must be a mapping of names to strings, merged into "
+                r"notebook_task.base_parameters, for task 'extract'; got \['--rows', '10'\]",
+            ),
+            (None, {"limit": 10, 1: "x"}, r"must be a mapping of names to strings.*got \{'limit': 10, 1: 'x'\}"),
+            (
+                {"spark_python_task": {"python_file": "/x.py"}},
+                {"rows": "10"},
+                r"must be a list of strings, which replaces spark_python_task.parameters, for task 'extract'",
+            ),
+            (
+                {"python_wheel_task": {"package_name": "pkg", "entry_point": "main"}},
+                "--rows 10",
+                r"must be a mapping of names to strings, merged into python_wheel_task.named_parameters, or a list "
+                r"of strings, which replaces python_wheel_task.parameters, for task 'extract'; got '--rows 10'",
+            ),
+            (
+                {"condition_task": {"op": "EQUAL_TO", "left": "a", "right": "b"}},
+                {"limit": "10"},
+                r"task_params cannot set the parameters of task 'extract': it is not a notebook, Python script, JAR, "
+                r"Python wheel, SQL or dbt task",
+            ),
+        ],
+        ids=["list-for-notebook", "not-strings", "mapping-for-script", "string-for-wheel", "condition"],
+    )
+    def test_apply_task_params_rejects_wrong_shape(self, code: dict[str, Any] | None, value: Any, match: str) -> None:
+        settings = example_settings()
+        if code is not None:
+            others = [t for t in settings.tasks or [] if t.task_key != "extract"]
+            settings.tasks = [jobs.Task.from_dict({"task_key": "extract", **code}), *others]
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=match):
+            apply_task_params("my_job", settings, {"transform": {"limit": "10"}, "extract": value})
+        assert settings == before
+
+    def test_apply_task_params_rejects_unknown_and_reserved_keys(self) -> None:
+        settings = inject_probes(example_settings(), {"transform": ["k"]}, HELPERS)
+        available = r"Available: \['classic', 'extract', 'load', 'transform'\]"
+        with pytest.raises(LakeflowError, match=rf"Unknown task 'nope' in task_params of job 'my_job'. {available}$"):
+            apply_task_params("my_job", settings, {"nope": {"limit": "10"}})
+        with pytest.raises(LakeflowError, match=rf"Unknown task '__pytest_probe__transform' .*{available}$"):
+            apply_task_params("my_job", settings, {"__pytest_probe__transform": {"limit": "10"}})
+        with pytest.raises(LakeflowError, match=r"Unknown task 'extract' in task_params .*Available: \['load'\]$"):
+            apply_task_params("my_job", example_settings(), {"extract": {"limit": "10"}}, allowed=["load"])
+
+    def test_check_task_params_warns_on_job_parameter_collision(self, recwarn: pytest.WarningsRecorder) -> None:
+        settings = example_settings()
+        with pytest.warns(UserWarning, match="job value wins") as record:
+            check_task_params("my_job", settings, {"transform": {"param1": "x", "limit": "10"}}, {})
+        assert [str(w.message) for w in record] == [
+            "task_params for 'transform' sets 'param1', also a job parameter of 'my_job'. The job value wins."
+        ]
+        with pytest.warns(UserWarning, match="sets 'day', also a job parameter"):
+            check_task_params("my_job", settings, {"transform": {"day": "1"}, "load": ["day"]}, {"day": "2"})
+        recwarn.clear()
+        not_strings: Any = {1: "x"}
+        quiet = {"transform": {"limit": "10"}, "load": ["param1"], "extract": not_strings}
+        check_task_params("my_job", settings, quiet, {"day": "2"})
+        assert not recwarn.list
+        with pytest.raises(LakeflowError, match=r"reserved for the plugin: \['__pytest_values'\]"):
+            check_task_params("my_job", settings, {"transform": {"__pytest_values": "{}"}}, {})
 
 
 class TestSelect:

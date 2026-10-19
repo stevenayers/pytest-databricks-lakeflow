@@ -23,6 +23,18 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
     ```
 
     Other task types can use the dynamic value reference `{{job.parameters.__pytest_test_id}}`.
+- `task_params` overrides the parameters of single tasks in the copy, by task key, while the job parameters and the other tasks stay as deployed:
+
+    ```python
+    with lakeflow.job(
+        "my_example_job",
+        task_params={"transform": {"limit": "10"}, "my_wheel_task": ["goodbye"]},
+    ) as job:
+        run = job.run()
+        assert run.task("transform").parameters["limit"] == "10"
+    ```
+
+    The value takes the shape of the task type. A mapping of names to strings is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or a SQL task's `parameters`, so the template's other parameters, such as `{{tasks.extract.values.row_count}}`, survive. A list of strings replaces a Python script, JAR or Python wheel task's `parameters` or a dbt task's `commands`, since a list has no names to merge on. A Python wheel task takes one or the other, so a mapping clears its `parameters` and a list clears its `named_parameters`. Values are passed as they are, so dynamic value references such as `{{job.parameters.param1}}` work. A job parameter is pushed to every task with named parameters and wins over a task parameter of the same name, so a name in a mapping that is also a job parameter, declared by the job or passed in `params`, emits a `UserWarning` saying the job value wins. `LakeflowError` is raised before the job is created for a key that is not a task of the job, a task that is not a notebook, Python script, JAR, Python wheel, SQL or dbt task (a `for_each_task` included: change its nested task with [`modify_settings`](#change-the-settings-before-the-job-is-created)), a value that does not fit the task type, such as a list for a notebook task, and a parameter name starting with `__pytest_`. [`TaskRun.parameters`](#assert-on-the-result) shows what the task received.
 - `capture_task_values` maps task keys to the task value keys to capture from them, see [below](#capture-task-values).
 - `name` replaces the test node id in the job name, which is otherwise `[pytest] <node id>`.
 - `run_as` chooses who the copy runs as, see [below](#run-as-another-identity).

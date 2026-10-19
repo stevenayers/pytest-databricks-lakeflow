@@ -28,7 +28,9 @@ from pytest_databricks_lakeflow.settings import (
     RunAs,
     SideEffects,
     add_dependencies,
+    apply_task_params,
     check_params,
+    check_task_params,
     disable_tasks,
     inject_lifecycle,
     inject_probes,
@@ -247,6 +249,7 @@ class Lakeflow:
         run_as: RunAs = None,
         disable: Sequence[str] | None = None,
         *,
+        task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         force_conditions: Mapping[str, bool] | None = None,
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
@@ -274,6 +277,12 @@ class Lakeflow:
                 the template's. A string with `@` names a user, any other string names a service principal by its
                 application id, and a `jobs.JobRunAs` is used as given.
             disable: Task keys to disable in the copy. Runs skip them, and they appear in `JobRun.disabled_tasks`.
+            task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
+                mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
+                a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list
+                replaces a Python script, JAR or Python wheel task's `parameters` or a dbt task's `commands`. A Python
+                wheel task takes one or the other, so the one not given is cleared. Values are passed unchanged. A name
+                that is also a job parameter emits a `UserWarning`, because the job value wins.
             force_conditions: The outcome each if/else condition task takes in every run of the copy, by task key:
                 `True` runs the `true` branch, `False` the `false` branch. The task's operands are replaced by
                 constants, so the branch no longer depends on the data upstream of it. The upstream tasks still run.
@@ -309,6 +318,9 @@ class Lakeflow:
                 `base_environment` on one environment, or brings the job past 10 environments, or `setup` or
                 `teardown` is not a plain function with its source in a file, uses variables of an enclosing
                 function, takes a parameter other than `spark`, `dbutils` and `params`, or has a decorator.
+                Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
+                Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
+                name starting with `__pytest_`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -316,6 +328,8 @@ class Lakeflow:
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
+        check_task_params(key, settings, task_params or {}, params or {})
+        apply_task_params(key, settings, task_params or {})
         disable_tasks(settings, disable or [])
         force_condition_outcomes(settings, force_conditions or {})
         add_dependencies(settings, extra_dependencies or [])
@@ -343,6 +357,7 @@ class Lakeflow:
         capture_task_values: Sequence[str] | None = None,
         run_as: RunAs = None,
         *,
+        task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         upstream_from: JobRun | None = None,
         children: Children = "warn",
         setup: Callable[..., object] | None = None,
@@ -366,6 +381,7 @@ class Lakeflow:
                 `upstream_from` holds for that task.
             capture_task_values: The task value keys to capture from the task.
             run_as: Who the job runs as, as for `job()`.
+            task_params: Parameters for the task, as for `job()`. Only the task under test can be named.
             upstream_from: A run of the same job whose captured task values stub the task's upstream tasks.
             children: What to do when the task is a Run Job task, as for `job()`.
             setup: Runs first, before the stubs, as for `job()`.
@@ -381,8 +397,9 @@ class Lakeflow:
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
                 task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
                 upstream task, a value is too large or not JSON-serialisable, an entry of `extra_dependencies` is a
-                local path, or `children` is `"refuse"` and the task is a Run Job task. Also in the cases where
-                `job()` raises it because `environments` cannot be applied or `setup` or `teardown` cannot run.
+                local path, `children` is `"refuse"` and the task is a Run Job task, or `task_params` names another
+                task. Also in the cases where `job()` raises it because `task_params` or `environments` cannot be
+                applied or `setup` or `teardown` cannot run.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -393,6 +410,8 @@ class Lakeflow:
             raise LakeflowError(f"Expected 'job_key.task_key', got {ref!r}")
         settings = self.template(job_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
+        check_task_params(job_key, settings, task_params or {}, params or {})
+        apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
         add_dependencies(settings, extra_dependencies or [])
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object]] = {}
