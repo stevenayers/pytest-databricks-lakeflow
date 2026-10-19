@@ -282,6 +282,19 @@ def test_environment_version_override(lakeflow_on_version_4: Lakeflow) -> None:
         assert spec.environment_version == "4"
 
 
+def test_per_job_environment_version(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", environments={"default": {"environment_version": "5"}}) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert job.job_id is not None
+        settings = lakeflow.ws.jobs.get(job.job_id).settings
+        environments = (settings.environments if settings else None) or []
+        spec = environments[0].spec
+        assert spec is not None
+        assert spec.environment_version == "5"
+        assert spec.dependencies and spec.dependencies[0].endswith(".whl"), "the bundle's wheel is kept"
+
+
 def seed_orders(spark, dbutils, params):
     schema = params["schema"]
     spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")

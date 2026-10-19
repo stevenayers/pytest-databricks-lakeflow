@@ -33,6 +33,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
+    merge_environments,
     run_job_tasks,
     sanitise,
     upstream_values_from,
@@ -248,6 +249,7 @@ class Lakeflow:
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
         extra_dependencies: Sequence[str] | None = None,
+        environments: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -283,6 +285,10 @@ class Lakeflow:
             extra_dependencies: Test-only dependencies for the copy, as PyPI requirements or workspace or Volumes
                 paths of wheels. They are appended to every environment and, as `pypi` or `whl` libraries, to every
                 notebook, Python script and Python wheel task on a cluster. The helper tasks do not get them.
+            environments: Fields of the copy's serverless environment specs, by `environment_key`, such as
+                `{"default": {"environment_version": "5"}}`. A field replaces the template's field, after
+                `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
+                A key the job does not have adds an environment, which a task can use through `modify_settings`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -293,9 +299,11 @@ class Lakeflow:
                 the job, `force_conditions` names a task that is not a condition task, is disabled, or has an outcome
                 that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path,
                 `children` is `"refuse"` and the copy has a Run Job task that is not disabled nor inside a disabled
-                `for_each_task`, or `setup` or `teardown` is not a plain function with its source in a file, uses
-                variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params`, or
-                has a decorator.
+                `for_each_task`, `environments` names a key starting with `__pytest_` or a field that a serverless
+                environment does not take, sets both `environment_version` and `base_environment` on one environment,
+                or brings the job past 10 environments, or `setup` or `teardown` is not a plain function with its
+                source in a file, uses variables of an enclosing function, takes a parameter other than `spark`,
+                `dbutils` and `params`, or has a decorator.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -319,6 +327,7 @@ class Lakeflow:
             run_as=run_as,
             children=children,
             method="job",
+            environments=environments,
         )
 
     def task(
@@ -334,6 +343,7 @@ class Lakeflow:
         setup: Callable[..., object] | None = None,
         teardown: Callable[..., object] | None = None,
         extra_dependencies: Sequence[str] | None = None,
+        environments: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -356,6 +366,7 @@ class Lakeflow:
             setup: Runs first, before the stubs, as for `job()`.
             teardown: Runs last, after the task and its probe, as for `job()`.
             extra_dependencies: Test-only dependencies for the job, as for `job()`.
+            environments: Fields of the job's serverless environment specs, by `environment_key`, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -365,8 +376,8 @@ class Lakeflow:
             LakeflowError: If called outside a test, the job has no such task, the task refers to task values of a
                 task that is not stubbed, `upstream_from` is a run of another job or lacks the captured values of an
                 upstream task, a value is too large or not JSON-serialisable, an entry of
-                `extra_dependencies` is a local path, `children` is `"refuse"` and the task is a Run Job task, or
-                `setup` or `teardown` cannot run, as for `job()`.
+                `extra_dependencies` is a local path, `environments` cannot apply, as for `job()`, `children` is
+                `"refuse"` and the task is a Run Job task, or `setup` or `teardown` cannot run, as for `job()`.
             ValueError: If `children` is not `"warn"` or `"refuse"`.
         """
         _check_children(children)
@@ -399,6 +410,7 @@ class Lakeflow:
             run_as=run_as,
             children=children,
             method="task",
+            environments=environments,
         )
 
     @contextmanager
@@ -508,6 +520,7 @@ class Lakeflow:
         run_as: RunAs,
         children: Children,
         method: str,
+        environments: Mapping[str, Mapping[str, Any]] | None,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -540,6 +553,7 @@ class Lakeflow:
             existing_cluster_id=self.existing_cluster_id,
             single_node=self.single_node,
         )
+        merge_environments(settings, environments or {})
         if self.test_marker:
             inject_test_marker(settings, item.nodeid)
         job = EphemeralJob(self, key, settings, params, capture_task_values, stubs)
