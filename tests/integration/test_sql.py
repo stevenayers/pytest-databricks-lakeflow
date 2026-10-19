@@ -13,12 +13,13 @@ Run them with:
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 from collections.abc import Iterator
 
 import pytest
 
-from pytest_databricks_lakeflow import JobRun, Lakeflow
+from pytest_databricks_lakeflow import JobRun, Lakeflow, Stub
 
 from .conftest import lakeflow_for
 
@@ -38,7 +39,7 @@ def lakeflow() -> Lakeflow:
 @pytest.fixture(scope="module")
 def sql_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     with lakeflow.job("sql_job") as job:
-        yield job.run(only=["query", "types", "wide"])
+        yield job.run(only=["query", "types", "wide", "use_results"])
 
 
 @pytest.mark.xdist_group("sql_run")
@@ -104,3 +105,39 @@ def test_task_params_merge_into_sql_parameters(lakeflow: Lakeflow) -> None:
         assert parameterised.parameters == {"n": "3"}, "the job parameter wins over the task parameter of the same name"
         assert parameterised.sql_result is not None
         assert parameterised.sql_result.first_row == {"n": "3"}
+
+
+@pytest.mark.xdist_group("sql_run")
+def test_output_references_resolve_to_the_query_results(sql_run: JobRun) -> None:
+    assert sql_run.succeeded, sql_run
+    parameters = sql_run.task("use_results").parameters
+    assert isinstance(parameters, dict)
+    assert parameters["count"] == "1"
+    # Compact JSON with every value a string and NULL as "", unlike SqlResult, which gives None. Keys are not in
+    # column order.
+    row = json.loads(parameters["row"])
+    assert row == {"n": "1", "m": "", "d": "1.5", "day": "2026-01-01", "b": "true"}
+    assert parameters["row"] == json.dumps(row, separators=(",", ":"))
+    assert json.loads(parameters["rows"]) == [row]
+
+
+def test_stubbed_outputs_replace_the_references(lakeflow: Lakeflow) -> None:
+    rows = [{"n": "7", "m": "", "d": "2.5", "day": "2026-02-01", "b": "false"}]
+    upstream = {
+        "query": Stub(outputs={"first_row.n": "7"}),
+        "types": Stub(outputs={"first_row": rows[0], "rows": rows}),
+    }
+    with lakeflow.task("sql_job.use_results", upstream_task_values=upstream) as task:
+        run = task.run()
+        assert run.succeeded, run
+        assert sorted(run.injected_tasks) == ["query", "types"]
+        parameters = run.task("use_results").parameters
+        assert isinstance(parameters, dict)
+        assert parameters["count"] == "7"
+        assert parameters["row"] == '{"n":"7","m":"","d":"2.5","day":"2026-02-01","b":"false"}'
+        assert json.loads(parameters["rows"]) == rows
+        assert run.task("use_results").output_json == {
+            "count": "7",
+            "row": parameters["row"],
+            "rows": parameters["rows"],
+        }

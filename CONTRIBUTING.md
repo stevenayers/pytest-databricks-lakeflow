@@ -65,6 +65,7 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/queries/*.sql
+            src/notebooks/*.py   # a notebook task that reads the queries' output references
         branches/                # name: lakeflow_branches, an if/else condition job
         classic/                 # name: lakeflow_classic, one job on a classic job cluster (needs LAKEFLOW_CLASSIC=1)
             databricks.yml

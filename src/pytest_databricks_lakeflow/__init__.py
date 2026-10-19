@@ -17,6 +17,7 @@ from pytest_databricks_lakeflow.results import (
     TaskValues,
     Timing,
 )
+from pytest_databricks_lakeflow.settings import Stub
 
 __all__ = [
     "DebugNotebook",
@@ -32,6 +33,7 @@ __all__ = [
     "PipelineUpdate",
     "RunHandle",
     "SqlResult",
+    "Stub",
     "TaskError",
     "TaskRun",
     "TaskValues",
