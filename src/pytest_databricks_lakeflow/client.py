@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     Upstream,
     add_dependencies,
     apply_task_params,
+    check_input_size,
     check_lifecycle_params,
     check_params,
     check_task_params,
@@ -680,6 +681,12 @@ class Lakeflow:
             override_for_each_inputs(settings, {task_key: for_each_inputs})
         settings = inject_trigger(settings, trigger or {})
         self._inject_lifecycle(settings, notebooks, params or {})
+        if input is not None:
+            # Last, because jobs/create limits the job parameters as a whole. `_ephemeral` declares the test marker
+            # again, in the same place.
+            if self.test_marker:
+                inject_test_marker(settings, item.nodeid)
+            check_input_size(settings, task_key)
         capture: dict[str, list[str]] = {}
         if capture_task_values:
             capture = {task_key: list(capture_task_values)}

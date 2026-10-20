@@ -17,6 +17,7 @@ from pytest_databricks_lakeflow.settings import (
     Helpers,
     Stub,
     add_dependencies,
+    check_input_size,
     check_values,
     escape,
     inject_input,
@@ -628,12 +629,6 @@ class TestInjectInput:
             ),
             pytest.param(
                 {"item": "{{input}}"},
-                "x" * 9_956,
-                r"input for task 'each' makes the job parameters 10001 characters as JSON. jobs/create allows 10000.",
-                id="too-long",
-            ),
-            pytest.param(
-                {"item": "{{input}}"},
                 {"k": object()},
                 r"input for task 'each' is not JSON-serialisable: Object of type object",
                 id="not-serialisable",
@@ -653,12 +648,36 @@ class TestInjectInput:
             inject_input(settings, "each", value)
         assert settings == before
 
-    def test_the_job_parameters_fit_jobs_create(self) -> None:
-        inject_input(lifted_each(item="{{input}}"), "each", "x" * 9_955)
+    @pytest.mark.parametrize(
+        ("template", "length", "message"),
+        [
+            pytest.param([], 9_955, None, id="fits"),
+            pytest.param(
+                [],
+                9_956,
+                r"input for task 'each' makes the job parameters 10001 characters as JSON. jobs/create allows 10000.",
+                id="too-long",
+            ),
+            # A template parameter counts too, with its default JSON-escaped.
+            pytest.param(
+                [jobs.JobParameterDefinition(name="day", default='"')],
+                9_955,
+                "makes the job parameters 10035 characters as JSON",
+                id="with-template-parameter",
+            ),
+        ],
+    )
+    def test_the_job_parameters_fit_jobs_create(
+        self, template: list[jobs.JobParameterDefinition], length: int, message: str | None
+    ) -> None:
         settings = lifted_each(item="{{input}}")
-        settings.parameters = [jobs.JobParameterDefinition(name="day", default='"')]
-        with pytest.raises(LakeflowError, match="makes the job parameters 10035 characters as JSON"):
-            inject_input(settings, "each", "x" * 9_955)
+        settings.parameters = template
+        inject_input(settings, "each", "x" * length)
+        if message is None:
+            check_input_size(settings, "each")
+            return
+        with pytest.raises(LakeflowError, match=message):
+            check_input_size(settings, "each")
 
     def test_no_change_without_references_or_input(self) -> None:
         settings = lifted_each(other="x")
@@ -922,6 +941,47 @@ class TestEndToEnd:
             "rows": "{{tasks.extract.values.rows}}",
             "limit": "10",
         }
+
+    @pytest.mark.parametrize(
+        ("arguments", "kwargs", "size"),
+        [
+            # 59 more: a comma, 29 for the definition, the name __pytest_trigger_type and the default one_time.
+            pytest.param(
+                "",
+                'task_params={"each": {"t": "{{job.trigger.type}}"}}, trigger={"type": "one_time"}',
+                10_059,
+                id="trigger",
+            ),
+            # 101 more: a comma, 29 for the definition, the name __pytest_test_id and the 55-character node id.
+            pytest.param("test_marker=True", "", 10_101, id="test_marker"),
+        ],
+    )
+    def test_input_size_counts_every_job_parameter(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        arguments: str,
+        kwargs: str,
+        size: int,
+    ) -> None:
+        """The input alone fits the 10,000 characters; the parameters added after it do not."""
+        fake_cli.deployed["strings"] = fake_ws.jobs.add(for_each_settings())
+        configure_lakeflow(pytester, arguments)
+        pytester.makepyfile(
+            f"""
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                match = "input for task 'each' makes the job parameters {size} characters as JSON"
+                with pytest.raises(LakeflowError, match=match):
+                    lakeflow.task("strings.loop.each", input="x" * 9_955, {kwargs})
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
 
     def test_dbt_commands_on_a_task_job(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

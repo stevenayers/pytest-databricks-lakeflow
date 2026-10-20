@@ -3,7 +3,10 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -604,6 +607,29 @@ class TestRunCap:
         job._forget(77)
         assert slots.semaphore.acquire(blocking=False)
         assert not slots.semaphore.acquire(blocking=False)
+
+    def test_first_capped_starts_at_once_share_one_cap(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = session.SessionState(rootpath=tmp_path, run_id="r")
+        made: list[session.RunSlots] = []
+
+        class SlowRunSlots(session.RunSlots):
+            def __init__(self, cap: int) -> None:
+                # Slow enough that every thread reaches run_slots while the first is still making the cap.
+                time.sleep(0.05)
+                super().__init__(cap)
+                made.append(self)
+
+        monkeypatch.setattr(session, "RunSlots", SlowRunSlots)
+        barrier = threading.Barrier(4)
+
+        def first_start(_: int) -> session.RunSlots | None:
+            barrier.wait()
+            return state.run_slots(2)
+
+        with ThreadPoolExecutor(4) as pool:
+            slots = list(pool.map(first_start, range(4)))
+        assert len(made) == 1
+        assert all(each is made[0] for each in slots)
 
     def test_a_start_that_finds_no_slot_in_time_names_the_active_runs(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
@@ -4001,17 +4027,23 @@ class TestPipelineCopies:
         assert [created["name"] for created in fake_ws.pipelines.created] == names
 
     @pytest.mark.parametrize(
-        ("arguments", "body", "outcome", "kept"),
+        ("arguments", "body", "outcome", "warned", "kept"),
         [
-            pytest.param("", "with copying_job(lakeflow):\n        pass", "failed", None, id="keep_failed"),
-            pytest.param("keep=True", "with copying_job(lakeflow):\n        pass", "failed", True, id="keep"),
+            pytest.param("", "with copying_job(lakeflow):\n        pass", "failed", True, False, id="keep_failed"),
+            pytest.param("keep=True", "with copying_job(lakeflow):\n        pass", "failed", False, True, id="keep"),
             pytest.param(
-                "keep_failed=False", "with copying_job(lakeflow):\n        pass", "failed", False, id="keep_failed off"
+                "keep_failed=False",
+                "with copying_job(lakeflow):\n        pass",
+                "failed",
+                False,
+                False,
+                id="keep_failed off",
             ),
             pytest.param(
                 "",
                 "with pytest.raises(PermissionDenied):\n        copying_job(lakeflow).create()",
                 "passed",
+                False,
                 False,
                 id="test passed",
             ),
@@ -4026,9 +4058,10 @@ class TestPipelineCopies:
         arguments: str,
         body: str,
         outcome: str,
-        kept: bool | None,
+        warned: bool,
+        kept: bool,
     ) -> None:
-        """`kept` is None when only `keep_failed` would have kept the copies, the one case the warning is for."""
+        """Only the case where `keep_failed` alone would have kept the copies warns that they are deleted."""
         deploy_pipeline(fake_ws, fake_cli)
         monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
         configure_lakeflow(pytester, arguments)
@@ -4050,7 +4083,7 @@ def test_job(lakeflow):
             "*The job copying 'pipeline_job' was not created, so no job points at its pipeline copies ?'p-1000'?, "
             "and they are deleted whatever keep_failed says*"
         )
-        if kept is None:
+        if warned:
             result.stdout.fnmatch_lines([warning])
         else:
             result.stdout.no_fnmatch_line(warning)

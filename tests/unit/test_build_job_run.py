@@ -31,6 +31,7 @@ from .fakes import (
     ITERATION_FAILED,
     PIPELINE_LOGS,
     FakeWorkspaceClient,
+    RunWithIterations,
     failed_alert_output,
     failed_alert_run,
     make_run,
@@ -1352,8 +1353,13 @@ class TestSerialise:
         assert files == {"1/transform.html": FAILED_EXPORT}
 
     def test_serialise_for_each_iterations(self) -> None:
-        run, _ = build("for_each")
-        data, files = serialise_with_files(run)
+        ws = FakeWorkspaceClient()
+        raw, outputs = recorded("for_each")
+        ws.jobs.outputs.update(outputs)
+        assert isinstance(raw, RunWithIterations)
+        first = raw.for_each_iterations[run_id_of(raw, "loop")][0].run_id or 0
+        ws.jobs.outputs[first] = replace(outputs[first], logs="first iteration")
+        data, files = serialise_with_files(build_from(ws, raw))
         loop = data["tasks"]["loop"]
         assert loop["for_each_stats"] == {
             "total_iterations": 3,
@@ -1366,7 +1372,9 @@ class TestSerialise:
         assert loop["iterations"][1]["error"]["type"] == "ValueError"
         assert data["tasks"]["after"]["iterations"] == []
         assert data["tasks"]["after"]["for_each_stats"] is None
-        assert files == {}
+        side_file = f"{raw.run_id}/loop.iteration-0.log"
+        assert loop["iterations"][0]["logs_file"] == side_file
+        assert files == {side_file: "first iteration"}
         assert json.loads(json.dumps(data)) == data
 
     def test_side_files_of_attempts_and_child_runs(self) -> None:
