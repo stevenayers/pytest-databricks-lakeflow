@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
-from databricks.sdk.service import compute, jobs
+from databricks.sdk.service import compute, jobs, pipelines
 from databricks.sdk.service.workspace import Language
 
 from pytest_databricks_lakeflow import ephemeral
@@ -28,6 +29,7 @@ from .fakes import (
     make_run,
     parent_settings,
     pipeline_settings,
+    pipeline_spec,
     queue_failed_run,
     reporting_settings,
     running_run,
@@ -2991,6 +2993,357 @@ class TestDebugNotebook:
         assert "AssertionError: boom" in result.stdout.str()
 
 
+PIPELINE_URL = f"{HOST}/pipelines/p-1000"
+PIPELINE_ERROR_TEST = """
+import pytest
+
+from pytest_databricks_lakeflow import LakeflowBundleError, LakeflowError
+
+def test_job(lakeflow):
+    with pytest.raises({error}) as e:
+        {call}
+    assert e.value.args[0] == {message!r}
+"""
+
+
+def deploy_pipeline(ws: FakeWorkspaceClient, cli: FakeCli, settings: jobs.JobSettings | None = None) -> None:
+    """Deploy pipeline `abc` as `my_pipeline`, and `pipeline_job`, by default with one task, `refresh`, updating it."""
+    cli.deployed_pipelines["my_pipeline"] = "abc"
+    ws.pipelines.specs["abc"] = pipeline_spec()
+    cli.deployed["pipeline_job"] = ws.jobs.add(settings or pipeline_settings())
+
+
+def update_in(state: str) -> pipelines.UpdateInfo:
+    return pipelines.UpdateInfo(state=pipelines.UpdateInfoState(state))
+
+
+def pipeline_ids_by_task(created: dict[str, Any]) -> dict[str, str | None]:
+    ids: dict[str, str | None] = {}
+    for each in created["tasks"]:
+        if each.pipeline_task is not None:
+            ids[each.task_key] = each.pipeline_task.pipeline_id
+    return ids
+
+
+class TestEphemeralPipeline:
+    """lakeflow.pipeline() copies a deployed pipeline into a schema, runs updates of it and deletes it."""
+
+    def test_copy_publishes_to_the_schema_and_goes_before_it(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        configure_lakeflow(pytester, 'catalog="c"')
+        result = run_tests(
+            pytester,
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_pipeline(lakeflow):
+                with lakeflow.schema() as s, lakeflow.pipeline("my_pipeline", schema=s) as p:
+                    assert (p.pipeline_key, p.source_id, p.schema) == ("my_pipeline", "abc", s)
+                    assert p.url == "https://example.cloud.databricks.com/pipelines/p-1000"
+                    update = p.run(full_refresh=True)
+                    assert (update.pipeline_id, update.update_id, update.state) == ("p-1000", "u-1", "COMPLETED")
+                    assert p.updates == [update]
+                with pytest.raises(LakeflowError, match="has already been closed"):
+                    p.run()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        [schema] = fake_ws.schemas.created
+        [created] = fake_ws.pipelines.created
+        assert (created["catalog"], created["schema"]) == ("c", schema.split(".")[1])
+        assert created["name"] == "[pytest] test_jobs.py::test_pipeline"
+        assert created["tags"]["pytest_nodeid"] == "test_jobs.py::test_pipeline"
+        assert created["development"] is True
+        [call] = fake_ws.pipelines.start_update_calls
+        assert (call["pipeline_id"], call["full_refresh"]) == ("p-1000", True)
+        assert [deleted["pipeline_id"] for deleted in fake_ws.pipelines.deleted] == ["p-1000"]
+        assert fake_ws.deletions == ["pipeline p-1000", f"schema {schema}"]
+
+    @pytest.mark.parametrize(("passes", "deleted"), [(True, ["p-1000"]), (False, [])], ids=["passed", "failed"])
+    def test_plain_call_closes_at_teardown(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        passes: bool,
+        deleted: list[str],
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        result = run_tests(
+            pytester,
+            f"""
+            def test_pipeline(lakeflow):
+                unused = lakeflow.pipeline("my_pipeline", schema="c.s")
+                p = lakeflow.pipeline("my_pipeline", schema="c.s")
+                assert p.pipeline_id is None
+                p.run(refresh_selection=["numbers"])
+                assert p.pipeline_id == "p-1000"
+                assert {passes}
+            """,
+        )
+        result.assert_outcomes(passed=int(passes), failed=int(not passes))
+        assert len(fake_ws.pipelines.created) == 1
+        assert fake_ws.pipelines.start_update_calls[0]["refresh_selection"] == ["numbers"]
+        assert [each["pipeline_id"] for each in fake_ws.pipelines.deleted] == deleted
+
+    def test_failed_update_is_returned_and_its_states_logged(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        states = ["WAITING_FOR_RESOURCES", "WAITING_FOR_RESOURCES", "RUNNING", "FAILED"]
+        fake_ws.pipelines.update_polls["p-1000"] = [update_in(state) for state in states]
+        source = """
+            def test_pipeline(lakeflow):
+                with lakeflow.pipeline("my_pipeline", schema="c.s") as p:
+                    assert p.run().state == "FAILED"
+        """
+        result = run_tests(pytester, source, "--log-cli-level=INFO")
+        result.assert_outcomes(passed=1)
+        lines = [
+            "pipeline my_pipeline: WAITING_FOR_RESOURCES",
+            "pipeline my_pipeline: WAITING_FOR_RESOURCES -> RUNNING",
+            "pipeline my_pipeline: RUNNING -> FAILED",
+        ]
+        result.stdout.fnmatch_lines([f"*INFO*pytest_databricks_lakeflow*{line}" for line in lines])
+        assert [each["pipeline_id"] for each in fake_ws.pipelines.deleted] == ["p-1000"]
+
+    def test_timeout_stops_the_update(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        fake_ws.pipelines.update_polls["p-1000"] = [update_in("RUNNING")]
+        message = f"Update u-1 of pipeline 'my_pipeline' did not finish within 0:00:00 and was stopped: {PIPELINE_URL}"
+        result = run_tests(
+            pytester,
+            f"""
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowTimeout
+
+            def test_pipeline(lakeflow):
+                with lakeflow.pipeline("my_pipeline", schema="c.s") as p:
+                    with pytest.raises(LakeflowTimeout) as e:
+                        p.run(timeout=timedelta(0))
+                    assert lakeflow.active_updates == {{}}
+                assert str(e.value) == {message!r}
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.pipelines.stopped == ["p-1000"]
+        assert [each["pipeline_id"] for each in fake_ws.pipelines.deleted] == ["p-1000"]
+
+    @pytest.mark.parametrize(
+        ("arguments", "key", "error", "message"),
+        [
+            pytest.param(
+                "", "nope", "KeyError", "No pipeline 'nope' in the bundle. Available: ['gone', 'my_pipeline']", id="key"
+            ),
+            pytest.param(
+                'sync="none"',
+                "my_pipeline",
+                "LakeflowBundleError",
+                'Pipelines need Lakeflow(sync="deploy"), which reads their deployed specs.',
+                id="sync",
+            ),
+            pytest.param(
+                "",
+                "new",
+                "LakeflowBundleError",
+                "Pipeline 'new' is not deployed. Run `databricks bundle deploy` or use Lakeflow(sync=\"deploy\").",
+                id="not_deployed",
+            ),
+            pytest.param(
+                "",
+                "gone",
+                "LakeflowBundleError",
+                "Pipeline 'gone' (id zzz) does not exist in the workspace, so the bundle state is stale. Run "
+                "`databricks bundle deploy` again.",
+                id="stale",
+            ),
+        ],
+    )
+    def test_refused_before_anything_is_created(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        arguments: str,
+        key: str,
+        error: str,
+        message: str,
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        fake_cli.deployed_pipelines.update({"new": "", "gone": "zzz"})
+        configure_lakeflow(pytester, arguments)
+        call = f'lakeflow.pipeline("{key}", schema="c.s")'
+        result = run_tests(pytester, PIPELINE_ERROR_TEST.format(error=error, call=call, message=message))
+        result.assert_outcomes(passed=1)
+        assert fake_ws.pipelines.created == []
+
+    def test_failed_test_keeps_the_copy_and_lists_it(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        source = """
+            def test_pipeline(lakeflow):
+                with lakeflow.pipeline("my_pipeline", schema="c.s") as p:
+                    p.run()
+                    assert False
+        """
+        result = run_tests(pytester, source)
+        result.assert_outcomes(failed=1)
+        assert fake_ws.pipelines.deleted == []
+        result.stdout.fnmatch_lines([f"*Keeping pipeline p-1000 from my_pipeline: {PIPELINE_URL}*"])
+        result.stdout.fnmatch_lines([f"lakeflow_pipeline_url: {PIPELINE_URL}", "lakeflow_pipeline_id: p-1000"])
+        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 pipeline kept", f"  {PIPELINE_URL}"])
+
+
+class TestPipelineCopies:
+    """job() and task() with pipelines="copy" point each pipeline task at a copy that publishes to the schema."""
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            'lakeflow.job("pipeline_job", pipelines="copy", schema=s)',
+            'lakeflow.task("pipeline_job.refresh", pipelines="copy", schema=s)',
+        ],
+        ids=["job", "task"],
+    )
+    def test_job_copy_points_at_a_pipeline_copy(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, call: str
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        configure_lakeflow(pytester, 'catalog="c"')
+        result = run_tests(
+            pytester,
+            f"""
+            def test_job(lakeflow):
+                with lakeflow.schema() as s, {call} as job:
+                    assert [copy.pipeline_id for copy in job.pipelines] == ["p-1000"]
+                    assert job.run().succeeded
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        [schema] = fake_ws.schemas.created
+        [created] = fake_ws.pipelines.created
+        assert created["name"] == "[pytest] test_jobs.py::test_job my_pipeline"
+        assert created["schema"] == schema.split(".")[1]
+        [job] = fake_ws.jobs.created
+        assert pipeline_ids_by_task(job) == {"refresh": "p-1000"}
+        assert fake_ws.deletions == ["job 1002", "pipeline p-1000", f"schema {schema}"]
+
+    def test_one_copy_per_pipeline(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        settings = pipeline_settings()
+        settings.tasks = [
+            *(settings.tasks or []),
+            jobs.Task(task_key="again", pipeline_task=jobs.PipelineTask(pipeline_id="abc")),
+            jobs.Task(task_key="other", pipeline_task=jobs.PipelineTask(pipeline_id="xyz")),
+        ]
+        deploy_pipeline(fake_ws, fake_cli, settings)
+        fake_ws.pipelines.specs["xyz"] = replace(pipeline_spec(), id="xyz", name="other")
+        source = """
+            def test_job(lakeflow):
+                with lakeflow.job("pipeline_job", name="copies", pipelines="copy", schema="c.s") as job:
+                    job.run()
+        """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        names = [created["name"] for created in fake_ws.pipelines.created]
+        assert names == ["[pytest] copies my_pipeline", "[pytest] copies xyz"]
+        [job] = fake_ws.jobs.created
+        assert pipeline_ids_by_task(job) == {"refresh": "p-1000", "again": "p-1000", "other": "p-1001"}
+        assert fake_ws.deletions == ["job 1002", "pipeline p-1000", "pipeline p-1001"]
+
+    @pytest.mark.parametrize(
+        ("call", "error", "message"),
+        [
+            pytest.param(
+                'lakeflow.job("pipeline_job", pipelines="copy")',
+                "LakeflowError",
+                'pipelines="copy" needs schema: pass the name that lakeflow.schema() yields',
+                id="no_schema",
+            ),
+            pytest.param(
+                'lakeflow.job("pipeline_job", schema="c.s")',
+                "LakeflowError",
+                'schema applies to pipeline copies: pass pipelines="copy" as well',
+                id="schema_without_copy",
+            ),
+            pytest.param(
+                'lakeflow.job("my_job", pipelines="copy", schema="c.s")',
+                "LakeflowError",
+                "Job 'my_job' has no pipeline task to copy. Tasks: ['classic', 'extract', 'load', 'transform']",
+                id="no_pipeline_task",
+            ),
+            pytest.param(
+                'lakeflow.task("pipeline_job.check", pipelines="copy", schema="c.s")',
+                "LakeflowError",
+                "Job 'pipeline_job' has no pipeline task to copy. Tasks: ['check']",
+                id="task_without_pipeline",
+            ),
+            pytest.param(
+                'lakeflow.job("pipeline_job", pipelines="copies", schema="c.s")',
+                "ValueError",
+                "pipelines must be one of deployed, copy, got 'copies'",
+                id="unknown_value",
+            ),
+        ],
+    )
+    def test_refused_before_anything_is_created(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        call: str,
+        error: str,
+        message: str,
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        result = run_tests(pytester, PIPELINE_ERROR_TEST.format(error=error, call=call, message=message))
+        result.assert_outcomes(passed=1)
+        assert (fake_ws.pipelines.created, fake_ws.jobs.created) == ([], [])
+
+    def test_modify_settings_sees_the_deployed_pipeline(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        extra = "\nseen = []\n\n\ndef record(settings, item):\n"
+        extra += "    seen.append(settings.tasks[0].pipeline_task.pipeline_id)\n"
+        configure_lakeflow(pytester, "modify_settings=record", extra)
+        source = """
+            import conftest
+
+            def test_job(lakeflow):
+                with lakeflow.job("pipeline_job", pipelines="copy", schema="c.s"):
+                    assert conftest.seen == ["abc"]
+        """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        [job] = fake_ws.jobs.created
+        assert pipeline_ids_by_task(job) == {"refresh": "p-1000"}
+
+    def test_failed_test_keeps_the_job_and_its_copies(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        source = """
+            def test_job(lakeflow):
+                with lakeflow.job("pipeline_job", pipelines="copy", schema="c.s") as job:
+                    job.run()
+                    assert False
+        """
+        result = run_tests(pytester, source)
+        result.assert_outcomes(failed=1)
+        assert fake_ws.deletions == []
+        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 job kept", "*", "lakeflow: 1 pipeline kept"])
+
+
 class TestPublicApi:
     """The package exports and the shape of `EphemeralJob.run`."""
 
@@ -3009,6 +3362,7 @@ class TestPublicApi:
             "LakeflowRunFailed",
             "RunHandle",
             "PipelineUpdate",
+            "EphemeralPipeline",
             "DebugNotebook",
             "Stub",
         ):

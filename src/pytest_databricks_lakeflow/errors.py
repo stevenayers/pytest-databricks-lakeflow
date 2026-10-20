@@ -15,7 +15,7 @@ class LakeflowBundleError(LakeflowError):
 
 
 class LakeflowTimeout(LakeflowError):
-    """A job run did not finish within its timeout. The run has been cancelled."""
+    """A job run or pipeline update did not finish within its timeout. The run was cancelled, the update stopped."""
 
 
 class LakeflowRunFailed(LakeflowError):
