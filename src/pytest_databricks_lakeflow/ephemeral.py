@@ -9,7 +9,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
@@ -20,6 +20,7 @@ from pytest_databricks_lakeflow import helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
     PREFIX,
+    TEARDOWN_KEY,
     DebugNotebook,
     JobRun,
     PipelineUpdate,
@@ -79,6 +80,8 @@ TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.INTERNAL_ERROR,
 )
 TERMINAL_UPDATE_STATES = frozenset({"COMPLETED", "FAILED", "CANCELED"})
+TeardownAt = Literal["run", "close"]
+TEARDOWN_AT: tuple[str, ...] = get_args(TeardownAt)
 
 # The last state logged for each task attempt, keyed by task key and attempt number, and whether it had terminated.
 LoggedStates = dict[tuple[str, int], tuple[str, bool]]
@@ -100,7 +103,8 @@ class EphemeralJob:
 
     The job is created on entering the `with` block, or by the first `run()` or `start()` when used without `with`.
     It is deleted on leaving the block, or at the end of the test that made it, unless `keep` is set or the test
-    failed and `keep_failed` is on. Runs that are still active then are cancelled first.
+    failed and `keep_failed` is on. Runs that are still active then are cancelled first. With
+    `teardown_at="close"`, the teardown task then runs alone, before the job is deleted or kept.
 
     Attributes:
         lakeflow: The `Lakeflow` that made the job.
@@ -114,8 +118,13 @@ class EphemeralJob:
         pipelines: The pipeline copies that `pipelines="copy"` made, created just before the job and closed just after
             it. They are chosen again when the job is created, after `modify_settings`, so a pipeline task that it
             repoints or adds gets a copy too.
+        teardown_at: When the teardown task runs. `"run"` runs it at the end of every run. `"close"` leaves it out
+            of every run and runs it alone when the job closes, so the test's assertions still see what it removes.
         job_id: The job's id, once created.
-        runs: The outcome of each finished run, in order.
+        runs: The outcome of each finished run, in order. The teardown run that closing the job starts is not one.
+        teardown_run: The run of the teardown task alone that closing the job started, with `teardown_at="close"`,
+            once it has finished. Its `teardown` is the task's outcome. `None` until then, and when the job never
+            ran, `keep` or `--lakeflow-keep` kept the job, or the run did not finish.
     """
 
     def __init__(
@@ -129,6 +138,7 @@ class EphemeralJob:
         *,
         extra_dependencies: Sequence[str] = (),
         pipelines: Sequence[EphemeralPipeline] = (),
+        teardown_at: TeardownAt = "run",
     ) -> None:
         self.lakeflow = lakeflow
         self.job_key = job_key
@@ -138,10 +148,13 @@ class EphemeralJob:
         self.stubs = frozenset(stubs)
         self.extra_dependencies = list(extra_dependencies)
         self.pipelines = list(pipelines)
+        self.teardown_at = teardown_at
         # Set by `pipelines="copy"`: copies the pipeline with the given id, once modify_settings has run.
         self._copy_pipeline: Callable[[str], EphemeralPipeline] | None = None
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
+        self.teardown_run: JobRun | None = None
+        self._ran = False
         self._run_urls: dict[int, str] = {}
         self._active: dict[int, pytest.Item] = {}
         self._entered = False
@@ -427,32 +440,66 @@ class EphemeralJob:
             reset_checkpoint_selection=reset_checkpoint_selection,
         )
         merged = {**self.params, **run_params}
-        selected = None
-        if only:
-            check_references(self.settings, selected_tasks(self.settings, only, self.stubs), self.stubs)
-            selected = select(self.settings, only, self.stubs)
+        selected = self._selection(only)
         if timeout is not None:
             self._raise_timeout(timeout)
+        run_id, first = self._start_run(
+            item, merged, selected, performance_target=target, queue=queue_settings, pipeline_params=refresh
+        )
+        return RunHandle(self, run_id, item, first, timeout)
+
+    def _selection(self, only: Sequence[str] | None) -> list[str] | None:
+        """The `only` of a run: what `only` selects and the injected tasks it needs, less a teardown left to close."""
+        exclude: set[str] = set()
+        if self.teardown_at == "close":
+            exclude.add(TEARDOWN_KEY)
+        if only:
+            check_references(self.settings, selected_tasks(self.settings, only, self.stubs), self.stubs)
+            return select(self.settings, only, self.stubs, exclude)
+        if not exclude:
+            return None
+        # The platform runs a disabled task that only names, and a task whose upstream only leaves out, so a full run
+        # leaves out the disabled tasks and those downstream of them, which it would not run.
+        exclude |= disabled_task_keys(self.settings)
+        keys: list[str] = []
+        for task in self.settings.tasks or []:
+            if task.task_key not in exclude:
+                keys.append(task.task_key)
+        return keys
+
+    def _start_run(
+        self,
+        item: pytest.Item,
+        params: Mapping[str, str],
+        only: list[str] | None,
+        *,
+        performance_target: jobs.PerformanceTarget | None = None,
+        queue: jobs.QueueSettings | None = None,
+        pipeline_params: jobs.PipelineParams | None = None,
+    ) -> tuple[int, jobs.Run]:
+        """Start a run with a fresh idempotency token, track it until it ends, and return its id and first poll."""
+        assert self.job_id is not None
         ws = self.lakeflow.ws
         token = uuid.uuid4().hex
         waiter = ws.jobs.run_now(
             job_id=self.job_id,
             idempotency_token=token,
-            job_parameters=merged or None,
-            only=selected,
-            performance_target=target,
-            queue=queue_settings,
-            pipeline_params=refresh,
+            job_parameters=dict(params) or None,
+            only=only,
+            performance_target=performance_target,
+            queue=queue,
+            pipeline_params=pipeline_params,
         )
         run_id = cast(jobs.RunNowResponse, waiter.response).run_id
         assert run_id is not None
         self._active[run_id] = item
         self.lakeflow.active_runs.add(run_id)
+        self._ran = True
         log.info("Started run %s of job %s", run_id, self.job_id)
         log.debug("Run %s was started with idempotency token %s", run_id, token)
         first = ws.jobs.get_run(run_id)
         self._record_url(run_id, first, item)
-        return RunHandle(self, run_id, item, first, timeout)
+        return run_id, first
 
     def _replay(self, run: JobRun, only: Sequence[str] | None) -> None:
         """Stub the tasks that `only` leaves out and a selected task depends on, with their values in `run`."""
@@ -774,6 +821,12 @@ class EphemeralJob:
     def close(self, failed: bool = False) -> None:
         """Cancel active runs, then delete the job unless the keep rules say to keep it, then its pipeline copies.
 
+        With `teardown_at="close"`, the teardown task runs alone between the two, with the job's `params` and no
+        run-level ones, and is waited for for `Lakeflow`'s `timeout`, unless the job never ran or `keep` or
+        `--lakeflow-keep` keeps it. `keep_failed` does not skip it: a job kept because its test failed is cleaned
+        up too, and its teardown run is among the kept runs. A teardown run that fails or times out only logs a
+        warning with its page, and the job is deleted or kept as usual.
+
         With `--lakeflow-report-dir`, each cancelled run is polled until it has ended, for at most 60 seconds, and
         listed in the report.json of the test that is running, whose report is still to be written: for a job that a
         module- or session-scoped fixture closes, the test being torn down. Outside a test the run is not polled.
@@ -797,11 +850,47 @@ class EphemeralJob:
                     self._report_cancelled(_Polling(run_id, item))
             if failed and session.current().debug_notebook:
                 self._write_debug_notebooks()
+            self._run_teardown_alone()
         finally:
             try:
                 self._delete_unless_kept(failed)
             finally:
                 self._close_pipelines(failed)
+
+    def _run_teardown_alone(self) -> None:
+        """Run the teardown task alone for `teardown_at="close"`, setting `teardown_run`. Errors are only logged."""
+        if self.teardown_at != "close" or self.job_id is None or not self._ran:
+            return
+        # As for Lakeflow.schema(), only keep skips the clean-up: a job kept because its test failed is still cleaned.
+        if session.current().keeps(self.lakeflow.keep, keep_failed=False, failed=False):
+            log.warning("Not running the teardown task of job %s, which is kept with what its runs wrote", self.job_id)
+            return
+        try:
+            result = self._wait_for_teardown()
+        # The teardown run never stops the job from being deleted, nor fails the test that made it.
+        except Exception as e:
+            log.warning("The teardown run of job %s from %r did not finish: %s", self.job_id, self.job_key, e)
+            return
+        self.teardown_run = result
+        teardown = result.teardown
+        if teardown is not None and teardown.succeeded:
+            return
+        outcome = f"ended {result.result_state} without running the teardown task"
+        if teardown is not None:
+            outcome = f"failed: {task_outcome(teardown)}"
+        log.warning("The teardown run %s of job %s %s: %s", result.run_id, self.job_id, outcome, result.run_url)
+
+    def _wait_for_teardown(self) -> JobRun:
+        item = session.current_item()
+        # A run that closing the job cancelled may still be ending, and the copy allows one run at a time, so the
+        # teardown run queues behind it rather than being skipped.
+        queue = jobs.QueueSettings(enabled=True)
+        run_id, first = self._start_run(item, self.params, [TEARDOWN_KEY], queue=queue)
+        run, outputs = self._wait(run_id, self.lakeflow.timeout, item, first, time.monotonic())
+        self._forget(run_id)
+        result = self._job_run(run, outputs)
+        log.info("Teardown run %s of job %s finished %s: %s", run_id, self.job_id, result.result_state, result.run_url)
+        return result
 
     def _close_pipelines(self, failed: bool) -> None:
         if self.job_id is None:
