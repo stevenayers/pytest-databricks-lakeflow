@@ -2964,6 +2964,59 @@ class TestProgress:
         assert fake_ws.jobs.output_calls == [7700]
 
 
+class TestLive:
+    """What --lakeflow-live and run(stream=...) print to the terminal while a run waits."""
+
+    def test_live_flag_prints_transitions(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        queue_transform_failure(fake_ws)
+        source = 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run().failed\n'
+        result = run_tests(pytester, source, "--lakeflow-live")
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines(
+            [
+                f"lakeflow: Started run 77 of job 1001: {HOST}/jobs/runs/77",
+                "lakeflow: transform: PENDING",
+                "lakeflow: transform: PENDING -> RUNNING",
+                "lakeflow: transform: RUNNING -> FAILED in 0:00:02 ValueError: no rows",
+                f"lakeflow: Run 77 finished FAILED in *: {HOST}/jobs/runs/77",
+            ]
+        )
+        assert result.stdout.str().count("PENDING -> RUNNING") == 1
+        assert result.stdout.str().count("RUNNING -> FAILED") == 1
+
+    @pytest.mark.parametrize(
+        ("call", "flags", "printed"),
+        [
+            pytest.param("run(stream=True)", [], True, id="stream-without-flag"),
+            pytest.param("run(stream=False)", ["--lakeflow-live"], False, id="no-stream-with-flag"),
+            pytest.param("start().wait()", ["--lakeflow-live"], True, id="start-with-flag"),
+            pytest.param("run()", [], False, id="neither"),
+        ],
+    )
+    def test_stream_argument_overrides_the_flag(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        call: str,
+        flags: list[str],
+        printed: bool,
+    ) -> None:
+        queue_transform_failure(fake_ws)
+        source = f'def test_job(lakeflow):\n    assert lakeflow.job("my_job").{call}.failed\n'
+        result = run_tests(pytester, source, "--log-cli-level=INFO", *flags)
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines([f"*INFO*pytest_databricks_lakeflow*{line}" for line in PROGRESS_LINES])
+        streamed = [line for line in result.stdout.lines if line.startswith("lakeflow: ")]
+        assert bool(streamed) == printed
+        if printed:
+            assert "lakeflow: transform: PENDING -> RUNNING" in streamed
+
+    def test_emit_without_a_terminal_reporter(self) -> None:
+        plugins = SimpleNamespace(get_plugin=lambda name: None)
+        item = cast(pytest.Item, SimpleNamespace(config=SimpleNamespace(pluginmanager=plugins)))
+        ephemeral.emit(item, "transform: PENDING -> RUNNING")
+
+
 @pytest.fixture
 def parent(fake_ws: FakeWorkspaceClient, fake_cli: FakeCli) -> int:
     fake_cli.deployed["parent"] = job_id = fake_ws.jobs.add(parent_settings())

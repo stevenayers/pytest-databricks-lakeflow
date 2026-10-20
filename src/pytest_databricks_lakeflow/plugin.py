@@ -115,6 +115,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="When a test fails, write a notebook for each failed notebook task of its job's last run, which sets the "
         "task's resolved parameters as widgets and runs the task's notebook.",
     )
+    group.addoption(
+        "--lakeflow-live",
+        action="store_true",
+        dest="lakeflow_live",
+        help="Print each task state change to the terminal while a run waits.",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -143,6 +149,7 @@ def pytest_configure(config: pytest.Config) -> None:
         destroy=config.getoption("lakeflow_destroy"),
         report_dir=report_dir,
         debug_notebook=config.getoption("lakeflow_debug_notebook"),
+        live=config.getoption("lakeflow_live"),
     )
     config.stash[STATE] = state
     activate(state)
