@@ -2612,7 +2612,7 @@ class TestPerformanceOverride:
             pytest.param("STANDARD", 0, id="standard"),
         ],
     )
-    def test_per_run_performance_target_override_warns(
+    def test_per_run_performance_target_decides(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, target: str, warnings: int
     ) -> None:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
@@ -2623,25 +2623,21 @@ class TestPerformanceOverride:
         )
         result.assert_outcomes(passed=1, warnings=warnings)
 
-    @pytest.mark.parametrize(
-        ("template", "warnings"),
-        [
-            pytest.param(None, 0, id="nothing-requested"),
-            pytest.param(jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED, 1, id="template-optimized"),
-        ],
-    )
     def test_no_warning_when_nothing_was_requested(
-        self,
-        pytester: pytest.Pytester,
-        fake_ws: FakeWorkspaceClient,
-        fake_cli: FakeCli,
-        template: jobs.PerformanceTarget | None,
-        warnings: int,
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
-        fake_ws.jobs.settings[fake_cli.deployed["my_job"]].performance_target = template
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
-        result.assert_outcomes(passed=1, warnings=warnings)
+        result.assert_outcomes(passed=1, warnings=0)
+
+    def test_template_target_counts_as_a_request(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        template = fake_ws.jobs.settings[fake_cli.deployed["my_job"]]
+        template.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        result.assert_outcomes(passed=1, warnings=1)
 
     def test_no_warning_without_an_effective_target(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
@@ -2649,7 +2645,7 @@ class TestPerformanceOverride:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}))
         configure_lakeflow(pytester, "performance_optimized=True")
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
-        result.assert_outcomes(passed=1)
+        result.assert_outcomes(passed=1, warnings=0)
 
 
 class TestTimeouts:
