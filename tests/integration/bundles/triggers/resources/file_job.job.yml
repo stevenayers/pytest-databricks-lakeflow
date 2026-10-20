@@ -1,0 +1,16 @@
+resources:
+  jobs:
+    file_job:
+      name: file_job
+      description: A job with a file arrival trigger whose task reads the trigger context, for the pytest-databricks-lakeflow integration tests.
+      trigger:
+        file_arrival:
+          url: /Volumes/${var.catalog}/${resources.schemas.trigger_files.name}/${resources.volumes.landing.name}/
+      tasks:
+        - task_key: read_trigger
+          notebook_task:
+            notebook_path: ../src/notebooks/read_trigger.py
+            base_parameters:
+              kind: "{{job.trigger.type}}"
+              location: "{{job.trigger.file_arrival.location}}"
+              day: "{{job.trigger.time.iso_date}}"

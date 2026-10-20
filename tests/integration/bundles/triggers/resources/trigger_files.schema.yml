@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    trigger_files:
+      catalog_name: ${var.catalog}
+      name: lakeflow_triggers
+      comment: Holds the volume the file arrival trigger of file_job watches, for the pytest-databricks-lakeflow integration tests.

@@ -36,6 +36,7 @@ from .fakes import (
     running_run,
     skipped_run,
     sp_rule_set,
+    triggered_settings,
 )
 from .test_build_job_run import QUERY_FILE, SQL_FILE_OUTPUT
 
@@ -1377,6 +1378,69 @@ class TestForEachInputs:
         result = run_tests(pytester, source)
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*Unknown task 'nope' in for_each_inputs. For-each tasks: ?'loop'?*"])
+        assert fake_ws.jobs.created == []
+
+
+TRIGGER_PARAMETERS = [
+    jobs.JobParameterDefinition(name="__pytest_trigger_type", default="table"),
+    jobs.JobParameterDefinition(name="__pytest_trigger_table_update_updated_tables", default="cat.sch.orders"),
+]
+
+
+class TestTrigger:
+    """Simulating a trigger with trigger= on job() and task()."""
+
+    @pytest.mark.parametrize(
+        ("call", "states"),
+        [
+            pytest.param('lakeflow.job("triggered", trigger=TRIGGER)', {"transform": "SUCCESS"}, id="job"),
+            pytest.param(
+                'lakeflow.task("triggered.transform", upstream_task_values={"extract": {"row_count": 1}}, '
+                "trigger=TRIGGER)",
+                {"extract": "SUCCESS", "transform": "SUCCESS"},
+                id="task",
+            ),
+        ],
+    )
+    def test_trigger_values_reach_the_created_job(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        call: str,
+        states: dict[str, str],
+    ) -> None:
+        fake_cli.deployed["triggered"] = fake_ws.jobs.add(triggered_settings())
+        fake_ws.jobs.queue(make_run(77, states))
+        source = f"""
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            TRIGGER = {{"type": "table", "table_update.updated_tables": "cat.sch.orders"}}
+
+            def test_job(lakeflow):
+                with {call} as job:
+                    run = job.run()
+                    assert run.trigger_type == "ONE_TIME"
+                    assert "__pytest_trigger_type" not in run.parameters
+                    with pytest.raises(LakeflowError, match="reserved for the plugin"):
+                        job.run(params={{"__pytest_trigger_type": "file_arrival"}})
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        assert created["parameters"] == [*TEMPLATE_PARAMETERS, *TRIGGER_PARAMETERS]
+        transform = next(t for t in created["tasks"] if t.task_key == "transform")
+        assert transform.notebook_task.base_parameters["kind"] == "{{job.parameters.__pytest_trigger_type}}"
+
+    def test_an_unknown_trigger_key_fails_before_creation(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["triggered"] = fake_ws.jobs.add(triggered_settings())
+        source = 'def test_job(lakeflow):\n    lakeflow.job("triggered", trigger={"nope": "x"})\n'
+        result = run_tests(pytester, source)
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines(["*trigger names 'nope', but the job has no {{job.trigger.nope}} reference*"])
         assert fake_ws.jobs.created == []
 
 

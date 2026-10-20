@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
+    inject_trigger,
     lint,
     merge_environments,
     override_for_each_inputs,
@@ -307,6 +308,7 @@ class Lakeflow:
         pipelines: Pipelines = "deployed",
         schema: str | None = None,
         for_each_inputs: Mapping[str, Sequence[object]] | None = None,
+        trigger: Mapping[str, str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -397,6 +399,15 @@ class Lakeflow:
                 list replaces the task's `for_each_task.inputs` as JSON, with `{{` escaped so a value is not read as
                 a reference, and may be empty. The run reports the for-each task as one task: its iterations are not
                 in the result.
+            trigger: The values the copy's `{{job.trigger.<path>}}` references take, by the path after `job.trigger.`,
+                such as `{"type": "table", "table_update.updated_tables": "cat.sch.orders"}`. The copy is started with
+                run-now, which cannot say that a trigger fired, so each such reference is rewritten to
+                `{{job.parameters.__pytest_trigger_<path>}}`, with each `.` of the path as `_`, and that parameter is
+                declared with the value as its default. Each value is a string, passed as given, so a reference the
+                platform fills with a list, such as `table_update.updated_tables`, gets exactly the string the test
+                writes. A reference left out emits a `UserWarning`. The copy has no trigger, so jobs/create refuses
+                its `table_update` and `file_arrival` references unless `trigger` sets them. `JobRun.trigger_type`
+                stays `ONE_TIME`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -428,6 +439,8 @@ class Lakeflow:
                 without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
                 Also if `for_each_inputs` names a task that is not in the job or has no `for_each_task`, or gives a
                 value that is not a list, is not JSON-serialisable or is longer than 5,000 characters as JSON.
+                Also if `trigger` names a path that no `{{job.trigger.<path>}}` reference of the copy uses, or gives a
+                value that is not a string.
             LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
                 exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
@@ -450,6 +463,7 @@ class Lakeflow:
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
         override_for_each_inputs(settings, for_each_inputs or {})
+        settings = inject_trigger(settings, trigger or {})
         self._inject_lifecycle(settings, notebooks, params or {})
         return self._ephemeral(
             item,
@@ -487,6 +501,7 @@ class Lakeflow:
         pipelines: Pipelines = "deployed",
         schema: str | None = None,
         for_each_inputs: Sequence[object] | None = None,
+        trigger: Mapping[str, str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -520,6 +535,8 @@ class Lakeflow:
             schema: The full name of the schema the pipeline copy publishes to, as for `job()`.
             for_each_inputs: The list the task iterates over when it is a for-each task, such as `["a"]`, as for
                 `job()`.
+            trigger: The values the task's `{{job.trigger.<path>}}` references take, by the path after
+                `job.trigger.`, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -534,7 +551,8 @@ class Lakeflow:
                 `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
                 Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
                 cannot be applied, `setup` or `teardown` cannot run, `pipelines` and `schema` do not fit the task,
-                or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used.
+                or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used, or
+                `trigger` cannot be applied.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
@@ -567,6 +585,7 @@ class Lakeflow:
         override_tasks(settings, task_overrides or {})
         if for_each_inputs is not None:
             override_for_each_inputs(settings, {task_key: for_each_inputs})
+        settings = inject_trigger(settings, trigger or {})
         self._inject_lifecycle(settings, notebooks, params or {})
         capture: dict[str, list[str]] = {}
         if capture_task_values:

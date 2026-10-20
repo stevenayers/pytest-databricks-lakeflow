@@ -32,6 +32,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
+    inject_trigger,
     lint,
     merge_environments,
     override_for_each_inputs,
@@ -57,6 +58,7 @@ from .fakes import (
     pipeline_settings,
     pipeline_spec,
     reporting_settings,
+    triggered_settings,
 )
 
 CLUSTER = "0123-456789-abcdef"
@@ -1360,6 +1362,96 @@ class TestForEachInputs:
 
     def test_for_each_inputs_without_entries_change_nothing(self) -> None:
         assert override_for_each_inputs(for_each_settings(), {}) == for_each_settings()
+
+
+TABLE_TRIGGER = {"type": "table", "table_update.updated_tables": "cat.sch.orders"}
+
+
+class TestInjectTrigger:
+    """inject_trigger points {{job.trigger.*}} references at job parameters that hold the simulated values."""
+
+    def test_trigger_references_become_parameters_with_the_values_as_defaults(self) -> None:
+        template = triggered_settings()
+        settings = inject_trigger(template, TABLE_TRIGGER)
+        assert template == triggered_settings(), "the argument is not changed"
+        assert task(settings, "transform").as_dict()["notebook_task"]["base_parameters"] == {
+            "row_count": "{{tasks.extract.values.row_count}}",
+            "kind": "{{job.parameters.__pytest_trigger_type}}",
+            "tables": "{{job.parameters.__pytest_trigger_table_update_updated_tables}}",
+        }
+        assert settings.parameters is not None
+        assert settings.parameters[:2] == example_settings().parameters
+        assert settings.parameters[2:] == [
+            jobs.JobParameterDefinition(name="__pytest_trigger_type", default="table"),
+            jobs.JobParameterDefinition(name="__pytest_trigger_table_update_updated_tables", default="cat.sch.orders"),
+        ]
+
+    def test_references_in_nested_tasks_and_parameter_lists_are_rewritten(self) -> None:
+        inner = {
+            "task_key": "each",
+            "notebook_task": {"notebook_path": "/e", "base_parameters": {"k": "{{ job.trigger.type }}"}},
+        }
+        wheel = {
+            "task_key": "wheel",
+            "python_wheel_task": {
+                "package_name": "pkg",
+                "entry_point": "main",
+                "parameters": ["--kind", "on_{{job.trigger.type}}", "{{job.trigger.file_arrival.location}}"],
+            },
+        }
+        trigger = {"type": "file_arrival", "file_arrival.location": "/Volumes/c/s/v"}
+        settings = inject_trigger(with_tasks(for_each(inner), wheel), trigger)
+        assert nested_task(settings, "loop").as_dict()["notebook_task"]["base_parameters"] == {
+            "k": "{{job.parameters.__pytest_trigger_type}}"
+        }
+        assert task(settings, "wheel").as_dict()["python_wheel_task"]["parameters"] == [
+            "--kind",
+            "on_{{job.parameters.__pytest_trigger_type}}",
+            "{{job.parameters.__pytest_trigger_file_arrival_location}}",
+        ]
+
+    @pytest.mark.parametrize(
+        ("trigger", "match"),
+        [
+            pytest.param(
+                {"nope": "x"},
+                r"trigger names 'nope', but the job has no \{\{job.trigger.nope\}\} reference. Trigger references in "
+                r"the job: \['\{\{job.trigger.table_update.updated_tables\}\}', '\{\{job.trigger.type\}\}'\]",
+                id="unknown",
+            ),
+            pytest.param(
+                {"type": ["table"]},
+                r"trigger\['type'\] must be a string, the value a job parameter holds, got \['table'\]",
+                id="not-a-string",
+            ),
+        ],
+    )
+    def test_inject_trigger_rejects(self, trigger: dict[str, Any], match: str) -> None:
+        settings = triggered_settings()
+        with pytest.raises(LakeflowError, match=match):
+            inject_trigger(settings, trigger)
+        assert settings == triggered_settings()
+
+    def test_references_left_unrewritten_are_named_in_a_warning(self) -> None:
+        wheel = {
+            "task_key": "wheel",
+            "python_wheel_task": {
+                "package_name": "p",
+                "entry_point": "m",
+                "parameters": ["{{job.trigger.time.iso_date}}"],
+            },
+        }
+        settings = triggered_settings()
+        settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(wheel)]
+        with pytest.warns(
+            UserWarning, match=r"\['job.trigger.table_update.updated_tables', 'job.trigger.time.iso_date'\]"
+        ):
+            inject_trigger(settings, {"type": "table"})
+
+    @pytest.mark.filterwarnings("error")
+    @pytest.mark.parametrize("template", [triggered_settings, example_settings])
+    def test_no_trigger_changes_nothing(self, template: Callable[[], jobs.JobSettings]) -> None:
+        assert inject_trigger(template(), {}).as_dict() == template().as_dict()
 
 
 SELECTIONS = ["full_refresh_selection", "refresh_selection", "refresh_flow_selection", "reset_checkpoint_selection"]
