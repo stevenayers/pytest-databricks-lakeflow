@@ -3,6 +3,28 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.12.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.11.0...v0.12.0) (2026-10-20)
+
+
+### Features
+
+* add session defaults on Lakeflow for per-call options ([#200](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/200)) ([bf20100](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/bf2010068e956f48e3bf9db797276c92c3692b9c))
+* add wheel, library, dashed-key and trigger rules to Lakeflow.check ([#202](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/202)) ([4f6da3c](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/4f6da3caf806607d50205cceb2a817f2900cd1e4))
+* close the sweep's notebook and schema gaps and add Lakeflow.sweep() ([#204](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/204)) ([0269c70](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/0269c7011e223fe56656561106207323f0757179))
+* inline saved queries with saved_queries="inline" so sql_result holds their rows ([#206](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/206)) ([8174faf](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/8174faf5910cb042d9890e5774c4683b3ea74a38))
+* parse dbt artefacts with dbt_artifacts=True and pass dbt_commands per run ([#205](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/205)) ([016c53b](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/016c53b0257ac71bfa474bb62483d1b696f87f79))
+* warn once when a workspace overrides PERFORMANCE_OPTIMIZED ([#199](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/199)) ([26b6135](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/26b6135d9280d1ea3f2e70b83fa95024a45d9159))
+
+
+### Bug Fixes
+
+* settle the last for-each and sweep gaps of the backlog pass ([#207](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/207)) ([bd39cee](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/bd39cee37ecdad220573c922000feed39e7a324e))
+
+
+### Documentation
+
+* say exactly what the sweep leaves for a bundle set up later ([#208](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/208)) ([ca221f9](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/ca221f92445854fdef6a88ab6df6a32df98dfc82))
+
 ## [0.11.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.10.0...v0.11.0) (2026-10-20)
 
 
