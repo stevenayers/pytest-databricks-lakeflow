@@ -93,8 +93,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--lakeflow-sweep-notebooks",
         action="store_true",
         default=None,
-        help="Also delete old setup_<hash>, teardown_<hash> and debug notebooks from the helpers folder that no job "
-        "the sweep keeps uses. With scope all, from every user's default helpers folder.",
+        help="Also delete old setup_<hash>, teardown_<hash> and debug notebooks and query_<...>.sql files from the "
+        "helpers folder that no job the sweep keeps uses. With scope all, from every user's default helpers folder.",
     )
     group.addoption(
         "--lakeflow-sweep-branch",

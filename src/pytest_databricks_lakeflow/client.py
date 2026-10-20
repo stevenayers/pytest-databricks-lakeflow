@@ -51,6 +51,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_probes,
     inject_test_marker,
     inject_trigger,
+    inline_saved_query,
     lift_nested_task,
     lint,
     merge_environments,
@@ -62,6 +63,8 @@ from pytest_databricks_lakeflow.settings import (
     run_job_tasks,
     sanitise,
     sanitise_pipeline,
+    saved_query_id,
+    saved_query_tasks,
     stub_upstream,
     tag_value,
     upstream_values_from,
@@ -77,6 +80,8 @@ Children = Literal["warn", "refuse"]
 CHILDREN: tuple[str, ...] = get_args(Children)
 Pipelines = Literal["deployed", "copy"]
 PIPELINES: tuple[str, ...] = get_args(Pipelines)
+SavedQueries = Literal["deployed", "inline"]
+SAVED_QUERIES: tuple[str, ...] = get_args(SavedQueries)
 # A setup or teardown notebook's source, and the job parameters its statements read.
 Notebook = tuple[str, frozenset[str]]
 UNVERSIONED_ARTIFACTS = (
@@ -201,6 +206,8 @@ class Lakeflow:
             `{"default": {"environment_version": "5"}}`. Each copy takes the overrides of the environments its job
             has, and an environment key the job does not have is skipped, whereas `environments` on the call adds
             one. A reserved key, an entry that is not a mapping or an unknown field raises `LakeflowError` here.
+        saved_queries: The default of `saved_queries` on `job()` and `task()`: `"deployed"` or `"inline"`, for
+            example `"inline"` to read the rows of every saved query task. Anything else raises `ValueError`.
 
             A per-call argument that is `None`, or left out, takes the field's value. Anything else replaces it
             whole, so `disable=[]` on a call disables nothing and `environments={}` keeps the template's
@@ -251,6 +258,7 @@ class Lakeflow:
     setup: LifecycleStep | None = field(default=None, repr=False)
     teardown: LifecycleStep | None = field(default=None, repr=False)
     environments: Mapping[str, Mapping[str, Any]] | None = None
+    saved_queries: SavedQueries = "deployed"
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
     run_finished: Callable[[JobRun, pytest.Item], None] | None = field(default=None, repr=False)
     active_runs: set[int] = field(default_factory=set, init=False, repr=False)
@@ -273,6 +281,7 @@ class Lakeflow:
         if self.max_concurrent_runs is not None and self.max_concurrent_runs < 1:
             raise ValueError(f"max_concurrent_runs must be 1 or more, got {self.max_concurrent_runs}")
         _check_children(self.children)
+        _check_saved_queries(self.saved_queries)
         _check_deploy_flags(self.deploy_flags)
         _check_permissions(self.access_control_list())
         if self.setup is not None:
@@ -397,6 +406,7 @@ class Lakeflow:
         schema: str | None = None,
         for_each_inputs: Mapping[str, Sequence[object]] | None = None,
         trigger: Mapping[str, str] | None = None,
+        saved_queries: SavedQueries | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -512,6 +522,16 @@ class Lakeflow:
                 its `table_update` and `file_arrival` references unless `trigger` sets them, and `LakeflowError` is
                 raised for them when the job is created. `JobRun.trigger_type`
                 stays `ONE_TIME`.
+            saved_queries: What the copy's saved query tasks, SQL tasks with `sql_task.query`, run. `"deployed"` runs
+                each saved query as deployed, and its `TaskRun.sql_result` is `None`, because the platform keeps no
+                rows of a saved query task. `"inline"` reads each enabled one with `queries.get` and runs its text
+                as a SQL file task, so `sql_result` holds its rows: the text is uploaded to `helpers_path` as
+                `query_<run id>_<task key>_<hex>.sql` when the job is created, after `USE CATALOG` and `USE SCHEMA`
+                lines for the catalog and schema the query sets, and deleted with the job, or kept with it. The task
+                keeps its warehouse and parameters, and each default of a query parameter that neither the task nor a
+                job parameter sets is added to its parameters: text, a number or a single enum value, as a string.
+                The inlined file runs as the job's `run_as`, not as the query's owner, and without the SQL editor's
+                automatic `LIMIT 1000`. `None` takes `Lakeflow`'s `saved_queries`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -550,14 +570,20 @@ class Lakeflow:
                 `None` or a nested list, or mixes objects with primitives.
                 Also if `trigger` names a path that no `{{job.trigger.<path>}}` reference of the copy uses, or gives a
                 value that is not a string.
+                Also, with `saved_queries="inline"`, if a saved query does not exist, or has a parameter that neither
+                the task nor a job parameter sets whose default is a date, a date range, several enum values or
+                query-backed: set it through `task_params`.
             LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
                 exist.
-            ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
+            ValueError: If `children` is not `"warn"` or `"refuse"`, `pipelines` is not `"deployed"` or `"copy"`, or
+                `saved_queries` is not `"deployed"` or `"inline"`.
         """
         children = self._option("children", children)
         setup = self._option("setup", setup)
         teardown = self._option("teardown", teardown)
+        saved_queries = self._option("saved_queries", saved_queries)
         _check_children(children)
+        _check_saved_queries(saved_queries)
         _check_pipelines(pipelines, schema)
         _check_teardown_at(teardown_at, teardown)
         notebooks = _lifecycle_notebooks(setup, teardown)
@@ -594,6 +620,7 @@ class Lakeflow:
             pipelines=pipelines,
             schema=schema,
             teardown_at=teardown_at,
+            saved_queries=saved_queries,
         )
 
     def task(
@@ -618,6 +645,7 @@ class Lakeflow:
         for_each_inputs: Sequence[object] | None = None,
         input: object | None = None,
         trigger: Mapping[str, str] | None = None,
+        saved_queries: SavedQueries | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -669,6 +697,8 @@ class Lakeflow:
                 `{{input}}` `'{"id":7.0}'` and `{{input.id}}` `"7.0"`. `None` means not given.
             trigger: The values the task's `{{job.trigger.<path>}}` references take, by the path after
                 `job.trigger.`, as for `job()`.
+            saved_queries: `"inline"` runs the task's saved query as a SQL file task, so `sql_result` holds its rows,
+                as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -690,14 +720,18 @@ class Lakeflow:
                 no task nested in a for-each task, `input` is given with a two-part `ref` or for a nested task that
                 does not refer to `{{input}}`, is missing for one that does, is not a string, number, boolean or
                 mapping, lacks a key a reference names, contains `{{` or is not JSON-serialisable, or makes the job
-                parameters longer than the 10,000 characters as JSON that `jobs/create` accepts.
+                parameters longer than the 10,000 characters as JSON that `jobs/create` accepts. Also when
+                `saved_queries="inline"` cannot inline the task's saved query, as for `job()`.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
-            ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
+            ValueError: If `children` is not `"warn"` or `"refuse"`, `pipelines` is not `"deployed"` or `"copy"`, or
+                `saved_queries` is not `"deployed"` or `"inline"`.
         """
         children = self._option("children", children)
         setup = self._option("setup", setup)
         teardown = self._option("teardown", teardown)
+        saved_queries = self._option("saved_queries", saved_queries)
         _check_children(children)
+        _check_saved_queries(saved_queries)
         _check_pipelines(pipelines, schema)
         _check_teardown_at(teardown_at, teardown)
         notebooks = _lifecycle_notebooks(setup, teardown)
@@ -775,6 +809,7 @@ class Lakeflow:
             pipelines=pipelines,
             schema=schema,
             teardown_at=teardown_at,
+            saved_queries=saved_queries,
         )
 
     def _option(self, name: str, value: Any) -> Any:
@@ -992,7 +1027,8 @@ class Lakeflow:
             scope: `mine` for what you created, `all` for what anyone created, every user's default helpers folder
                 included.
             schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas to drop too.
-            notebooks: Also delete old setup, teardown and debug notebooks that no job the sweep keeps uses.
+            notebooks: Also delete old setup, teardown and debug notebooks and inlined saved query files that no job
+                the sweep keeps uses.
             branch: Delete only what carries this `pytest_git_branch`, and the notebooks only its jobs use.
             dry_run: Delete nothing, and report what would be deleted.
             report: A file to write the report to, as JSON.
@@ -1135,6 +1171,7 @@ class Lakeflow:
         pipelines: Pipelines,
         schema: str | None,
         teardown_at: TeardownAt,
+        saved_queries: SavedQueries,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -1147,6 +1184,9 @@ class Lakeflow:
             if children == "refuse":
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
+        query_files: dict[str, str] = {}
+        if saved_queries == "inline":
+            query_files = self._inline_saved_queries(key, settings)
         tags = {**self._tags(item), JOB_KEY_TAG: key}
         sanitise(
             settings,
@@ -1180,12 +1220,38 @@ class Lakeflow:
             extra_dependencies=extra_dependencies,
             pipelines=copies,
             teardown_at=teardown_at,
+            query_files=query_files,
         )
         if pipelines == "copy":
             assert schema is not None
             job._copy_pipeline = partial(self._job_pipeline_copy, item, schema, name or item.nodeid)
         item.addfinalizer(partial(job._teardown, item))
         return job
+
+    def _inline_saved_queries(self, key: str, settings: jobs.JobSettings) -> dict[str, str]:
+        """Turn each enabled saved query task of the copy into a SQL file task, for `saved_queries="inline"`.
+
+        Returns:
+            The SQL text of each file to upload when the job is created, by its workspace path.
+        """
+        files: dict[str, str] = {}
+        tasks = saved_query_tasks(settings)
+        if not tasks:
+            return files
+        folder = session.folder_of_helpers(self._state())
+        for task in tasks:
+            query_id = saved_query_id(task)
+            assert query_id is not None
+            try:
+                query = self.ws.queries.get(query_id)
+            except NotFound:
+                raise LakeflowError(
+                    f"Task {task.task_key!r} of {key!r} runs saved query {query_id}, which does not exist, so "
+                    'saved_queries="inline" cannot read its text'
+                ) from None
+            path = helpers.query_file_path(folder, self.run_id, task.task_key)
+            files[path] = inline_saved_query(key, settings, task, query, path)
+        return files
 
     def _tags(self, item: pytest.Item) -> dict[str, str]:
         """The tags of each ephemeral job and pipeline copy that `item` makes, the attribution tags included."""
@@ -1343,6 +1409,11 @@ def _check_lifecycle_params(
 def _check_children(children: str) -> None:
     if children not in CHILDREN:
         raise ValueError(f"children must be one of {', '.join(CHILDREN)}, got {children!r}")
+
+
+def _check_saved_queries(saved_queries: str) -> None:
+    if saved_queries not in SAVED_QUERIES:
+        raise ValueError(f"saved_queries must be one of {', '.join(SAVED_QUERIES)}, got {saved_queries!r}")
 
 
 def _check_pipelines(pipelines: str, schema: str | None) -> None:

@@ -61,7 +61,8 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
-        sql/                     # name: lakeflow_sql, SQL file tasks on the warehouse from LAKEFLOW_WAREHOUSE_ID
+        sql/                     # name: lakeflow_sql, SQL file tasks on the warehouse from LAKEFLOW_WAREHOUSE_ID, and a
+                                 # saved query task on the query that test_sql.py creates (the query_id variable)
             databricks.yml
             resources/*.job.yml
             src/queries/*.sql
@@ -130,7 +131,7 @@ tests/integration/
 
 Names that reach the workspace (bundle names, job names, task keys, notebooks, schemas, tags, parameters) must be neutral and specific to the use case.
 
-In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs and serverless pipelines, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped. The optional repository variable `LAKEFLOW_WAREHOUSE_ID` names a SQL warehouse the service principal can use; without it the `sql`, `alerts` and `dbt` bundles' tests are skipped. The `alerts` bundle deploys its own alerts, so with the variable set the service principal also needs permission to create alerts in the workspace. The job runs the tests with `--lakeflow-report-dir=lakeflow-report`, then checks that each `report.json` there lists at least one run and that the failing `transform` notebook was exported, and uploads the directory and the JUnit XML as artefacts.
+In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs and serverless pipelines, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped. The optional repository variable `LAKEFLOW_WAREHOUSE_ID` names a SQL warehouse the service principal can use; without it the `sql`, `alerts` and `dbt` bundles' tests are skipped. The `alerts` bundle deploys its own alerts, and `test_sql.py` creates a saved query and moves it to the trash afterwards, so with the variable set the service principal also needs permission to create alerts and queries in the workspace. The job runs the tests with `--lakeflow-report-dir=lakeflow-report`, then checks that each `report.json` there lists at least one run and that the failing `transform` notebook was exported, and uploads the directory and the JUnit XML as artefacts.
 
 ## Making a change
 
