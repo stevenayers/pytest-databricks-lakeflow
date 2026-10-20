@@ -71,7 +71,7 @@ tests/integration/
             resources/*.alert.yml # one alert per file, on the warehouse from LAKEFLOW_WAREHOUSE_ID
             resources/*.job.yml
         branches/                # name: lakeflow_branches, an if/else condition job
-        classic/                 # name: lakeflow_classic, one job on a classic job cluster (needs LAKEFLOW_CLASSIC=1)
+        classic/                 # name: lakeflow_classic, jobs on classic job clusters (needs LAKEFLOW_CLASSIC=1)
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
