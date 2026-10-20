@@ -15,7 +15,7 @@ from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import compute, jobs, pipelines
 from databricks.sdk.service.workspace import Language
 
-from pytest_databricks_lakeflow import ephemeral
+from pytest_databricks_lakeflow import ephemeral, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.report import directory_name
 
@@ -491,6 +491,198 @@ class TestRunHandle:
         )
         result.assert_outcomes(passed=1)
         assert fake_ws.jobs.cancelled == [77]
+
+
+class TestRunCap:
+    """How `--lakeflow-max-concurrent-runs` and `max_concurrent_runs` hold back the next run of a process."""
+
+    def test_max_concurrent_runs_blocks_the_next_start(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        queue_until_cancelled(fake_ws)
+        fake_ws.jobs.queue(make_run(78, {"t": "SUCCESS"}))
+        configure_lakeflow(pytester, "poll_interval=timedelta(milliseconds=20)")
+        result = run_tests(
+            pytester,
+            """
+            import threading
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as first, lakeflow.job("my_job") as second:
+                    handle = first.start()
+                    started = []
+                    thread = threading.Thread(target=lambda: started.append(second.start()))
+                    thread.start()
+                    thread.join(0.2)
+                    assert thread.is_alive()
+                    assert len(lakeflow.ws.jobs.run_now_calls) == 1
+                    handle.cancel()
+                    thread.join(5)
+                    assert len(lakeflow.ws.jobs.run_now_calls) == 2
+                    assert started[0].wait().succeeded
+            """,
+            "--lakeflow-max-concurrent-runs=1",
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_a_blocked_start_starts_once_a_run_ends(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=3)
+        fake_ws.jobs.queue(make_run(78, {"t": "SUCCESS"}))
+        result = run_tests(
+            pytester,
+            """
+            import logging
+            from datetime import timedelta
+
+            def test_job(lakeflow, caplog):
+                caplog.set_level(logging.INFO, logger="pytest_databricks_lakeflow")
+                with lakeflow.job("my_job") as first, lakeflow.job("my_job") as second:
+                    handles = [first.start(), second.start(timeout=timedelta(seconds=5))]
+                    assert [handle.wait().succeeded for handle in handles] == [True, True]
+                messages = [r.getMessage() for r in caplog.records]
+                lines = [m for m in messages if m.startswith(("Started run", "Waiting"))]
+                assert lines == [
+                    "Started run 77 of job 1001",
+                    "Waiting to start a run of job 1002 until one of the active runs [77] ends, under "
+                    "max_concurrent_runs=1",
+                    "Started run 78 of job 1002",
+                ]
+            """,
+            "--lakeflow-max-concurrent-runs=1",
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == []
+
+    @pytest.mark.parametrize(
+        ("polls", "end"),
+        [
+            pytest.param(1, "first.start().wait()", id="wait"),
+            pytest.param(100, "pytest.raises(LakeflowTimeout, first.run, timeout=timedelta(0))", id="timeout"),
+            pytest.param(100, "first.start().cancel()", id="cancel"),
+            pytest.param(100, "first.start()", id="close"),
+        ],
+    )
+    def test_ending_a_run_releases_its_slot(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, polls: int, end: str
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=polls)
+        fake_ws.jobs.queue(make_run(78, {"t": "SUCCESS"}))
+        result = run_tests(
+            pytester,
+            f"""
+            import logging
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowTimeout
+
+            def test_job(lakeflow, caplog):
+                caplog.set_level(logging.INFO, logger="pytest_databricks_lakeflow")
+                with lakeflow.job("my_job") as first:
+                    {end}
+                with lakeflow.job("my_job") as second:
+                    second.start(timeout=timedelta(0))
+                assert not [r for r in caplog.records if r.getMessage().startswith("Waiting")]
+            """,
+            "--lakeflow-max-concurrent-runs=1",
+        )
+        result.assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.run_now_calls) == 2
+
+    def test_forget_twice_releases_once(self, fake_ws: FakeWorkspaceClient) -> None:
+        slots = session.RunSlots(1)
+        lakeflow = SimpleNamespace(ws=fake_ws, active_runs={77})
+        job = EphemeralJob(cast("Lakeflow", lakeflow), "my_job", jobs.JobSettings())
+        assert slots.semaphore.acquire(blocking=False)
+        job._active[77] = cast("pytest.Item", SimpleNamespace())
+        job._slots = slots
+        slots.hold(77, job)
+        job._forget(77)
+        job._forget(77)
+        assert slots.semaphore.acquire(blocking=False)
+        assert not slots.semaphore.acquire(blocking=False)
+
+    def test_a_start_that_finds_no_slot_in_time_names_the_active_runs(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as first, lakeflow.job("my_job") as second:
+                    first.start()
+                    with pytest.raises(LakeflowError) as e:
+                        second.start(timeout=timedelta(0))
+                assert str(e.value) == (
+                    "No run slot freed within 0:00:00 to start a run of 'my_job': this process may have 1 run active "
+                    "at once (--lakeflow-max-concurrent-runs or max_concurrent_runs), and runs [77] are still active. "
+                    "Wait for or cancel one of them first, or pass a longer timeout."
+                )
+            """,
+            "--lakeflow-max-concurrent-runs=1",
+        )
+        result.assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.run_now_calls) == 1
+
+    def test_without_a_cap_nothing_blocks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        fake_ws.jobs.queue(make_run(78, {"t": "SUCCESS"}), polls=100)
+        result = run_tests(
+            pytester,
+            """
+            from datetime import timedelta
+
+            from pytest_databricks_lakeflow import session
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as first, lakeflow.job("my_job") as second:
+                    first.start()
+                    second.start(timeout=timedelta(0))
+                    assert lakeflow.active_runs == {77, 78}
+                assert session.current().slots is None
+            """,
+        )
+        result.assert_outcomes(passed=1)
+
+    def test_a_second_cap_in_the_process_keeps_the_first(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}), polls=100)
+        extra = '\n\n@pytest.fixture(scope="session")\ndef wider():\n    return Lakeflow(max_concurrent_runs=3)\n'
+        configure_lakeflow(pytester, "max_concurrent_runs=1", extra=extra)
+        result = run_tests(
+            pytester,
+            """
+            import logging
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow, wider, caplog):
+                with lakeflow.job("my_job") as first, wider.job("my_job") as second:
+                    first.start()
+                    with pytest.raises(LakeflowError, match="may have 1 run active at once"):
+                        second.start(timeout=timedelta(0))
+                warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+                assert warnings == [
+                    "max_concurrent_runs=3 differs from the cap of 1 that this process already uses, which every "
+                    "Lakeflow in the process shares, so it is ignored"
+                ]
+            """,
+        )
+        result.assert_outcomes(passed=1)
 
 
 class TestKeepRules:

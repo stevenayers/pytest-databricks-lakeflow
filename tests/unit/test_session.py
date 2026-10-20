@@ -276,6 +276,39 @@ class TestSharedSetup:
         assert (report["dry_run"], report["jobs"]) == (False, [1, 2, 7])
 
 
+class TestRunCapPerWorker:
+    """`--lakeflow-max-concurrent-runs` caps the runs of each xdist worker, not of the whole session."""
+
+    def test_cap_is_per_worker(self, pytester: pytest.Pytester, bundle_dir: Path) -> None:
+        pytest.importorskip("xdist")
+        make_xdist_conftest(pytester)
+        started = pytester.path / "started.log"
+        # Each worker holds its one slot until the other worker has started a run too.
+        pytester.makepyfile(
+            f"""
+            import os
+            import time
+
+            def started():
+                with open({str(started)!r}) as f:
+                    return f.read().split()
+
+            def test_start(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.start()
+                    with open({str(started)!r}, "a") as f:
+                        f.write(os.environ["PYTEST_XDIST_WORKER"] + "\\n")
+                    deadline = time.monotonic() + 10
+                    while len(started()) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    assert len(started()) == 2
+            """
+        )
+        result = pytester.runpytest("-n", "2", "--dist", "each", "--lakeflow-max-concurrent-runs=1")
+        result.assert_outcomes(passed=2)
+        assert sorted(started.read_text().split()) == ["gw0", "gw1"]
+
+
 class TestRunId:
     """The session's run id comes from the CI environment, or is random."""
 

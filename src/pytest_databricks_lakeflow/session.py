@@ -10,6 +10,7 @@ import random
 import re
 import secrets
 import subprocess
+import threading
 import time
 import urllib.parse
 import warnings
@@ -35,6 +36,7 @@ from pytest_databricks_lakeflow.settings import NAME_PREFIX, tag_value
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.client import Lakeflow
+    from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 
@@ -153,6 +155,34 @@ class BundleKey:
         return f"lakeflow_{digest[:16]}.json"
 
 
+class RunSlots:
+    """The cap on the runs that one process has active at once.
+
+    It comes from `--lakeflow-max-concurrent-runs` or `max_concurrent_runs`. Each xdist worker has its own.
+
+    Attributes:
+        cap: How many runs may be active at once.
+        semaphore: One slot per run, taken before `run_now`.
+        holders: The job of each run that holds a slot, by run id.
+        ignored: Caps that other `Lakeflow` instances asked for and that have been warned about.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.semaphore = threading.BoundedSemaphore(cap)
+        self.holders: dict[int, EphemeralJob] = {}
+        self.ignored: set[int] = set()
+
+    def hold(self, run_id: int, job: EphemeralJob) -> None:
+        """Record that run `run_id` of `job` holds the slot taken for it."""
+        self.holders[run_id] = job
+
+    def release(self, run_id: int) -> None:
+        """Give back the slot of run `run_id`, once, however often the run is forgotten."""
+        if self.holders.pop(run_id, None) is not None:
+            self.semaphore.release()
+
+
 @dataclass(eq=False)
 class SessionState:
     """What the `Lakeflow` instances of one pytest session share.
@@ -194,6 +224,8 @@ class SessionState:
         sp_user_roles: Whether an identity has the Service Principal User role on a service principal, as
             `check_sp_user_role` found it, by workspace host, identity and application id.
         live: Whether `--lakeflow-live` is set.
+        max_concurrent_runs: The value of `--lakeflow-max-concurrent-runs`, or `None`.
+        slots: The cap on the runs this process has active, made by the first run under a cap, or `None`.
     """
 
     rootpath: Path
@@ -225,6 +257,37 @@ class SessionState:
     debug_notebooks: list[str] = field(default_factory=list)
     sp_user_roles: dict[tuple[str, str, str], bool | None] = field(default_factory=dict)
     live: bool = False
+    max_concurrent_runs: int | None = None
+    slots: RunSlots | None = None
+
+    def run_slots(self, cap: int | None) -> RunSlots | None:
+        """Get the cap on this process's active runs, making it on first use. The command-line flag wins over `cap`.
+
+        Every `Lakeflow` in the process shares one cap, sized by the first run started under one. A later `Lakeflow`
+        that asks for a different cap gets the same one, with a warning.
+
+        Args:
+            cap: `Lakeflow`'s `max_concurrent_runs`.
+
+        Returns:
+            The cap, or `None` when neither the flag nor `cap` sets one.
+        """
+        if self.max_concurrent_runs is not None:
+            cap = self.max_concurrent_runs
+        if cap is None:
+            return None
+        if self.slots is None:
+            self.slots = RunSlots(cap)
+            return self.slots
+        if cap != self.slots.cap and cap not in self.slots.ignored:
+            self.slots.ignored.add(cap)
+            log.warning(
+                "max_concurrent_runs=%s differs from the cap of %s that this process already uses, which every "
+                "Lakeflow in the process shares, so it is ignored",
+                cap,
+                self.slots.cap,
+            )
+        return self.slots
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job, pipeline or schema. The command-line flags win over `Lakeflow`'s arguments.

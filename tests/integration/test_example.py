@@ -249,6 +249,21 @@ def test_start_two_jobs_and_wait(lakeflow: Lakeflow) -> None:
         assert second_started < first_ended
 
 
+def test_max_concurrent_runs_starts_the_next_run_once_one_ends(lakeflow: Lakeflow) -> None:
+    capped = dataclasses.replace(lakeflow, max_concurrent_runs=1)
+    with capped.job("my_example_job") as first_job, capped.job("my_example_job") as second_job:
+        first = first_job.start(only=["extract"])
+        # The cap is full, so this start polls the first run until it has ended, though nobody waits for it.
+        second = second_job.start(only=["extract"], timeout=timedelta(minutes=10))
+        first_run = first.wait()
+        second_run = second.wait()
+        assert first_run.succeeded and second_run.succeeded
+        first_ended = lakeflow.ws.jobs.get_run(first_run.run_id).end_time
+        second_started = lakeflow.ws.jobs.get_run(second_run.run_id).start_time
+        assert first_ended is not None and second_started is not None
+        assert second_started >= first_ended
+
+
 @pytest.fixture(scope="module")
 def explode_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     # transform sets stage before it raises, never sets never_set, and load does not run.
