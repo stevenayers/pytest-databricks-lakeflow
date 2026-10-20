@@ -2097,6 +2097,15 @@ def environment_versions(created: dict[str, Any]) -> dict[str, str | None]:
     return {e.environment_key: e.spec.environment_version for e in created["environments"]}
 
 
+def lifecycle_notebooks(ws: FakeWorkspaceClient, created: dict[str, Any]) -> dict[str, str]:
+    """Map each setup and teardown task of a created job to the source of the notebook it runs."""
+    sources: dict[str, str] = {}
+    for task in created["tasks"]:
+        if task.task_key in ("__pytest_setup", "__pytest_teardown"):
+            sources[task.task_key] = ws.workspace.uploads[task.notebook_task.notebook_path]["content"]
+    return sources
+
+
 class TestSessionDefaults:
     """`Lakeflow` fields that set the default of a per-call argument, and the call that replaces one."""
 
@@ -2215,7 +2224,12 @@ class TestSessionDefaults:
     def test_session_default_dependencies_and_lifecycle(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
-        configure_lakeflow(pytester, 'extra_dependencies=["pytest>=8"], setup=["SELECT 1"], teardown=["SELECT 2"]')
+        configure_lakeflow(
+            pytester,
+            'extra_dependencies=["pytest>=8"], setup=Path("seed.py"), teardown=["SELECT 2"]',
+            "\nfrom pathlib import Path\n",
+        )
+        pytester.path.joinpath("seed.py").write_text("spark.sql('SELECT 1')\n")
         result = run_tests(
             pytester,
             """
@@ -2228,8 +2242,13 @@ class TestSessionDefaults:
         job, task = fake_ws.jobs.created
         assert [e.spec.dependencies for e in job["environments"] if e.environment_key == "default"] == [["pytest>=8"]]
         assert [e.spec.dependencies for e in task["environments"] if e.environment_key == "default"] == [None]
-        assert {"__pytest_setup", "__pytest_teardown"} <= {t.task_key for t in job["tasks"]}
-        assert {"__pytest_setup", "__pytest_teardown"} <= {t.task_key for t in task["tasks"]}
+        job_notebooks = lifecycle_notebooks(fake_ws, job)
+        task_notebooks = lifecycle_notebooks(fake_ws, task)
+        assert job_notebooks["__pytest_setup"] == task_notebooks["__pytest_setup"]
+        assert "spark.sql('SELECT 1')" in job_notebooks["__pytest_setup"]
+        assert "SELECT 2" in job_notebooks["__pytest_teardown"]
+        assert "SELECT 3" in task_notebooks["__pytest_teardown"]
+        assert "SELECT 2" not in task_notebooks["__pytest_teardown"]
 
 
 class TestRunOptions:

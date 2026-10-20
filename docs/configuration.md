@@ -69,6 +69,8 @@ def test_notifies(lakeflow):
 
 `disable` and `environments` on `Lakeflow` skip a task key or environment key that a job does not have, so one default can serve every job of the bundle. On a call, `disable=` refuses an unknown task and `environments=` adds a new environment.
 
+Once a default is set, a call cannot opt out of `setup`, `teardown` or `run_as`: `None` takes the `Lakeflow` value, and `setup=[]` or `teardown=[]` raises `LakeflowError` like any empty list of statements. For tests that need no setup or teardown, derive a `Lakeflow` without it in their directory's `conftest.py`, such as `dataclasses.replace(lakeflow, setup=None)`, as shown below. To run one copy as you while `Lakeflow` sets another `run_as`, name yourself: pass your user name, or a `jobs.JobRunAs(user_name=...)`.
+
 `Lakeflow` is a dataclass, so a `conftest.py` in a subdirectory can derive its own from the parent's:
 
 ```python

@@ -59,7 +59,7 @@ def test_without_with(lakeflow: Lakeflow) -> None:
 
 ### Run as another identity
 
-By default the copy has no `run_as`, so it runs as you, or as whoever runs the tests. That avoids needing rights on another identity, but it also means the permissions of the deployed job's `run_as` principal are never exercised. `run_as` takes three forms:
+By default the copy has no `run_as`, so it runs as you, or as whoever runs the tests, unless `Lakeflow(run_as=...)` sets a default for every copy. That avoids needing rights on another identity, but it also means the permissions of the deployed job's `run_as` principal are never exercised. `run_as` takes three forms:
 
 ```python
 lakeflow.job("my_example_job", run_as="keep")  # the template's run_as, as deployed
@@ -208,7 +208,7 @@ def lakeflow() -> Lakeflow:
 - `timeout` is a `timedelta`. It defaults to `Lakeflow`'s `timeout`, which is 30 minutes. When it expires the run is cancelled and `LakeflowTimeout` is raised. The job itself is created with `timeout_seconds` set to `Lakeflow`'s `timeout` plus 60 seconds, so the platform stops the run if the test process dies. When `timeout` plus 60 seconds is longer than the job's `timeout_seconds`, `run()` first lengthens it to that with `jobs.update` and logs the change, as a warning when the shorter value came from the template or `modify_settings`. Later runs with the same or a shorter timeout make no update.
 - `stop_after`, keyword only, is a `timedelta` for a job that does not end on its own, such as a streaming job. That long after the run started, the run is cancelled, polled until it has ended, and returned as a `JobRun` whose `cancelled` is true, instead of raising. `timeout` still applies: a run that has not ended by then raises `LakeflowTimeout`, and a `stop_after` longer than `timeout` raises `LakeflowError` before the run starts. See [Stop a run that does not end](#stop-a-run-that-does-not-end).
 - `performance_target`, keyword only, sets the performance target of this run only, as a `jobs.PerformanceTarget` or its name, such as `"PERFORMANCE_OPTIMIZED"`. The job's settings are not changed. It applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError` before the run starts.
-- `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`.
+- `queue`, keyword only, turns queueing on or off for this run only. `job.run(queue=False)` sends `QueueSettings(enabled=False)`. `None`, the default, takes `Lakeflow`'s `queue`, and when that is `None` too, the job's own queue setting. See [Defaults for per-call arguments](configuration.md#defaults-for-per-call-arguments).
 - `full_refresh`, `full_refresh_selection`, `refresh_selection`, `refresh_flow_selection` and `reset_checkpoint_selection`, keyword only, set how the job's pipeline tasks refresh in this run. See [pipeline tasks](#pipeline-tasks).
 - `replay`, keyword only, stubs the tasks that `only` leaves out with the task values a previous run captured. See [replay a run's task values](#replay-a-runs-task-values).
 
