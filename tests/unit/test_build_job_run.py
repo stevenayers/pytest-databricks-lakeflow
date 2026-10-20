@@ -12,6 +12,8 @@ from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.results import (
+    ForEachError,
+    ForEachStats,
     JobRun,
     TaskRun,
     Timing,
@@ -26,6 +28,7 @@ from .fakes import (
     ALL_DISABLED,
     DATA,
     HOST,
+    ITERATION_FAILED,
     PIPELINE_LOGS,
     FakeWorkspaceClient,
     failed_alert_output,
@@ -955,6 +958,126 @@ class TestPlatformErrors:
         assert error_line(recorded_task_run(raw, "broken"), failed_alert_output()) == ALERT_FAILED
 
 
+def iteration_ids(ws: FakeWorkspaceClient, run: jobs.Run, key: str) -> list[int]:
+    """Return the run ids of the iterations that the for-each task `key` of `run` lists, in order."""
+    listed = ws.jobs.iterations[run_id_of(run, key)]
+    assert isinstance(listed, list)
+    return [iteration.run_id or 0 for iteration in listed]
+
+
+# The iterations of the recorded for-each run, which ran the `for_each` bundle's `fanout` job over these inputs: `a`
+# succeeds, `fail` raises ValueError and `set_value` calls `taskValues.set`, which the platform refuses in an
+# iteration. Serverless retried each failing iteration once.
+RECORDED_INPUTS = ["a", "fail", "set_value"]
+
+
+class TestForEachIterations:
+    """A for-each task carries its iterations, each built like a task, and the platform's iteration counts."""
+
+    def test_for_each_iterations_and_stats(self, caplog: pytest.LogCaptureFixture) -> None:
+        ws = FakeWorkspaceClient()
+        states = {"loop": "SUCCESS", "after": "SUCCESS"}
+        raw = make_run(1, states, iterations={"loop": ["SUCCESS", "FAILED", "SUCCESS"]})
+        ws.jobs.add_run(raw)
+        first, failed, _ = iteration_ids(ws, raw, "loop")
+        ws.jobs.outputs[first] = jobs.RunOutput(notebook_output=jobs.NotebookOutput(result="a"))
+        ws.jobs.outputs[failed] = jobs.RunOutput(error="ValueError: no b", error_trace="Traceback\nValueError: no b")
+        ws.jobs.resolved[failed] = jobs.ResolvedValues(
+            notebook_task=jobs.ResolvedNotebookTaskValues(base_parameters={"item": "b"})
+        )
+        with caplog.at_level("INFO", logger="pytest_databricks_lakeflow"):
+            run = build_from(ws, raw)
+        loop = run.task("loop")
+        assert [iteration.result_state for iteration in loop.iterations] == ["SUCCESS", "FAILED", "SUCCESS"]
+        assert [iteration.run_id for iteration in loop.iterations] == iteration_ids(ws, raw, "loop")
+        assert loop.iterations[0].output == "a"
+        assert loop.iterations[1].raised(ValueError)
+        assert loop.iterations[1].error is not None and loop.iterations[1].error.message == "no b"
+        assert loop.iterations[1].parameters == {"item": "b"}
+        assert [attempt.run_id for attempt in loop.iterations[1].attempts] == [failed]
+        assert loop.for_each_stats == ForEachStats(
+            total_iterations=3,
+            succeeded_iterations=2,
+            failed_iterations=1,
+            errors=[ForEachError(message=ITERATION_FAILED, count=1, termination_category="RunExecutionError")],
+        )
+        # The verdict is the for-each task's own result state, which the platform sets from its iterations.
+        assert run.succeeded
+        assert "Read 3 iterations of task loop" in caplog.text
+
+    def test_for_each_iterations_paginate(self) -> None:
+        # runs/get lists 100 iterations a page; databricks-sdk's jobs.get_run follows next_page_token and returns them
+        # all, so one call reads every iteration.
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"loop": "SUCCESS"}, iterations={"loop": ["SUCCESS"] * 250})
+        run = build_from(ws, raw)
+        loop_run_id = run_id_of(raw, "loop")
+        listings = [call for call in ws.jobs.get_run_calls if call == {"run_id": loop_run_id}]
+        assert len(listings) == 1
+        assert len(run.task("loop").iterations) == 250
+        ids = iteration_ids(ws, raw, "loop")
+        assert sorted(call for call in ws.jobs.output_calls if call in ids) == sorted(ids)
+
+    def test_for_each_recorded_run(self) -> None:
+        run, _ = build("for_each", capture_task_values={"loop": ["seen"]})
+        loop = run.task("loop")
+        assert run.failed
+        assert "loop: FAILED" in repr(run)
+        assert run.task("after").upstream_failed
+        assert [iteration.result_state for iteration in loop.iterations] == ["SUCCESS", "FAILED", "FAILED"]
+        assert [iteration.parameters for iteration in loop.iterations] == [{"item": i} for i in RECORDED_INPUTS]
+        assert loop.iterations[0].output == "a"
+        failed = loop.iterations[1]
+        assert failed.raised(ValueError)
+        assert failed.error is not None and failed.error.message == "iteration failed on fail"
+        # Each retry is listed right after the attempt before it, and is an attempt of the same iteration.
+        assert [attempt.attempt for attempt in failed.attempts] == [0, 1]
+        assert failed.attempts[-1].run_id == failed.run_id
+        refused = loop.iterations[2].error
+        assert refused is not None and refused.type == "Py4JJavaError"
+        assert "setting task values is not supported for iterations" in refused.message
+        assert loop.for_each_stats == ForEachStats(
+            total_iterations=3,
+            succeeded_iterations=1,
+            failed_iterations=2,
+            errors=[ForEachError(message=ITERATION_FAILED, count=2, termination_category="RunExecutionError")],
+        )
+        # An iteration cannot set a task value, so a probe on the for-each task finds none.
+        assert loop.task_values == {}
+        assert loop.missing_task_values == ["seen"]
+
+    @pytest.mark.parametrize("name", [name for name in RECORDED_RUNS if name != "for_each"])
+    def test_a_task_without_for_each_task_has_no_iterations(self, name: str) -> None:
+        run, ws = build(name)
+        for task in [*run.tasks.values(), *run.injected_tasks.values()]:
+            assert (task.iterations, task.for_each_stats) == ([], None)
+        assert ws.jobs.iterations == {}
+
+    @pytest.mark.parametrize(("state", "listed"), [("UPSTREAM_FAILED", False), ("EXCLUDED", False), ("CANCELED", True)])
+    def test_iterations_are_read_only_from_a_loop_that_started(self, state: str, listed: bool) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"loop": state}, "FAILED", iterations={"loop": ["CANCELED"]})
+        loop = build_from(ws, raw).task("loop")
+        assert ({"run_id": run_id_of(raw, "loop")} in ws.jobs.get_run_calls) is listed
+        assert len(loop.iterations) == int(listed)
+        assert loop.for_each_stats is not None
+
+    def test_unreadable_iterations_log_warnings(self, caplog: pytest.LogCaptureFixture) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"loop": "SUCCESS", "other": "FAILED"}, "FAILED", iterations={"loop": ["SUCCESS"]})
+        ws.jobs.add_run(raw)
+        (iteration,) = iteration_ids(ws, raw, "loop")
+        ws.jobs.outputs[iteration] = PermissionDenied("no access")
+        assert build_from(ws, raw).task("loop").iterations[0].output is None
+        assert f"Could not read the output of task each (run {iteration}): no access" in caplog.text
+        ws = FakeWorkspaceClient()
+        ws.jobs.iterations[run_id_of(raw, "loop")] = NotFound("gone")
+        loop = build_from(ws, raw).task("loop")
+        assert loop.iterations == []
+        assert loop.for_each_stats is not None and loop.for_each_stats.total_iterations == 1
+        assert f"Could not read the iterations of task loop (run {run_id_of(raw, 'loop')}): gone" in caplog.text
+
+
 def recorded_task_run(run: jobs.Run, key: str) -> jobs.RunTask:
     """The task run of `key` in `run`, as the poll that saw it terminate reports it."""
     return next(task for task in run.tasks or [] if task.task_key == key)
@@ -1227,6 +1350,24 @@ class TestSerialise:
         assert transform["attempts"][-1]["notebook_file"] == "1/transform.html"
         assert data["tasks"]["extract"]["notebook_file"] is None
         assert files == {"1/transform.html": FAILED_EXPORT}
+
+    def test_serialise_for_each_iterations(self) -> None:
+        run, _ = build("for_each")
+        data, files = serialise_with_files(run)
+        loop = data["tasks"]["loop"]
+        assert loop["for_each_stats"] == {
+            "total_iterations": 3,
+            "succeeded_iterations": 1,
+            "failed_iterations": 2,
+            "errors": [{"message": ITERATION_FAILED, "count": 2, "termination_category": "RunExecutionError"}],
+        }
+        assert [iteration["result_state"] for iteration in loop["iterations"]] == ["SUCCESS", "FAILED", "FAILED"]
+        assert len(loop["iterations"][1]["attempts"]) == 2
+        assert loop["iterations"][1]["error"]["type"] == "ValueError"
+        assert data["tasks"]["after"]["iterations"] == []
+        assert data["tasks"]["after"]["for_each_stats"] is None
+        assert files == {}
+        assert json.loads(json.dumps(data)) == data
 
     def test_side_files_of_attempts_and_child_runs(self) -> None:
         ws, _, child = parent_with_child()

@@ -9,7 +9,7 @@ import re
 import time
 import urllib.parse
 from collections.abc import Collection, Iterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from io import BytesIO
@@ -35,6 +35,8 @@ ALERT_FAILED = (
     "An error occurred during execution of task Alert task: Query execution failed. Please check the alert query "
     "text and evaluation conditions first."
 )
+# What the platform reports for a for-each task whose iterations failed: one entry per distinct error, counted.
+ITERATION_FAILED = "Workload failed, see run output for details"
 # The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
 # "Invalid filter expression"; the value must be in single quotes.
 LEVEL_FILTER = re.compile(r"^level='(?P<level>[A-Z]+)'$")
@@ -44,6 +46,20 @@ NAME_FILTER = re.compile(r"^name LIKE '(?P<prefix>[^%']*)%'$")
 # not bytes.
 MAX_PIPELINE_NAME_CHARS = 255
 PIPELINE_SPEC_FIELDS = frozenset(pipelines.PipelineSpec.__dataclass_fields__)
+
+
+@dataclass
+class RunWithIterations(jobs.Run):
+    """A job run that also carries the iterations of its for-each tasks, which `FakeJobs` serves.
+
+    The Jobs API lists no iterations on a job run, only on a for-each task run fetched by its own id, so `make_run`
+    and `recorded` hand them to `FakeJobs.add_run` and `FakeJobs.run_now` here.
+
+    Attributes:
+        for_each_iterations: The iteration runs of each for-each task, by the for-each task run's id.
+    """
+
+    for_each_iterations: dict[int, list[jobs.RunTask]] = field(default_factory=dict)
 
 
 class FakeJobs:
@@ -63,6 +79,7 @@ class FakeJobs:
         self.raw_outputs: dict[int, dict[str, Any] | Exception] = {}
         self.output_calls: list[int] = []
         self.resolved: dict[int, jobs.ResolvedValues | Exception] = {}
+        self.iterations: dict[int, list[jobs.RunTask] | Exception] = {}
         self.get_run_calls: list[dict[str, Any]] = []
         self.exports: dict[int, str | Exception] = {}
         self.export_calls: list[dict[str, Any]] = []
@@ -194,6 +211,7 @@ class FakeJobs:
         assert run_id is not None
         # Like the Jobs API, every snapshot of the run names the job it belongs to.
         self.polls[run_id] = [replace(run, job_id=job_id) for run in polls]
+        self._add_iterations(polls[-1])
         if idempotency_token is not None:
             self.tokens[idempotency_token] = run_id
         return SimpleNamespace(response=jobs.RunNowResponse(run_id=run_id))
@@ -202,8 +220,32 @@ class FakeJobs:
         """Make `get_run` report `run`, a run started outside the plugin such as a Run Job task's child run."""
         assert run.run_id is not None
         self.polls[run.run_id] = [run]
+        self._add_iterations(run)
+
+    def _add_iterations(self, run: jobs.Run) -> None:
+        """Serve the iterations a `RunWithIterations` carries, with the resolved values recorded on each.
+
+        A for-each task run whose `iterations` a test already set, such as to an error, keeps them.
+        """
+        if not isinstance(run, RunWithIterations):
+            return
+        for loop_run_id, iterations in run.for_each_iterations.items():
+            listed: list[jobs.RunTask] = []
+            for iteration in iterations:
+                # The listing carries no resolved values: the platform fills them only on an iteration fetched by its
+                # own id with `include_resolved_values`, which `get_run` serves from `resolved`.
+                if iteration.resolved_values is not None and iteration.run_id is not None:
+                    self.resolved[iteration.run_id] = iteration.resolved_values
+                listed.append(replace(iteration, resolved_values=None))
+            self.iterations.setdefault(loop_run_id, listed)
 
     def get_run(self, run_id: int, **kwargs: Any) -> jobs.Run:
+        """Serve a job run, or a task run or iteration fetched by its own id.
+
+        A for-each task run fetched by its own id lists every one of its `iterations`. The platform pages them 100 at
+        a time, and databricks-sdk's `jobs.get_run` follows `next_page_token` until it has them all, so the client
+        returns them in one `Run`.
+        """
         self.get_run_calls.append({"run_id": run_id, **kwargs})
         if run_id in self.polls:
             polls = self.polls[run_id]
@@ -218,20 +260,30 @@ class FakeJobs:
         resolved = self.resolved.get(run_id) if kwargs.get("include_resolved_values") else None
         if isinstance(resolved, Exception):
             raise resolved
+        iterations = self.iterations.get(run_id)
+        if isinstance(iterations, Exception):
+            raise iterations
         return jobs.Run(
             run_id=run_id,
             job_id=parent.job_id,
             job_run_id=parent.run_id,
             tasks=[replace(task, resolved_values=resolved)],
+            iterations=iterations,
         )
 
     def _task_run(self, run_id: int) -> tuple[jobs.Run, jobs.RunTask] | None:
-        """Find the task run `run_id`, with the last snapshot of the job run it belongs to."""
+        """Find the task run or iteration `run_id`, with the last snapshot of the job run it belongs to."""
         for polls in self.polls.values():
             parent = polls[-1]
             for task in parent.tasks or []:
                 if task.run_id == run_id:
                     return parent, task
+                iterations = self.iterations.get(task.run_id or 0)
+                if isinstance(iterations, Exception):
+                    continue
+                for iteration in iterations or []:
+                    if iteration.run_id == run_id:
+                        return parent, iteration
         return None
 
     def get_run_output(self, run_id: int) -> jobs.RunOutput:
@@ -691,10 +743,27 @@ def sweep_candidates() -> list[jobs.BaseJob]:
 
 
 def recorded(name: str) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
-    """Load a run recorded during the spikes, with its task outputs by task run id."""
+    """Load a run recorded during the spikes, with its task outputs by task run id.
+
+    A recording of a run with for-each tasks has an `iterations` key: the iterations that each for-each task run
+    lists, by its run id, each with the `resolved_values` its own `get_run` reported. The run then carries them, as
+    a `RunWithIterations`.
+    """
     data = json.loads((DATA / "runs" / f"{name}.json").read_text())
     outputs = {int(run_id): jobs.RunOutput.from_dict(output) for run_id, output in data["outputs"].items()}
-    return jobs.Run.from_dict(data["run"]), outputs
+    run = jobs.Run.from_dict(data["run"])
+    iterations: dict[int, list[jobs.RunTask]] = {}
+    for loop_run_id, listed in data.get("iterations", {}).items():
+        iterations[int(loop_run_id)] = [jobs.RunTask.from_dict(iteration) for iteration in listed]
+    return with_iterations(run, iterations), outputs
+
+
+def with_iterations(run: jobs.Run, iterations: Mapping[int, list[jobs.RunTask]]) -> jobs.Run:
+    """Return `run` carrying `iterations`, by for-each task run id, or `run` itself when there are none."""
+    if not iterations:
+        return run
+    values = {f.name: getattr(run, f.name) for f in fields(jobs.Run)}
+    return RunWithIterations(**values, for_each_iterations=dict(iterations))
 
 
 def make_run(
@@ -708,6 +777,7 @@ def make_run(
     sql_files: Mapping[str, str] | None = None,
     pipeline_tasks: Mapping[str, str] | None = None,
     trigger: jobs.TriggerType = jobs.TriggerType.ONE_TIME,
+    iterations: Mapping[str, Sequence[str]] | None = None,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -731,6 +801,12 @@ def make_run(
     starts at 1,000 ms and ends at 3,000 ms, so an update created in between is the one the task started.
 
     `trigger` is what started the run, `ONE_TIME` for a run-now run, as the platform reports it.
+
+    `iterations` makes the tasks it names for-each tasks over the inputs `"0"`, `"1"` and so on, repeating the task
+    `each`, whose iterations ended in the given states, in order, each in one attempt. The task run reports its
+    `for_each_task` with the platform's `stats`, and the run is a `RunWithIterations`, so `FakeJobs` lists the
+    iterations on the task run fetched by its own id. An iteration's run id is the for-each task run's id times 1,000
+    plus its position.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -753,9 +829,14 @@ def make_run(
                     notebook_task=_notebook(notebooks, key),
                     sql_task=_sql_file(sql_files, key),
                     pipeline_task=_pipeline(pipeline_tasks, key),
+                    for_each_task=_for_each(iterations, key),
                 )
             )
-    return jobs.Run(
+    loops: dict[int, list[jobs.RunTask]] = {}
+    for task in tasks:
+        if iterations is not None and task.task_key in iterations and task.run_id is not None:
+            loops[task.run_id] = _iteration_runs(task.run_id, iterations[task.task_key])
+    run = jobs.Run(
         run_id=run_id,
         job_run_id=run_id,
         state=jobs.RunState(result_state=jobs.RunResultState(result_state)),
@@ -766,6 +847,7 @@ def make_run(
         end_time=6_000,
         trigger=trigger,
     )
+    return with_iterations(run, loops)
 
 
 def skipped_run(run_id: int, keys: Sequence[str], notebooks: Collection[str] = ()) -> jobs.Run:
@@ -888,6 +970,53 @@ def _pipeline(pipeline_ids: Mapping[str, str] | None, key: str) -> jobs.Pipeline
     if pipeline_ids is None or key not in pipeline_ids:
         return None
     return jobs.PipelineTask(pipeline_id=pipeline_ids[key])
+
+
+def _for_each(iterations: Mapping[str, Sequence[str]] | None, key: str) -> jobs.RunForEachTask | None:
+    if iterations is None or key not in iterations:
+        return None
+    states = iterations[key]
+    succeeded = states.count("SUCCESS")
+    failed = len(states) - succeeded
+    # As recorded, the platform counts each iteration once, however often it was retried, and groups the errors by
+    # message, with the same generic message for every iteration that failed.
+    errors = []
+    if failed:
+        errors.append(
+            jobs.ForEachTaskErrorMessageStats(
+                count=failed, error_message=ITERATION_FAILED, termination_category="RunExecutionError"
+            )
+        )
+    task_run_stats = jobs.ForEachTaskTaskRunStats(
+        total_iterations=len(states),
+        scheduled_iterations=len(states),
+        active_iterations=0,
+        completed_iterations=len(states),
+        succeeded_iterations=succeeded,
+        failed_iterations=failed,
+    )
+    stats = jobs.ForEachStats(task_run_stats=task_run_stats, error_message_stats=errors)
+    inputs = json.dumps([str(position) for position in range(len(states))])
+    return jobs.RunForEachTask(inputs=inputs, task=jobs.Task(task_key="each"), stats=stats)
+
+
+def _iteration_runs(loop_run_id: int, states: Sequence[str]) -> list[jobs.RunTask]:
+    runs: list[jobs.RunTask] = []
+    for position, state in enumerate(states):
+        iteration_run_id = loop_run_id * 1000 + position
+        runs.append(
+            jobs.RunTask(
+                task_key="each",
+                run_id=iteration_run_id,
+                attempt_number=0,
+                state=_state(state),
+                status=jobs.RunStatus(state=TERMINATED, termination_details=_details(state)),
+                run_page_url=f"{HOST}/jobs/runs/{iteration_run_id}",
+                start_time=1_000,
+                end_time=2_000,
+            )
+        )
+    return runs
 
 
 def _state(state: str | None) -> jobs.RunState:

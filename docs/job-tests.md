@@ -527,7 +527,28 @@ Each list replaces the task's `for_each_task.inputs` on the copy as JSON, here `
 
 A key that is not a task of the job, or a task without a `for_each_task` (a for-each task that `upstream_task_values` stubs has none), raises `LakeflowError` listing the job's for-each tasks, and so does a list that is not JSON-serialisable or is longer than 5,000 characters as JSON, the most `jobs/create` accepts. So does a list that `jobs/create` would refuse: one that mixes objects with strings, numbers or booleans, or holds `None` or a nested list, such as `Inputs for task 'loop' in for_each_inputs hold None at index 1. jobs/create takes a list of all primitives or all objects, without null or nested lists.` Objects may hold lists, objects and `None` as values. `lakeflow.task()` takes a list for the task under test, see [Make a task job](task-tests.md#make-a-task-job).
 
-`run.task("loop")` describes the for-each task as one task: its iterations are not in the result yet, and the nested task cannot be the target of `run(only=...)`. To run the nested task once, without its loop, with an item you choose, see [For-each bodies](task-tests.md#for-each-bodies).
+`run.task("loop")` describes the for-each task as one task, whose `result_state` is the platform's verdict on the whole loop: `run.succeeded` reads that, not the iterations. Its `iterations` list one `TaskRun` per input, in iteration order, and its `for_each_stats` the platform's counts. In the `fanout` job, the notebook task `each` returns its `item` widget, which the loop sets to `{{input}}`, and raises `ValueError` for an item starting with `fail`:
+
+```python
+def test_one_iteration_fails(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("fanout", for_each_inputs={"loop": ["a", "fail"]}) as job:
+        run = job.run()
+    loop = run.task("loop")
+    assert loop.result_state == "FAILED"
+    assert [iteration.result_state for iteration in loop.iterations] == ["SUCCESS", "FAILED"]
+    assert loop.iterations[0].output == "a"
+    assert loop.iterations[1].parameters == {"item": "fail"}
+    assert loop.iterations[1].raised(ValueError)
+    assert (loop.for_each_stats.total_iterations, loop.for_each_stats.failed_iterations) == (2, 1)
+```
+
+Each iteration is built like a task: its `task_key` is the nested task's key, here `each`, and its `output`, `error`, `logs`, `timing` and `parameters` are its own. The input itself is not in the result: the platform reports it only inside the nested task's resolved parameters, so it shows in `parameters` wherever the nested task passes `{{input}}`, as `item` does here, or in whatever the iteration returns as its `output`. When the platform retried an iteration, it lists each attempt as an iteration run of its own, and the plugin folds them into one `TaskRun` per iteration, which describes the last attempt and holds every attempt in `attempts`. The iterations are read once the run has finished, with one `get_run` on the for-each task run, which databricks-sdk pages through 100 iterations at a time, then one `get_run_output` and one `get_run` for each attempt of each iteration, eight at a time, so a loop over many items makes the result slower to build. The count of iterations read is logged at INFO.
+
+`for_each_stats` is a `ForEachStats` with `total_iterations`, `succeeded_iterations`, `failed_iterations` and `errors`, each a `ForEachError` with `message`, `count` and `termination_category`. The platform counts each iteration once, however often it was retried, and groups the errors by message: an iteration whose code raised reports `Workload failed, see run output for details` there, and its own error is in `iterations`.
+
+An iteration cannot set task values: `dbutils.jobs.taskValues.set()` in it raises `Py4JJavaError` with `INVALID_PARAMETER_VALUE: Run <id> is an iteration of a For each run; setting task values is not supported for iterations.`, which fails the iteration. So `capture_task_values={"loop": [...]}` captures nothing: the probe reports every key as missing, and `run.task("loop").task_values[key]` raises `KeyError` with `Task 'loop' never set value '<key>'`. Return a value with `dbutils.notebook.exit()` and read it from the iteration's `output` instead.
+
+The nested task cannot be the target of `run(only=...)`. To run the nested task once, without its loop, with an item you choose, see [For-each bodies](task-tests.md#for-each-bodies).
 
 ## Simulate a trigger
 

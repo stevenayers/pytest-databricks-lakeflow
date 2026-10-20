@@ -1,0 +1,432 @@
+{
+  "iterations": {
+    "385080330682638": [
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474440705,
+        "execution_duration": 33000,
+        "notebook_task": {
+          "base_parameters": {
+            "item": "{{input}}"
+          },
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+          "source": "WORKSPACE"
+        },
+        "resolved_values": {
+          "notebook_task": {
+            "base_parameters": {
+              "item": "a"
+            }
+          }
+        },
+        "run_id": 566612205449788,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/566612205449788",
+        "setup_duration": 285000,
+        "start_time": 1792474122473,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "SUCCESS",
+          "state_message": "",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "SUCCESS",
+            "message": "",
+            "type": "SUCCESS"
+          }
+        },
+        "task_key": "each"
+      },
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474444721,
+        "execution_duration": 37000,
+        "notebook_task": {
+          "base_parameters": {
+            "item": "{{input}}"
+          },
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+          "source": "WORKSPACE"
+        },
+        "resolved_values": {
+          "notebook_task": {
+            "base_parameters": {
+              "item": "fail"
+            }
+          }
+        },
+        "run_id": 389676264902113,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/389676264902113",
+        "setup_duration": 285000,
+        "start_time": 1792474122522,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "message": "Workload failed, see run output for details",
+            "type": "CLIENT_ERROR"
+          }
+        },
+        "task_key": "each"
+      },
+      {
+        "attempt_number": 1,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474456214,
+        "execution_duration": 8000,
+        "notebook_task": {
+          "base_parameters": {
+            "item": "{{input}}"
+          },
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+          "source": "WORKSPACE"
+        },
+        "resolved_values": {
+          "notebook_task": {
+            "base_parameters": {
+              "item": "fail"
+            }
+          }
+        },
+        "run_id": 842060872321136,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/842060872321136",
+        "setup_duration": 1000,
+        "start_time": 1792474446411,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "message": "Workload failed, see run output for details",
+            "type": "CLIENT_ERROR"
+          }
+        },
+        "task_key": "each"
+      },
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474444686,
+        "execution_duration": 37000,
+        "notebook_task": {
+          "base_parameters": {
+            "item": "{{input}}"
+          },
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+          "source": "WORKSPACE"
+        },
+        "resolved_values": {
+          "notebook_task": {
+            "base_parameters": {
+              "item": "set_value"
+            }
+          }
+        },
+        "run_id": 1051499745302314,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/1051499745302314",
+        "setup_duration": 285000,
+        "start_time": 1792474122585,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "message": "Workload failed, see run output for details",
+            "type": "CLIENT_ERROR"
+          }
+        },
+        "task_key": "each"
+      },
+      {
+        "attempt_number": 1,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474456113,
+        "execution_duration": 8000,
+        "notebook_task": {
+          "base_parameters": {
+            "item": "{{input}}"
+          },
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+          "source": "WORKSPACE"
+        },
+        "resolved_values": {
+          "notebook_task": {
+            "base_parameters": {
+              "item": "set_value"
+            }
+          }
+        },
+        "run_id": 393768459964526,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/393768459964526",
+        "setup_duration": 1000,
+        "start_time": 1792474446138,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "message": "Workload failed, see run output for details",
+            "type": "CLIENT_ERROR"
+          }
+        },
+        "task_key": "each"
+      }
+    ]
+  },
+  "outputs": {
+    "1051499745302314": {
+      "error": "Py4JJavaError: An error occurred while calling SetTaskValue.\n: com.databricks.common.client.DatabricksServiceHttpClientException: INVALID_PARAMETER_VALUE: Run 1051499745302314 is an iteration of a For each run; setting task values is not supported for iterations.\n\tat com.databricks.common.client.DatabricksServiceHttpClientException.copy(DBHttpClient.scala:2094)\n\tat com.databricks.common.client.RawDBHttpClient.parseResponse(DBHttpClient.scala:1771)\n\tat com.databricks.common.client.RawDBHttpClient.getResponseBody(DBHttpClient.scala:1756)\n\tat com.databricks.common.client.RawDBHttpClient.$anonfun$httpRequestInternal$1(DBHttpClient.scala:1614)\n\tat com.databricks.logging.UsageLogging.$anonfun$recordOperation$1(UsageLogging.scala:364)\n\tat com.databricks.logging.UsageLogging.executeThunkAndCaptureResultTags$1(UsageLogging.scala:518)\n\tat com.databricks.logging.UsageLogging.$anonfun$recordOperationWithResultTags$5(UsageLogging.scala:545)\n\tat com.databricks.logging.AttributionContextTracing.$anonfun$withAttributionContext$1(AttributionContextTracing.scala:146)\n\tat com.databricks.logging.AttributionContext$.withValue(AttributionContext.scala:354)\n\tat com.databricks.logging.AttributionContextTracing.withAttributionContext(AttributionContextTracing.scala:144)",
+      "error_trace": "\u001b[31m---------------------------------------------------------------------------\u001b[39m\n\u001b[31mPy4JJavaError\u001b[39m                             Traceback (most recent call last)\n\u001b[36mFile\u001b[39m\u001b[36m \u001b[39m\u001b[32m<command-4572950967243447>\u001b[39m\u001b[32m, line 4\u001b[39m\n\u001b[32m      1\u001b[39m item = dbutils.widgets.get(\u001b[33m\"\u001b[39m\u001b[33mitem\u001b[39m\u001b[33m\"\u001b[39m)\n\u001b[32m      2\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item == \u001b[33m\"\u001b[39m\u001b[33mset_value\u001b[39m\u001b[33m\"\u001b[39m:\n\u001b[32m      3\u001b[39m     \u001b[38;5;66;03m# The platform refuses this in an iteration of a for-each task, so the iteration fails.\u001b[39;00m\n\u001b[32m----> \u001b[39m\u001b[32m4\u001b[39m     \u001b[43mdbutils\u001b[49m\u001b[43m.\u001b[49m\u001b[43mjobs\u001b[49m\u001b[43m.\u001b[49m\u001b[43mtaskValues\u001b[49m\u001b[43m.\u001b[49m\u001b[43mset\u001b[49m\u001b[43m(\u001b[49m\u001b[43mkey\u001b[49m\u001b[43m=\u001b[49m\u001b[33;43m\"\u001b[39;49m\u001b[33;43mseen\u001b[39;49m\u001b[33;43m\"\u001b[39;49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mvalue\u001b[49m\u001b[43m=\u001b[49m\u001b[43mitem\u001b[49m\u001b[43m)\u001b[49m\n\u001b[32m      5\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item.startswith(\u001b[33m\"\u001b[39m\u001b[33mfail\u001b[39m\u001b[33m\"\u001b[39m):\n\u001b[32m      6\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mValueError\u001b[39;00m(\u001b[33mf\u001b[39m\u001b[33m\"\u001b[39m\u001b[33miteration failed on \u001b[39m\u001b[38;5;132;01m{\u001b[39;00mitem\u001b[38;5;132;01m}\u001b[39;00m\u001b[33m\"\u001b[39m)\n\n\u001b[36mFile \u001b[39m\u001b[32m/databricks/python_shell/lib/dbruntime/dbutils.py:321\u001b[39m, in \u001b[36mDBUtils.JobsHandler.TaskValuesHandler.set\u001b[39m\u001b[34m(self, key, value)\u001b[39m\n\u001b[32m    319\u001b[39m \u001b[38;5;28;01mdef\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[34mset\u001b[39m(\u001b[38;5;28mself\u001b[39m, key, value):",
+      "notebook_output": {}
+    },
+    "1078354499808140": {
+      "notebook_output": {
+        "result": "{\"values\": {}, \"missing\": [\"seen\"]}",
+        "truncated": false
+      }
+    },
+    "385080330682638": {},
+    "389676264902113": {
+      "error": "ValueError: iteration failed on fail",
+      "error_trace": "\u001b[31m---------------------------------------------------------------------------\u001b[39m\n\u001b[31mValueError\u001b[39m                                Traceback (most recent call last)\n\u001b[36mFile\u001b[39m\u001b[36m \u001b[39m\u001b[32m<command-4572950967243447>\u001b[39m\u001b[32m, line 6\u001b[39m\n\u001b[32m      4\u001b[39m     dbutils.jobs.taskValues.set(key=\u001b[33m\"\u001b[39m\u001b[33mseen\u001b[39m\u001b[33m\"\u001b[39m, value=item)\n\u001b[32m      5\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item.startswith(\u001b[33m\"\u001b[39m\u001b[33mfail\u001b[39m\u001b[33m\"\u001b[39m):\n\u001b[32m----> \u001b[39m\u001b[32m6\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mValueError\u001b[39;00m(\u001b[33mf\u001b[39m\u001b[33m\"\u001b[39m\u001b[33miteration failed on \u001b[39m\u001b[38;5;132;01m{\u001b[39;00mitem\u001b[38;5;132;01m}\u001b[39;00m\u001b[33m\"\u001b[39m)\n\u001b[32m      7\u001b[39m dbutils.notebook.exit(item)\n\n\u001b[31mValueError\u001b[39m: iteration failed on fail",
+      "notebook_output": {}
+    },
+    "393768459964526": {
+      "error": "Py4JJavaError: An error occurred while calling SetTaskValue.\n: com.databricks.common.client.DatabricksServiceHttpClientException: INVALID_PARAMETER_VALUE: Run 393768459964526 is an iteration of a For each run; setting task values is not supported for iterations.\n\tat com.databricks.common.client.DatabricksServiceHttpClientException.copy(DBHttpClient.scala:2094)\n\tat com.databricks.common.client.RawDBHttpClient.parseResponse(DBHttpClient.scala:1771)\n\tat com.databricks.common.client.RawDBHttpClient.getResponseBody(DBHttpClient.scala:1756)\n\tat com.databricks.common.client.RawDBHttpClient.$anonfun$httpRequestInternal$1(DBHttpClient.scala:1614)\n\tat com.databricks.logging.UsageLogging.$anonfun$recordOperation$1(UsageLogging.scala:364)\n\tat com.databricks.logging.UsageLogging.executeThunkAndCaptureResultTags$1(UsageLogging.scala:518)\n\tat com.databricks.logging.UsageLogging.$anonfun$recordOperationWithResultTags$5(UsageLogging.scala:545)\n\tat com.databricks.logging.AttributionContextTracing.$anonfun$withAttributionContext$1(AttributionContextTracing.scala:146)\n\tat com.databricks.logging.AttributionContext$.withValue(AttributionContext.scala:354)\n\tat com.databricks.logging.AttributionContextTracing.withAttributionContext(AttributionContextTracing.scala:144)",
+      "error_trace": "\u001b[31m---------------------------------------------------------------------------\u001b[39m\n\u001b[31mPy4JJavaError\u001b[39m                             Traceback (most recent call last)\n\u001b[36mFile\u001b[39m\u001b[36m \u001b[39m\u001b[32m<command-4572950967243447>\u001b[39m\u001b[32m, line 4\u001b[39m\n\u001b[32m      1\u001b[39m item = dbutils.widgets.get(\u001b[33m\"\u001b[39m\u001b[33mitem\u001b[39m\u001b[33m\"\u001b[39m)\n\u001b[32m      2\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item == \u001b[33m\"\u001b[39m\u001b[33mset_value\u001b[39m\u001b[33m\"\u001b[39m:\n\u001b[32m      3\u001b[39m     \u001b[38;5;66;03m# The platform refuses this in an iteration of a for-each task, so the iteration fails.\u001b[39;00m\n\u001b[32m----> \u001b[39m\u001b[32m4\u001b[39m     \u001b[43mdbutils\u001b[49m\u001b[43m.\u001b[49m\u001b[43mjobs\u001b[49m\u001b[43m.\u001b[49m\u001b[43mtaskValues\u001b[49m\u001b[43m.\u001b[49m\u001b[43mset\u001b[49m\u001b[43m(\u001b[49m\u001b[43mkey\u001b[49m\u001b[43m=\u001b[49m\u001b[33;43m\"\u001b[39;49m\u001b[33;43mseen\u001b[39;49m\u001b[33;43m\"\u001b[39;49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mvalue\u001b[49m\u001b[43m=\u001b[49m\u001b[43mitem\u001b[49m\u001b[43m)\u001b[49m\n\u001b[32m      5\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item.startswith(\u001b[33m\"\u001b[39m\u001b[33mfail\u001b[39m\u001b[33m\"\u001b[39m):\n\u001b[32m      6\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mValueError\u001b[39;00m(\u001b[33mf\u001b[39m\u001b[33m\"\u001b[39m\u001b[33miteration failed on \u001b[39m\u001b[38;5;132;01m{\u001b[39;00mitem\u001b[38;5;132;01m}\u001b[39;00m\u001b[33m\"\u001b[39m)\n\n\u001b[36mFile \u001b[39m\u001b[32m/databricks/python_shell/lib/dbruntime/dbutils.py:321\u001b[39m, in \u001b[36mDBUtils.JobsHandler.TaskValuesHandler.set\u001b[39m\u001b[34m(self, key, value)\u001b[39m\n\u001b[32m    319\u001b[39m \u001b[38;5;28;01mdef\u001b[39;00m\u001b[38;5;250m \u001b[39m\u001b[34mset\u001b[39m(\u001b[38;5;28mself\u001b[39m, key, value):",
+      "notebook_output": {}
+    },
+    "566612205449788": {
+      "notebook_output": {
+        "result": "a",
+        "truncated": false
+      }
+    },
+    "842060872321136": {
+      "error": "ValueError: iteration failed on fail",
+      "error_trace": "\u001b[31m---------------------------------------------------------------------------\u001b[39m\n\u001b[31mValueError\u001b[39m                                Traceback (most recent call last)\n\u001b[36mFile\u001b[39m\u001b[36m \u001b[39m\u001b[32m<command-4572950967243447>\u001b[39m\u001b[32m, line 6\u001b[39m\n\u001b[32m      4\u001b[39m     dbutils.jobs.taskValues.set(key=\u001b[33m\"\u001b[39m\u001b[33mseen\u001b[39m\u001b[33m\"\u001b[39m, value=item)\n\u001b[32m      5\u001b[39m \u001b[38;5;28;01mif\u001b[39;00m item.startswith(\u001b[33m\"\u001b[39m\u001b[33mfail\u001b[39m\u001b[33m\"\u001b[39m):\n\u001b[32m----> \u001b[39m\u001b[32m6\u001b[39m     \u001b[38;5;28;01mraise\u001b[39;00m \u001b[38;5;167;01mValueError\u001b[39;00m(\u001b[33mf\u001b[39m\u001b[33m\"\u001b[39m\u001b[33miteration failed on \u001b[39m\u001b[38;5;132;01m{\u001b[39;00mitem\u001b[38;5;132;01m}\u001b[39;00m\u001b[33m\"\u001b[39m)\n\u001b[32m      7\u001b[39m dbutils.notebook.exit(item)\n\n\u001b[31mValueError\u001b[39m: iteration failed on fail",
+      "notebook_output": {}
+    },
+    "998265659157723": {
+      "error": "Run result unavailable: The task was skipped because not all its dependencies were executed and succeeded."
+    }
+  },
+  "run": {
+    "cleanup_duration": 0,
+    "creator_user_name": "someone@example.com",
+    "effective_performance_target": "STANDARD",
+    "end_time": 1792474709398,
+    "environments": [
+      {
+        "environment_key": "__pytest_serverless",
+        "spec": {
+          "environment_version": "4"
+        }
+      }
+    ],
+    "execution_duration": 0,
+    "format": "MULTI_TASK",
+    "job_id": 175129330435913,
+    "job_run_id": 694599786419183,
+    "number_in_job": 694599786419183,
+    "original_attempt_run_id": 694599786419183,
+    "run_duration": 588498,
+    "run_id": 694599786419183,
+    "run_name": "[pytest] tests/integration/test_for_each.py::test_a_failing_iteration",
+    "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/694599786419183",
+    "run_type": "JOB_RUN",
+    "setup_duration": 0,
+    "start_time": 1792474120900,
+    "state": {
+      "life_cycle_state": "INTERNAL_ERROR",
+      "result_state": "FAILED",
+      "state_message": "Task loop failed with message: An error occurred during execution of task For each: Some iterations failed.",
+      "user_cancelled_or_timedout": false
+    },
+    "status": {
+      "state": "TERMINATED",
+      "termination_details": {
+        "code": "RUN_EXECUTION_ERROR",
+        "message": "Task loop failed with message: An error occurred during execution of task For each: Some iterations failed.",
+        "type": "CLIENT_ERROR"
+      }
+    },
+    "tasks": [
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "depends_on": [
+          {
+            "task_key": "loop"
+          }
+        ],
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474457598,
+        "execution_duration": 0,
+        "notebook_task": {
+          "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/after",
+          "source": "WORKSPACE"
+        },
+        "run_id": 998265659157723,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/998265659157723",
+        "setup_duration": 0,
+        "start_time": 1792474457598,
+        "state": {
+          "life_cycle_state": "SKIPPED",
+          "result_state": "UPSTREAM_FAILED",
+          "state_message": "An upstream task failed.",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "SKIPPED",
+            "message": "An upstream task failed.",
+            "type": "SUCCESS"
+          }
+        },
+        "task_key": "after"
+      },
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "depends_on": [
+          {
+            "task_key": "loop"
+          }
+        ],
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474709033,
+        "environment_key": "__pytest_serverless",
+        "execution_duration": 26000,
+        "notebook_task": {
+          "base_parameters": {
+            "__pytest_keys": "[\"seen\"]",
+            "__pytest_task_key": "loop"
+          },
+          "notebook_path": "/Users/someone@example.com/.pytest-databricks-lakeflow/get_values",
+          "source": "WORKSPACE"
+        },
+        "run_id": 1078354499808140,
+        "run_if": "ALL_DONE",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/1078354499808140",
+        "setup_duration": 225000,
+        "start_time": 1792474457702,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "SUCCESS",
+          "state_message": "",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "SUCCESS",
+            "message": "",
+            "type": "SUCCESS"
+          }
+        },
+        "task_key": "__pytest_probe__loop"
+      },
+      {
+        "attempt_number": 0,
+        "cleanup_duration": 0,
+        "effective_performance_target": "STANDARD",
+        "end_time": 1792474457307,
+        "execution_duration": 336000,
+        "for_each_task": {
+          "concurrency": 3,
+          "inputs": "[\"a\", \"fail\", \"set_value\"]",
+          "stats": {
+            "error_message_stats": [
+              {
+                "count": 2,
+                "error_message": "Workload failed, see run output for details",
+                "termination_category": "RunExecutionError"
+              }
+            ],
+            "task_run_stats": {
+              "active_iterations": 0,
+              "completed_iterations": 3,
+              "failed_iterations": 2,
+              "scheduled_iterations": 3,
+              "succeeded_iterations": 1,
+              "total_iterations": 3
+            }
+          },
+          "task": {
+            "disabled": false,
+            "email_notifications": {},
+            "notebook_task": {
+              "base_parameters": {
+                "item": "{{input}}"
+              },
+              "notebook_path": "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks/each",
+              "source": "WORKSPACE"
+            },
+            "run_if": "ALL_SUCCESS",
+            "task_key": "each",
+            "timeout_seconds": 0
+          }
+        },
+        "run_id": 385080330682638,
+        "run_if": "ALL_SUCCESS",
+        "run_page_url": "https://adb-1234567890123456.7.azuredatabricks.net/?o=1234567890123456#job/175129330435913/run/385080330682638",
+        "setup_duration": 0,
+        "start_time": 1792474120975,
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "An error occurred during execution of task For each: Some iterations failed",
+          "user_cancelled_or_timedout": false
+        },
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "message": "An error occurred during execution of task For each: Some iterations failed",
+            "type": "CLIENT_ERROR"
+          }
+        },
+        "task_key": "loop"
+      }
+    ],
+    "trigger": "ONE_TIME"
+  }
+}
