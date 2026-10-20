@@ -1057,6 +1057,9 @@ def wheel_settings(entry_point: str, package: str = "pkg") -> jobs.JobSettings:
     return settings
 
 
+CONSOLE_SCRIPTS = "[console_scripts]\nmain = pkg.main:main\n"
+
+
 def trigger_message(owner: str, path: str) -> str:
     return (
         f"{owner}: refers to {{{{job.trigger.{path}}}}}, which a test's run-now run does not resolve as its trigger "
@@ -1068,36 +1071,44 @@ class TestLintRules:
     """The named rules of lint: built wheels, workspace paths, dashed task keys, trigger references and EQUAL_TO."""
 
     @pytest.mark.parametrize(
-        ("entry_point", "init", "problems"),
+        ("entry_point", "entry_points", "init", "problems"),
         [
-            ("main", "", []),
-            ("run", "def run():\n    pass\n", []),
-            ("run", "from pkg.main import main as run\n", []),
+            ("main", CONSOLE_SCRIPTS, "", []),
+            # The Databricks docs build their wheel with entry_points={"group_1": "run=..."}: any group will do.
+            ("run", "[group_1]\nrun = pkg.main:main\n", "", []),
+            ("run", CONSOLE_SCRIPTS, "def run():\n    pass\n", []),
+            ("run", CONSOLE_SCRIPTS, "from pkg.main import main as run\n", []),
             (
                 "run",
+                "[console_scripts]\nmain = pkg.main:main\n[group_1]\nstart = pkg.main:main\nmain = pkg.main:main\n",
                 "def other():\n    pass\n",
                 [
-                    "Task 'load': entry point 'run' is not in dist/pkg-0.1.0-py3-none-any.whl. console_scripts: "
-                    "['main'], and pkg/__init__.py does not define it."
+                    "Task 'load': entry point 'run' is not in dist/pkg-0.1.0-py3-none-any.whl. Entry points: "
+                    "['main', 'start'], and pkg/__init__.py does not define it."
                 ],
             ),
         ],
+        ids=["console-script", "other-group", "init-def", "init-import", "undefined"],
     )
-    def test_lint_wheel_rule(self, tmp_path: Path, entry_point: str, init: str, problems: list[str]) -> None:
-        build_wheel(tmp_path / "dist", init=init)
+    def test_lint_wheel_rule(
+        self, tmp_path: Path, entry_point: str, entry_points: str, init: str, problems: list[str]
+    ) -> None:
+        build_wheel(tmp_path / "dist", entry_points=entry_points, init=init)
         assert lint(wheel_settings(entry_point), bundle_root=tmp_path) == problems
 
     def test_lint_wheel_rule_reads_the_newest_wheel_of_the_normalised_package(self, tmp_path: Path) -> None:
         build_wheel(tmp_path / "dist", "Lakeflow.Example", init="def run():\n    pass\n", modified=1_000)
         build_wheel(tmp_path / "dist", "Lakeflow.Example", version="0.2.0", modified=2_000)
         build_wheel(tmp_path / "dist", "other")
+        # A wheel that is not a zip, such as one an interrupted build left behind, is skipped.
+        (tmp_path / "dist" / "broken-0.1.0-py3-none-any.whl").write_bytes(b"partial")
         settings = wheel_settings("main", "lakeflow_example")
         assert lint(settings, bundle_root=tmp_path) == []
         inner = {"task_key": "inner", "python_wheel_task": {"package_name": "lakeflow-example", "entry_point": "run"}}
         nested = for_each(inner)
         settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(nested)]
         assert lint(settings, bundle_root=tmp_path) == [
-            "Task 'inner': entry point 'run' is not in dist/lakeflow_example-0.2.0-py3-none-any.whl. console_scripts: "
+            "Task 'inner': entry point 'run' is not in dist/lakeflow_example-0.2.0-py3-none-any.whl. Entry points: "
             "['main'], and lakeflow-example/__init__.py does not define it."
         ]
         assert lint(wheel_settings("main", "missing"), bundle_root=tmp_path) == [
@@ -1168,12 +1179,14 @@ class TestLintRules:
                         s="{{tasks.load-raw.result_state}}",
                     ),
                     {**loop, "depends_on": [{"task_key": "load-raw"}]},
+                    # A key in backticks may hold a dash.
+                    notebook("b", "load-raw", n="{{tasks.`load-raw`.values.n}}"),
                 ]
             }
         )
         message = (
             "refers to task 'load-raw', whose key has a dash, which task references do not support. Rename the task "
-            "without dashes."
+            "without dashes, or escape the key with backticks, as in {{tasks.`load-raw`.values.<name>}}."
         )
         assert lint(settings) == [f"Task 'a': {message}", f"Task 'inner': {message}"]
         assert lint(settings, rules=DEFAULT_RULES - {"dash"}) == []

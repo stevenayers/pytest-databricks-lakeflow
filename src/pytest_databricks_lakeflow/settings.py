@@ -1790,7 +1790,8 @@ def _rule_problems(
             if "-" in key:
                 problems.append(
                     f"{prefix} refers to task {key!r}, whose key has a dash, which task references do not support. "
-                    "Rename the task without dashes."
+                    f"Rename the task without dashes, or escape the key with backticks, as in "
+                    f"{{{{tasks.`{key}`.values.<name>}}}}."
                 )
     if "trigger" in rules:
         problems += _trigger_problems(prefix, own)
@@ -1805,15 +1806,15 @@ def _wheel_problems(prefix: str, task: jobs.PythonWheelTask, wheels: Mapping[str
     if path is None:
         return [f"{prefix} no wheel in dist/ is package {package!r}. Packages: {sorted(wheels)}"]
     with zipfile.ZipFile(path) as wheel:
-        scripts = _console_scripts(wheel)
+        entry_points = _entry_points(wheel)
         init = _read_member(wheel, f"{package}/__init__.py")
-    if task.entry_point in scripts:
+    if task.entry_point in entry_points:
         return []
-    # Without a console script of that name, the platform calls the attribute of that name of the package's module.
+    # Without an entry point of that name, the platform calls the attribute of that name of the package's module.
     if init is not None and _binds(init, task.entry_point):
         return []
     return [
-        f"{prefix} entry point {task.entry_point!r} is not in dist/{path.name}. console_scripts: {scripts}, and "
+        f"{prefix} entry point {task.entry_point!r} is not in dist/{path.name}. Entry points: {entry_points}, and "
         f"{package}/__init__.py does not define it."
     ]
 
@@ -1822,8 +1823,12 @@ def _wheels_by_project(dist: Path) -> dict[str, Path]:
     """The newest wheel under `dist` of each project, by its normalised name: the one the last build wrote."""
     wheels: dict[str, Path] = {}
     for path in sorted(dist.glob("*.whl"), key=lambda path: (path.stat().st_mtime, path.name)):
-        with zipfile.ZipFile(path) as wheel:
-            metadata = _dist_info(wheel, "METADATA")
+        try:
+            with zipfile.ZipFile(path) as wheel:
+                metadata = _dist_info(wheel, "METADATA")
+        except zipfile.BadZipFile:
+            # A partial wheel, such as one an interrupted build left behind.
+            continue
         if metadata is None:
             continue
         name = HeaderParser().parsestr(metadata)["Name"]
@@ -1851,16 +1856,19 @@ def _read_member(wheel: zipfile.ZipFile, name: str) -> str | None:
     return wheel.read(name).decode()
 
 
-def _console_scripts(wheel: zipfile.ZipFile) -> list[str]:
+def _entry_points(wheel: zipfile.ZipFile) -> list[str]:
+    """The names of the wheel's entry points, of every group.
+
+    The platform looks `entry_point` up in any group: the Databricks docs build their wheel with
+    `entry_points={"group_1": "run=..."}`, and older ones used a `packages` group.
+    """
     text = _dist_info(wheel, "entry_points.txt") or ""
-    section = None
-    names: list[str] = []
+    names: set[str] = set()
     for line in text.splitlines():
         line = line.strip()
-        if line.startswith("["):
-            section = line.strip("[]").strip()
-        elif section == "console_scripts" and "=" in line:
-            names.append(line.split("=", 1)[0].strip())
+        if line.startswith("[") or "=" not in line:
+            continue
+        names.add(line.split("=", 1)[0].strip())
     return sorted(names)
 
 

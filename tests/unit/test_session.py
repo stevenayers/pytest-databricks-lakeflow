@@ -746,7 +746,7 @@ class TestCheck:
 
             def test_check(lakeflow):
                 assert lakeflow.check("my_job") == [
-                    "Task 'load': entry point 'load' is not in dist/pkg-0.1.0-py3-none-any.whl. console_scripts: "
+                    "Task 'load': entry point 'load' is not in dist/pkg-0.1.0-py3-none-any.whl. Entry points: "
                     "['main'], and pkg/__init__.py does not define it.",
                     "Task 'load': /Workspace/libs/gone.whl does not exist.",
                 ]

@@ -28,7 +28,7 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](configuration.md#report-directory). |
 | `--lakeflow-live` | Print each task state change to the terminal while a run waits, as `run(stream=True)` does for one run. Under xdist the lines are only logged. See [logging and reports](configuration.md#logging-and-reports). |
 | `--lakeflow-max-concurrent-runs=N` | Start a run only while fewer than `N` runs started by this process are active, and otherwise wait for one to end. Overrides `Lakeflow(max_concurrent_runs=...)`. The cap is per xdist worker. |
-| `--lakeflow-check` | Collect one test per job of each `databricks.yml` that pytest collects, `databricks.yml::<key>`, which fails with the problems `Lakeflow.check` finds, without creating or running a job. See [Check a job without running it](job-tests.md#check-a-job-without-running-it). |
+| `--lakeflow-check` | Collect one test per job of each `databricks.yml` that pytest collects, `databricks.yml::<key>`, which fails with the problems `Lakeflow.check` finds with every rule of `DEFAULT_RULES` but `trigger`, without creating or running a job. See [Check a job without running it](job-tests.md#check-a-job-without-running-it). |
 
 ## `Lakeflow`
 
