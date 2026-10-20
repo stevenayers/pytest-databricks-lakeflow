@@ -509,6 +509,24 @@ def test_replay_downstream_half(lakeflow: Lakeflow) -> None:
 
 The Jobs API does not return task values, so the first run must capture them with `capture_task_values`, as for [`upstream_from`](task-tests.md#replay-a-task-from-a-previous-run) on task tests. The stubs are part of the job's settings, so `replay` needs `only` and a job that has not been created yet: pass it to the first run of a new `lakeflow.job(...)`. `LakeflowError` is raised before the run starts when `replay` comes without `only`, the job has already been created, the run is of another job, or a task to stub was not part of that run or has no captured values. With a `teardown=`, the teardown task is rewired after the stubs are added, so it still runs after every task, those upstream of a stub included. A replayed stub sets task values only and gives no outputs, and the plugin checks the `{{tasks.<key>.output.<path>}}` references of every task of the copy, those that `only` leaves out included, so a left-out task that reads an output of a replayed task, such as `{{tasks.query.output.first_row.n}}`, raises `LakeflowError` (`but the stub for 'query' has no output 'first_row.n'`) although it will not run. To fix it, stub that task on `job()` with `upstream_task_values={"query": Stub(values={"row_count": 7}, outputs={"first_row.n": "3"})}`, giving the values the selected tasks read as well: `replay` leaves a task you stubbed yourself as it is.
 
+## For-each tasks
+
+A for-each task runs its nested task once for each item of its `inputs`, so a copy of a job that loops over two hundred items runs two hundred iterations. To give the copy a short list, pass `for_each_inputs`, which maps for-each task keys to lists. In the `for_each` integration bundle, the job `fanout` has a for-each task `loop` that runs the notebook task `each` once per item, then the task `after`:
+
+```python
+def test_two_items(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("fanout", for_each_inputs={"loop": ["a", "b"]}) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.task("after").succeeded
+```
+
+Each list replaces the task's `for_each_task.inputs` on the copy as JSON, here `'["a", "b"]'`, and the nested task reads each item through its `{{input}}` reference as deployed. A `{{` in a value is escaped as it is for stub values, so an item such as `"{{y}}"` reaches the iteration as written rather than being read as a reference. An empty list is allowed: the for-each task runs no iteration and succeeds, and the tasks downstream of it run. Without `for_each_inputs`, the copy keeps the deployed `inputs`.
+
+A key that is not a task of the job, or a task without a `for_each_task`, raises `LakeflowError` listing the job's for-each tasks, and so does a list that is not JSON-serialisable or is longer than 5,000 characters as JSON, the most `jobs/create` accepts. The platform also refuses, when the job is created, a list that mixes objects with strings, numbers or booleans, or holds `None` or a nested list. `lakeflow.task()` takes a list for the task under test, see [Make a task job](task-tests.md#make-a-task-job).
+
+`run.task("loop")` describes the for-each task as one task: its iterations are not in the result yet, and the nested task cannot be the target of `lakeflow.task()` or `run(only=...)`.
+
 ## Pipeline tasks
 
 A pipeline task runs the pipeline that the bundle deployed, with the refresh mode its `pipeline_task` sets. To choose the refresh for one run, pass `full_refresh`, `full_refresh_selection`, `refresh_selection`, `refresh_flow_selection` or `reset_checkpoint_selection`:

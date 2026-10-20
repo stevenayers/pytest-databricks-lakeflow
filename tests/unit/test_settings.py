@@ -27,12 +27,14 @@ from pytest_databricks_lakeflow.settings import (
     create_kwargs,
     disable_tasks,
     disabled_task_keys,
+    escape,
     force_conditions,
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
     lint,
     merge_environments,
+    override_for_each_inputs,
     override_tasks,
     pipeline_params,
     pipeline_task_ids,
@@ -50,6 +52,7 @@ from .conftest import NEEDS_REFRESH_SELECTION
 from .fakes import (
     branching_settings,
     example_settings,
+    for_each_settings,
     parent_settings,
     pipeline_settings,
     pipeline_spec,
@@ -1277,6 +1280,86 @@ class TestForceConditions:
 
     def test_force_conditions_without_outcomes_changes_nothing(self) -> None:
         assert force_conditions(example_settings(), {}) == example_settings()
+
+
+class TestForEachInputs:
+    """override_for_each_inputs replaces the input list of for-each tasks, and refuses other tasks and bad lists."""
+
+    def test_for_each_inputs_replace_the_deployed_list(self) -> None:
+        template = for_each_settings()
+        settings = override_for_each_inputs(for_each_settings(), {"loop": ["a", "b"]})
+        loop = task(settings, "loop").for_each_task
+        assert loop is not None
+        assert loop.inputs == '["a", "b"]'
+        assert loop.task == nested_task(template, "loop")
+        assert task(settings, "after") == task(template, "after")
+
+    @pytest.mark.parametrize(
+        ("inputs", "expected"),
+        [
+            pytest.param([{"k": "{{x}}"}], '[{"k": "{\\u007bx}}"}]', id="reference"),
+            pytest.param([], "[]", id="empty"),
+            pytest.param(("a", 1), '["a", 1]', id="tuple"),
+            pytest.param(["x" * 4996], json.dumps(["x" * 4996]), id="at-the-limit"),
+        ],
+    )
+    def test_for_each_inputs_are_escaped_json(self, inputs: Any, expected: str) -> None:
+        settings = override_for_each_inputs(for_each_settings(), {"loop": inputs})
+        loop = task(settings, "loop").for_each_task
+        assert loop is not None
+        assert loop.inputs == expected == escape(list(inputs))
+
+    @pytest.mark.parametrize(
+        ("template", "inputs", "match"),
+        [
+            pytest.param(
+                example_settings,
+                {"extract": [1]},
+                r"Task 'extract' in for_each_inputs has no for_each_task. For-each tasks: \[\]",
+                id="not-for-each",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"nope": [1]},
+                r"Unknown task 'nope' in for_each_inputs. For-each tasks: \['loop'\]",
+                id="unknown",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": ["a"], "after": [1]},
+                r"Task 'after' in for_each_inputs has no for_each_task. For-each tasks: \['loop'\]",
+                id="checked-before-any-change",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": [object()]},
+                r"Inputs for task 'loop' in for_each_inputs are not JSON-serialisable: Object of type object",
+                id="not-serialisable",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": "ab"},
+                r"for_each_inputs\['loop'\] must be a list, got 'ab'",
+                id="string",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": ["x" * 4997]},
+                r"Inputs for task 'loop' in for_each_inputs are 5001 characters as JSON. A for-each task allows 5000.",
+                id="too-long",
+            ),
+        ],
+    )
+    def test_for_each_inputs_rejects(
+        self, template: Callable[[], jobs.JobSettings], inputs: dict[str, Any], match: str
+    ) -> None:
+        settings = template()
+        with pytest.raises(LakeflowError, match=match):
+            override_for_each_inputs(settings, inputs)
+        assert settings == template()
+
+    def test_for_each_inputs_without_entries_change_nothing(self) -> None:
+        assert override_for_each_inputs(for_each_settings(), {}) == for_each_settings()
 
 
 SELECTIONS = ["full_refresh_selection", "refresh_selection", "refresh_flow_selection", "reset_checkpoint_selection"]

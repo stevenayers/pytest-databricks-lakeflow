@@ -40,6 +40,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_test_marker,
     lint,
     merge_environments,
+    override_for_each_inputs,
     override_tasks,
     pipeline_task_ids,
     require_task,
@@ -305,6 +306,7 @@ class Lakeflow:
         upstream_task_values: Upstream | None = None,
         pipelines: Pipelines = "deployed",
         schema: str | None = None,
+        for_each_inputs: Mapping[str, Sequence[object]] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -390,6 +392,11 @@ class Lakeflow:
                 still sees the deployed pipelines' ids, and closed just after it with the same keep rules.
             schema: The full name of the schema the pipeline copies publish to, as `schema()` yields it. Needed with
                 `pipelines="copy"`, and refused without it.
+            for_each_inputs: The list each for-each task of the copy iterates over, by task key, such as
+                `{"loop": ["a", "b"]}`, so a test of two items runs two iterations rather than the deployed list. Each
+                list replaces the task's `for_each_task.inputs` as JSON, with `{{` escaped so a value is not read as
+                a reference, and may be empty. The run reports the for-each task as one task: its iterations are not
+                in the result.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -419,6 +426,8 @@ class Lakeflow:
                 also if a task of the copy refers to the output of a notebook task that is not a stub. Also if
                 `pipelines` is `"copy"` without `schema` or the copy has no enabled pipeline task, `schema` is passed
                 without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
+                Also if `for_each_inputs` names a task that is not in the job or has no `for_each_task`, or gives a
+                value that is not a list, is not JSON-serialisable or is longer than 5,000 characters as JSON.
             LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
                 exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
@@ -440,6 +449,7 @@ class Lakeflow:
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
+        override_for_each_inputs(settings, for_each_inputs or {})
         self._inject_lifecycle(settings, notebooks, params or {})
         return self._ephemeral(
             item,
@@ -476,6 +486,7 @@ class Lakeflow:
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
         pipelines: Pipelines = "deployed",
         schema: str | None = None,
+        for_each_inputs: Sequence[object] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -507,6 +518,8 @@ class Lakeflow:
             pipelines: `"copy"` makes a copy of the pipeline that the task updates, publishing to `schema`, as for
                 `job()`.
             schema: The full name of the schema the pipeline copy publishes to, as for `job()`.
+            for_each_inputs: The list the task iterates over when it is a for-each task, such as `["a"]`, as for
+                `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -520,7 +533,8 @@ class Lakeflow:
                 JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
                 `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
                 Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
-                cannot be applied, `setup` or `teardown` cannot run, or `pipelines` and `schema` do not fit the task.
+                cannot be applied, `setup` or `teardown` cannot run, `pipelines` and `schema` do not fit the task,
+                or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
@@ -551,6 +565,8 @@ class Lakeflow:
         upstream.update(explicit)
         wrap_task(settings, task_key, upstream, list(capture_task_values or []), self._helpers())
         override_tasks(settings, task_overrides or {})
+        if for_each_inputs is not None:
+            override_for_each_inputs(settings, {task_key: for_each_inputs})
         self._inject_lifecycle(settings, notebooks, params or {})
         capture: dict[str, list[str]] = {}
         if capture_task_values:
