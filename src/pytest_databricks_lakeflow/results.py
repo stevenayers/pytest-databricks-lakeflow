@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs, pipelines
 
+from pytest_databricks_lakeflow.dbt import DbtArtifacts, read_artifacts
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
 
 if TYPE_CHECKING:
@@ -772,6 +773,9 @@ class TaskRun:
         dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`. The link is a
             pre-signed URL to a tarball of the dbt artefacts that the platform signs for 30 minutes; fetch it with
             the headers before then. report.json keeps the link and leaves out the headers.
+        dbt: The artefacts of a dbt task, downloaded from `dbt_output.artifacts_link` and parsed once the run finished,
+            with `Lakeflow(dbt_artifacts=True)`. `None` by default, for any other task, when the platform reported no
+            link, and when the artefacts could not be read, such as a tarball over 50 MB, which logs a warning.
         run_job_output: The output of a run-job task, with the triggered run's `run_id`, or `None`.
         child_run_id: The id of the job run that a run-job task triggered, from `run_job_output.run_id`. The run is
             of the deployed child job, not a copy, so the plugin does not cancel or delete it. `None` for any other
@@ -832,6 +836,7 @@ class TaskRun:
     sql_output: jobs.SqlOutput | None = None
     alert_output: jobs.AlertTaskOutput | None = None
     dbt_output: jobs.DbtOutput | None = None
+    dbt: DbtArtifacts | None = None
     run_job_output: jobs.RunJobOutput | None = None
     child_run_id: int | None = None
     child_run: JobRun | None = None
@@ -1201,7 +1206,9 @@ def serialise(run: JobRun) -> dict[str, Any]:
     `execution_seconds` and `cleanup_seconds`; `error` is a dict of `type`, `message`, `trace`, `root_cause` and
     `code`, or `None`; `task_values` is a plain dict and `missing_task_value_reasons` holds the reason for each of
     `missing_task_values`; the outputs of SQL, alert, dbt, run-job, dashboard and clean room tasks are the dicts of
-    the Jobs API, except that a dbt output leaves out `artifacts_headers`; `pipeline_update` is a dict of
+    the Jobs API, except that a dbt output leaves out `artifacts_headers`; `dbt` is a dict of `artifacts_dir`,
+    `results` (each a dict of the `DbtResult` fields, by unique id), `failed_models` and `all_passed`, leaving out
+    `run_results` and `manifest`, or `None`; `pipeline_update` is a dict of
     `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or `None`; `iterations` is a list of tasks
     serialised the same way, and `for_each_stats` a dict of its fields, with `errors` a list of dicts, or `None`. The
     run also gets `succeeded`.
@@ -1313,6 +1320,7 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
         "sql_output": _as_dict(task.sql_output),
         "alert_output": _as_dict(task.alert_output),
         "dbt_output": _serialise_dbt_output(task.dbt_output),
+        "dbt": _serialise_dbt(task.dbt),
         "run_job_output": _as_dict(task.run_job_output),
         "child_run_id": task.child_run_id,
         "child_run": child_run,
@@ -1356,6 +1364,21 @@ def _serialise_dbt_output(output: jobs.DbtOutput | None) -> dict[str, Any] | Non
     return data
 
 
+def _serialise_dbt(artifacts: DbtArtifacts | None) -> dict[str, Any] | None:
+    # run_results.json and manifest.json stay in artifacts_dir: a manifest can run to megabytes.
+    if artifacts is None:
+        return None
+    results: dict[str, Any] = {}
+    for unique_id, result in artifacts.results.items():
+        results[unique_id] = asdict(result)
+    return {
+        "artifacts_dir": str(artifacts.artifacts_dir),
+        "results": results,
+        "failed_models": artifacts.failed_models,
+        "all_passed": artifacts.all_passed,
+    }
+
+
 def _as_dict(output: Any) -> dict[str, Any] | None:
     # The task outputs are databricks-sdk dataclasses, which turn themselves into the API's JSON.
     if output is None:
@@ -1375,6 +1398,7 @@ def build_job_run(
     outputs: Mapping[int, jobs.RunOutput] | None = None,
     job_keys: Mapping[int, str] | None = None,
     notebook_export: NotebookExport = "failed",
+    dbt_artifacts_dir: Path | None = None,
 ) -> JobRun:
     """Build a `JobRun` from a terminated run, reading each task's output and resolved parameters.
 
@@ -1398,6 +1422,8 @@ def build_job_run(
         notebook_export: Which notebook tasks to export with `jobs.export_run`: `failed` for those that ran and did
             not succeed, `always` for every one that ran, `never` for none. Only the last attempt of a user task is
             exported.
+        dbt_artifacts_dir: Where to download the artefacts of each dbt task run that reported a link, into a
+            folder named after the task run's id, while the link is still valid. `None` downloads nothing.
 
     Returns:
         The run's outcome.
@@ -1406,14 +1432,18 @@ def build_job_run(
     every_attempt: list[jobs.RunTask] = []
     for task_runs in task_runs_by_key.values():
         every_attempt.extend(task_runs)
-    built = _read_task_runs(ws, every_attempt, outputs or {}, job_keys or {}, notebook_export)
+    dbt_commands = None
+    if run.overriding_parameters is not None:
+        dbt_commands = run.overriding_parameters.dbt_commands
+    reading = _Reading(job_keys or {}, notebook_export, dbt_artifacts_dir, dbt_commands)
+    built = _read_task_runs(ws, every_attempt, outputs or {}, reading)
 
     attempts: dict[str, list[TaskRun]] = {}
     for key, task_runs in task_runs_by_key.items():
         attempts[key] = [built[task_run.run_id or 0] for task_run in task_runs]
         latest = task_runs[-1]
         if latest.for_each_task is not None:
-            attempts[key][-1] = _with_iterations(ws, attempts[key][-1], latest, job_keys or {}, notebook_export)
+            attempts[key][-1] = _with_iterations(ws, attempts[key][-1], latest, reading)
 
     injected: dict[str, TaskRun] = {}
     user: dict[str, TaskRun] = {}
@@ -1472,16 +1502,33 @@ def _task_runs_by_key(run: jobs.Run) -> dict[str, list[jobs.RunTask]]:
     return by_key
 
 
+@dataclass(frozen=True)
+class _Reading:
+    """How to read the task runs of a run, its iterations and the child runs of its run-job tasks alike.
+
+    Attributes:
+        job_keys: Bundle resource keys by job id, which name the child runs.
+        notebook_export: Which notebook tasks to export.
+        dbt_artifacts_dir: Where to download the artefacts of dbt tasks, or `None` for nowhere.
+        dbt_commands: The `dbt_commands` the run was started with, which every dbt task in it ran, or `None`.
+    """
+
+    job_keys: Mapping[int, str]
+    notebook_export: NotebookExport
+    dbt_artifacts_dir: Path | None
+    dbt_commands: Sequence[str] | None = None
+
+
 def _read_task_runs(
     ws: WorkspaceClient,
     task_runs: Sequence[jobs.RunTask],
     outputs: Mapping[int, jobs.RunOutput],
-    job_keys: Mapping[int, str],
-    notebook_export: NotebookExport,
+    reading: _Reading,
 ) -> dict[int, TaskRun]:
     """Build a `TaskRun` for each task run, by run id, reading its output, resolved parameters and the rest.
 
-    Only the outputs missing from `outputs` are fetched. A run-job task gets the child run it triggered.
+    Only the outputs missing from `outputs` are fetched. A run-job task gets the child run it triggered, and a dbt task
+    its artefacts when `reading` names a directory for them.
     """
     known_outputs = dict(outputs)
     unread: list[jobs.RunTask] = []
@@ -1495,6 +1542,9 @@ def _read_task_runs(
     resolved = fetch_resolved_values(ws, ran)
     sql_results = fetch_sql_results(ws, ran)
     pipeline_updates = fetch_pipeline_updates(ws, ran)
+    dbt_artifacts: dict[int, DbtArtifacts] = {}
+    if reading.dbt_artifacts_dir is not None:
+        dbt_artifacts = fetch_dbt_artifacts(task_runs, known_outputs, reading.dbt_artifacts_dir)
 
     built: dict[int, TaskRun] = {}
     for task_run in task_runs:
@@ -1505,18 +1555,15 @@ def _read_task_runs(
             resolved.get(run_id),
             sql_results.get(run_id),
             pipeline_updates.get(run_id),
+            reading.dbt_commands,
         )
-        built[run_id] = _with_child_run(ws, task, job_keys, notebook_export)
+        if run_id in dbt_artifacts:
+            task = replace(task, dbt=dbt_artifacts[run_id])
+        built[run_id] = _with_child_run(ws, task, reading)
     return built
 
 
-def _with_iterations(
-    ws: WorkspaceClient,
-    task: TaskRun,
-    task_run: jobs.RunTask,
-    job_keys: Mapping[int, str],
-    notebook_export: NotebookExport,
-) -> TaskRun:
+def _with_iterations(ws: WorkspaceClient, task: TaskRun, task_run: jobs.RunTask, reading: _Reading) -> TaskRun:
     loop = task_run.for_each_task
     stats = None
     if loop is not None and loop.stats is not None:
@@ -1526,7 +1573,7 @@ def _with_iterations(
         return replace(task, for_each_stats=stats)
     iteration_runs = _iterations(ws, task_run)
     log.info("Read %d iterations of task %s (run %s)", len(iteration_runs), task.task_key, task.run_id)
-    built = _read_task_runs(ws, iteration_runs, {}, job_keys, notebook_export)
+    built = _read_task_runs(ws, iteration_runs, {}, reading)
     grouped: list[list[TaskRun]] = []
     for iteration_run in iteration_runs:
         attempt = built[iteration_run.run_id or 0]
@@ -1554,9 +1601,7 @@ def _iterations(ws: WorkspaceClient, task_run: jobs.RunTask) -> list[jobs.RunTas
     return list(loop.iterations or [])
 
 
-def _with_child_run(
-    ws: WorkspaceClient, task: TaskRun, job_keys: Mapping[int, str], notebook_export: NotebookExport
-) -> TaskRun:
+def _with_child_run(ws: WorkspaceClient, task: TaskRun, reading: _Reading) -> TaskRun:
     if task.child_run_id is None or not task.ran:
         return task
     try:
@@ -1565,11 +1610,18 @@ def _with_child_run(
         log.warning("Could not read run %s triggered by task %s: %s", task.child_run_id, task.task_key, e)
         return task
     job_id = child.job_id or 0
-    key = job_keys.get(job_id) or str(job_id)
+    key = reading.job_keys.get(job_id) or str(job_id)
     # `only` never applies to a child run, so every task of it that ended DISABLED is disabled in the child job.
     disabled = {t.task_key for t in child.tasks or [] if t.task_key}
     child_run = build_job_run(
-        ws, child, job_key=key, job_id=job_id, disabled=disabled, job_keys=job_keys, notebook_export=notebook_export
+        ws,
+        child,
+        job_key=key,
+        job_id=job_id,
+        disabled=disabled,
+        job_keys=reading.job_keys,
+        notebook_export=reading.notebook_export,
+        dbt_artifacts_dir=reading.dbt_artifacts_dir,
     )
     return replace(task, child_run=child_run)
 
@@ -1642,6 +1694,35 @@ def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[in
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         return {task.run_id or 0: output for task, output in zip(tasks, pool.map(fetch, tasks), strict=True)}
+
+
+def fetch_dbt_artifacts(
+    tasks: Sequence[jobs.RunTask], outputs: Mapping[int, jobs.RunOutput], directory: Path
+) -> dict[int, DbtArtifacts]:
+    """Download and parse the artefacts of each dbt task run in parallel, by task run id, into `directory`.
+
+    Each task run whose output has a dbt artefacts link gets a folder named after its run id. The platform signs the
+    link for 30 minutes, so this runs as soon as the run has finished. A task run whose artefacts cannot be read is
+    left out, with a warning naming the task.
+    """
+    linked: list[tuple[jobs.RunTask, jobs.DbtOutput]] = []
+    for task in tasks:
+        output = outputs.get(task.run_id or 0)
+        if output is not None and output.dbt_output is not None and output.dbt_output.artifacts_link:
+            linked.append((task, output.dbt_output))
+    if not linked:
+        return {}
+
+    def fetch(pair: tuple[jobs.RunTask, jobs.DbtOutput]) -> DbtArtifacts | None:
+        task, output = pair
+        return read_artifacts(task.task_key or "", output, directory / str(task.run_id or 0))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        artifacts: dict[int, DbtArtifacts] = {}
+        for (task, _), read in zip(linked, pool.map(fetch, linked), strict=True):
+            if read is not None:
+                artifacts[task.run_id or 0] = read
+        return artifacts
 
 
 def fetch_notebook_exports(ws: WorkspaceClient, tasks: Sequence[TaskRun]) -> dict[str, str]:
@@ -1849,6 +1930,7 @@ def _task_run(
     resolved: jobs.ResolvedValues | None,
     sql_result: SqlResult | None,
     pipeline_update: PipelineUpdate | None,
+    dbt_commands: Sequence[str] | None = None,
 ) -> TaskRun:
     out = out or jobs.RunOutput()
     key = task.task_key or ""
@@ -1872,7 +1954,7 @@ def _task_run(
         logs_truncated=logs_truncated,
         error=_task_error(task, out),
         attempt=task.attempt_number or 0,
-        parameters=_parameters(resolved),
+        parameters=_parameters(resolved, dbt_commands),
         timing=Timing.from_run(task),
         effective_performance_target=_enum(task.effective_performance_target),
         condition_outcome=_condition_outcome(task.condition_task),
@@ -1922,7 +2004,9 @@ def _condition_outcome(condition: jobs.RunConditionTask | None) -> bool | None:
     return None
 
 
-def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[str] | None:
+def _parameters(
+    resolved: jobs.ResolvedValues | None, dbt_commands: Sequence[str] | None = None
+) -> dict[str, str] | list[str] | None:
     if resolved is None:
         return None
     if resolved.notebook_task is not None:
@@ -1941,6 +2025,10 @@ def _parameters(resolved: jobs.ResolvedValues | None) -> dict[str, str] | list[s
         if positional is not None:
             return positional.parameters
     if resolved.dbt_task is not None:
+        # A dbt task run's resolved_values hold the task's own commands, also in a run that run_now's dbt_commands
+        # overrode and that ran those instead. Only the run's overriding_parameters name them.
+        if dbt_commands is not None:
+            return list(dbt_commands)
         return resolved.dbt_task.commands
     return None
 

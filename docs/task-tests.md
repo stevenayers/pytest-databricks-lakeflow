@@ -245,29 +245,45 @@ The copy is deleted with the tables it publishes when the task job closes, so ch
 
 A dbt task's `commands` are a list, so [`task_params`](job-tests.md#make-a-job) replaces them in the copy, here to build only the models tagged `ci`. The list replaces every command, so keep `dbt deps` when the project has packages. The task's `warehouse_id`, `catalog`, `schema` and `project_directory` stay as deployed. An empty list raises `LakeflowError` before the job is created.
 
-The platform hands out the artefacts dbt wrote as `run.task(...).dbt_output.artifacts_link`, a pre-signed URL to a tarball that it signs for 30 minutes, fetched with the headers in `artifacts_headers`. The plugin does not download them, so do it in the test, straight after the run:
+The platform hands out the artefacts dbt wrote as `run.task(...).dbt_output.artifacts_link`, a pre-signed URL to a tarball that it signs for 30 minutes. With `Lakeflow(dbt_artifacts=True)` the plugin downloads it as soon as the run has finished, extracts it and parses `run_results.json` and `manifest.json` into `run.task(...).dbt`:
 
 ```python
-import tarfile
-import urllib.request
-from pathlib import Path
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(dbt_artifacts=True)
 
 
-def test_ci_models(lakeflow: Lakeflow, tmp_path: Path) -> None:
+def test_ci_models(lakeflow: Lakeflow) -> None:
     commands = ["dbt deps", "dbt build --select tag:ci"]
     with lakeflow.task("analytics.dbt_build", task_params={"dbt_build": commands}) as task:
         run = task.run()
-    assert run.succeeded, run
-    dbt = run.task("dbt_build").dbt_output
-    assert dbt is not None and dbt.artifacts_link
-    request = urllib.request.Request(dbt.artifacts_link, headers=dbt.artifacts_headers or {})
-    with urllib.request.urlopen(request) as response:
-        (tmp_path / "artifacts.tar.gz").write_bytes(response.read())
-    with tarfile.open(tmp_path / "artifacts.tar.gz") as archive:
-        archive.extractall(tmp_path / "artifacts", filter="data")
+    dbt = run.task("dbt_build").dbt
+    assert dbt is not None
+    assert dbt.all_passed, dbt.failed_models
+    assert dbt.results["model.analytics.orders"].status == "success"
 ```
 
-`dbt_output` is `None` when the platform reported no output for the task. `--lakeflow-report-dir` keeps the link in report.json and leaves out the headers, which can carry its signature.
+`dbt` is a `DbtArtifacts`:
+
+- `results`, one `DbtResult` per node in `run_results.json`, by unique id, with `status` (`success`, `error` or `skipped` for a model, seed or snapshot, `pass`, `fail`, `warn`, `error` or `skipped` for a test), `message`, `failures` and `execution_time`.
+- `failed_models`, the unique ids of the nodes that ended `error` or `fail`, tests included, and `all_passed`, true when there are none.
+- `run_results` and `manifest`, the two files as parsed JSON. `manifest` is `None` when the tarball has none.
+- `artifacts_dir`, where the tarball was extracted, with `target/` (the compiled SQL, `run_results.json`, `manifest.json` and the rest) and `logs/dbt.log` beside it. Each run gets a temporary directory, removed at the end of the pytest session, so a run that a module-scoped fixture shares keeps its files for every test. `keep` and `--lakeflow-keep` keep it and log where.
+
+The platform runs the task's commands one after another, and `run_results.json` describes the last one that wrote it, such as `dbt build` after `dbt deps`. `dbt` is `None` by default, for any other task, and when the artefacts cannot be read: a tarball over 50 MB, an expired link, a download cut off part-way, a truncated tarball, a tarball without `run_results.json`, with a `run_results.json` that is not a JSON object, or with a member that would land outside its directory each log a warning naming the task, and the run is built as usual.
+
+`job.run(dbt_commands=[...])` replaces the commands of every dbt task in one run instead, leaving the copy's settings alone, so one job can run different selections:
+
+```python
+def test_selections(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("analytics") as job:
+        ci = job.run(dbt_commands=["dbt build --select tag:ci"])
+        full = job.run()
+    assert ci.task("dbt_build").parameters == ["dbt build --select tag:ci"]
+    assert full.task("dbt_build").parameters == ["dbt deps", "dbt build"]
+```
+
+The Jobs API refuses `dbt_commands` on a job that has job parameters, so on such a job, or with `test_marker`, `trigger=` or `input=`, which declare some, use `task_params`. `dbt_output` is `None` when the platform reported no output for the task. `--lakeflow-report-dir` keeps the link in report.json and leaves out the headers, which can carry its signature, and lists `dbt` without `run_results` and `manifest`.
 
 ## Running a subset of a task job
 

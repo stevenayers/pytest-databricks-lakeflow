@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import timedelta
@@ -15,16 +16,21 @@ from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import compute, jobs, pipelines
 from databricks.sdk.service.workspace import Language
 
-from pytest_databricks_lakeflow import ephemeral, session
+from pytest_databricks_lakeflow import dbt, ephemeral, session
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob
 from pytest_databricks_lakeflow.report import directory_name
 
 from .conftest import GITHUB, NEEDS_REFRESH_SELECTION, FakeCli, configure_lakeflow, make_repository, set_ci
 from .fakes import (
     DATA,
+    DBT_HEADERS,
+    DBT_LINK,
     HOST,
+    FakeDbtLinks,
     FakeWorkspaceClient,
     branching_settings,
+    dbt_settings,
+    dbt_tarball,
     example_settings,
     for_each_settings,
     make_run,
@@ -2437,6 +2443,140 @@ class TestRunOptions:
         result.assert_outcomes(passed=1)
         assert fake_ws.jobs.run_now_calls == []
 
+    @pytest.mark.parametrize("method", ["run", "start"])
+    def test_dbt_commands_are_forwarded(
+        self, pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient, method: str
+    ) -> None:
+        fake_cli.deployed["analytics"] = fake_ws.jobs.add(dbt_settings())
+        for run_id in (81, 82):
+            fake_ws.jobs.queue(make_run(run_id, {"dbt_build": "SUCCESS"}))
+            deployed = jobs.ResolvedDbtTaskValues(commands=["dbt deps", "dbt build"])
+            fake_ws.jobs.resolved[run_id * 100] = jobs.ResolvedValues(dbt_task=deployed)
+        wait = ".wait()" if method == "start" else ""
+        result = run_tests(
+            pytester,
+            f"""
+            def test_job(lakeflow):
+                with lakeflow.job("analytics") as job:
+                    run = job.{method}(dbt_commands=("dbt build --select tag:ci",)){wait}
+                    assert run.task("dbt_build").parameters == ["dbt build --select tag:ci"]
+                    run = job.{method}(){wait}
+                    assert run.task("dbt_build").parameters == ["dbt deps", "dbt build"]
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        commands = [call["dbt_commands"] for call in fake_ws.jobs.run_now_calls]
+        assert commands == [["dbt build --select tag:ci"], None]
+        # The job's own commands stay as deployed: dbt_commands applies to one run.
+        [dbt_build, _] = fake_ws.jobs.created[0]["tasks"]
+        assert dbt_build.dbt_task.commands == ["dbt deps", "dbt build"]
+
+    @pytest.mark.parametrize(
+        ("commands", "message"),
+        [
+            pytest.param("[]", "dbt_commands must not be empty*", id="empty"),
+            pytest.param('"dbt build"', "dbt_commands must be a list of commands, not a string: 'dbt build'", id="str"),
+        ],
+    )
+    def test_bad_dbt_commands_are_refused_before_the_job_is_created(
+        self, pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient, commands: str, message: str
+    ) -> None:
+        fake_cli.deployed["analytics"] = fake_ws.jobs.add(dbt_settings())
+        result = run_tests(
+            pytester,
+            f"""
+            def test_job(lakeflow):
+                lakeflow.job("analytics").run(dbt_commands={commands})
+            """,
+        )
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines([f"E*LakeflowError: {message}"])
+        assert (fake_ws.jobs.created, fake_ws.jobs.run_now_calls) == ([], [])
+
+    def test_dbt_commands_are_refused_on_a_job_with_job_parameters(
+        self, pytester: pytest.Pytester, fake_cli: FakeCli, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        # Observed on the dbt bundle with test_marker=True: run_now refuses dbt_commands with InvalidParameterValue
+        # "Cannot use legacy parameters (notebook_params, jar_params, python_params, spark_submit_params, sql_params)
+        # because the job has job parameters configured."
+        settings = dbt_settings()
+        settings.parameters = [jobs.JobParameterDefinition(name="env", default="test")]
+        fake_cli.deployed["analytics"] = fake_ws.jobs.add(settings)
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("analytics").run(dbt_commands=["dbt build"])
+            """,
+        )
+        result.assert_outcomes(failed=1)
+        assert (
+            "LakeflowError: dbt_commands cannot be passed to a run of 'analytics', because the job has job "
+            "parameters ['env'], and the Jobs API then refuses them. Pass task_params={'<dbt task key>': [...]} "
+            "to job() or task() instead, which sets the commands of one dbt task in the copy."
+        ) in result.stdout.str()
+        assert fake_ws.jobs.run_now_calls == []
+
+
+class TestDbtArtifacts:
+    """Lakeflow(dbt_artifacts=True) downloads the artefacts of each dbt task and removes them after the session."""
+
+    @pytest.mark.parametrize(
+        ("arguments", "flags", "downloaded", "kept"),
+        [
+            pytest.param("", (), False, False, id="default"),
+            pytest.param("dbt_artifacts=True", (), True, False, id="removed"),
+            pytest.param("dbt_artifacts=True", ("--lakeflow-keep", "--log-cli-level=WARNING"), True, True, id="kept"),
+        ],
+    )
+    def test_artifacts_of_a_dbt_task(
+        self,
+        pytester: pytest.Pytester,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_cli: FakeCli,
+        fake_ws: FakeWorkspaceClient,
+        arguments: str,
+        flags: tuple[str, ...],
+        downloaded: bool,
+        kept: bool,
+    ) -> None:
+        links = FakeDbtLinks()
+        monkeypatch.setattr(dbt, "_open", links)
+        links.bodies[DBT_LINK] = dbt_tarball({"model.proj.orders": "success", "model.proj.bad": "error"})
+        fake_cli.deployed["analytics"] = fake_ws.jobs.add(dbt_settings())
+        output = jobs.RunOutput(dbt_output=jobs.DbtOutput(artifacts_link=DBT_LINK, artifacts_headers=DBT_HEADERS))
+        fake_ws.jobs.queue(make_run(81, {"dbt_build": "FAILED", "check": "UPSTREAM_FAILED"}, "FAILED"), {8100: output})
+        configure_lakeflow(pytester, arguments)
+        result = run_tests(
+            pytester,
+            f"""
+            from pathlib import Path
+
+            def test_job(lakeflow):
+                with lakeflow.job("analytics") as job:
+                    run = job.run()
+                assert run.task("check").dbt is None
+                dbt = run.task("dbt_build").dbt
+                if not {downloaded}:
+                    assert dbt is None
+                    return
+                assert dbt.failed_models == ["model.proj.bad"]
+                assert not dbt.all_passed
+                assert (dbt.artifacts_dir / "target" / "manifest.json").is_file()
+                Path("artifacts_dir.txt").write_text(str(dbt.artifacts_dir))
+            """,
+            *flags,
+        )
+        result.assert_outcomes(passed=1)
+        assert len(links.requests) == int(downloaded)
+        if not downloaded:
+            return
+        artifacts_dir = Path((pytester.path / "artifacts_dir.txt").read_text())
+        assert artifacts_dir.exists() is kept
+        if kept:
+            result.stdout.fnmatch_lines([f"*Keeping the dbt artefacts of run 81 in {artifacts_dir.parent.parent}*"])
+            shutil.rmtree(artifacts_dir.parent.parent)
+
 
 class TestTimeouts:
     """The poll interval, the run timeout, the job's `timeout_seconds` and cancelling on expiry."""
@@ -4258,6 +4398,8 @@ class TestPublicApi:
             "EphemeralPipeline",
             "DebugNotebook",
             "Stub",
+            "DbtArtifacts",
+            "DbtResult",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__
