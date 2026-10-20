@@ -398,6 +398,21 @@ class TestInjectProbes:
         with pytest.raises(LakeflowError, match=r"not in the job: \['nope'\]"):
             inject_probes(example_settings(), {"nope": ["k"]}, HELPERS)
 
+    def test_a_for_each_task_is_refused(self) -> None:
+        # The platform refuses taskValues.set in an iteration, so a probe on the loop would only ever see "missing".
+        message = (
+            "capture_task_values names the for-each task 'loop', whose iterations cannot set task values. Return "
+            "the values with dbutils.notebook.exit() and read each iteration's output from "
+            "run.task('loop').iterations instead."
+        )
+        settings = for_each_settings()
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=re.escape(message)):
+            inject_probes(settings, {"after": ["k"], "loop": ["seen"]}, HELPERS)
+        with pytest.raises(LakeflowError, match=re.escape(message)):
+            wrap_task(settings, "loop", {}, ["seen"], HELPERS)
+        assert settings == before
+
 
 class TestRecoverInjected:
     """`recover_injected` reads back the stubs and probes that a created copy carries."""
@@ -862,6 +877,51 @@ class TestEndToEnd:
         )
         pytester.runpytest().assert_outcomes(passed=8)
         assert fake_ws.jobs.created == []
+
+    def test_for_each_loops_end_to_end(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
+        fake_ws.jobs.queue(make_run(83, {"extract": "SUCCESS", "loop": "SUCCESS", "after": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_task_params_reach_the_body(lakeflow):
+                with lakeflow.job("fanout", task_params={"inner": {"limit": "10"}}) as job:
+                    assert job.run().succeeded
+
+            @pytest.mark.parametrize("ref", ["job", "task"])
+            def test_capturing_a_loop_is_refused(lakeflow, ref):
+                with pytest.raises(LakeflowError, match=r"the for-each task 'loop', whose iterations cannot set"):
+                    if ref == "job":
+                        lakeflow.job("fanout", capture_task_values={"loop": ["seen"]})
+                    else:
+                        lakeflow.task("fanout.loop", capture_task_values=["seen"], upstream_task_values=UPSTREAM)
+
+            def test_capturing_a_lifted_body_warns(lakeflow):
+                match = (
+                    r"capture_task_values on 'fanout.loop.inner': 'inner' cannot set task values when it runs in "
+                    r"its loop 'loop'"
+                )
+                with pytest.warns(UserWarning, match=match):
+                    lakeflow.task("fanout.loop.inner", input={"id": 1}, upstream_task_values=UPSTREAM,
+                                  capture_task_values=["rows"])
+
+            UPSTREAM = {"extract": {"rows": 3}}
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=4)
+        [created] = fake_ws.jobs.created
+        loop = next(t for t in created["tasks"] if t.task_key == "loop")
+        assert loop.for_each_task.task.notebook_task.base_parameters == {
+            "item": "{{input}}",
+            "item_id": "{{input.id}}",
+            "rows": "{{tasks.extract.values.rows}}",
+            "limit": "10",
+        }
 
     def test_dbt_commands_on_a_task_job(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

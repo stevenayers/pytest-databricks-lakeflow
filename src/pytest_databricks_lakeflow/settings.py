@@ -181,7 +181,8 @@ def sanitise(
             are added only while the job has fewer than 25 tags, in that order; the others must fit. The plugin's
             `pytest`, `pytest_run_id`, `pytest_nodeid` and `pytest_job_key` leave room for 21 tags of the
             template's own, or 20 with `--lakeflow-keep-ttl`, which adds `pytest_expires`.
-        disable_auto_optimization: Stop serverless from retrying failed code tasks.
+        disable_auto_optimization: Stop serverless from retrying failed code tasks, tasks nested in a
+            `for_each_task` included.
         performance_optimized: Override the performance target with `PERFORMANCE_OPTIMIZED`.
         run_as: `None` removes the template's `run_as`, so the job runs as its creator. `"keep"` keeps it. A
             `jobs.JobRunAs` replaces it. Any other string names a user when it contains `@`, and otherwise a
@@ -218,10 +219,13 @@ def sanitise(
     for task in settings.tasks or []:
         for attr in TASK_STRIPPED:
             setattr(task, attr, None)
-        if disable_auto_optimization and _serverless(task):
-            task.disable_auto_optimization = True
         if side_effects == "neutralise":
             _pause_subscriptions(task)
+    if disable_auto_optimization:
+        # A nested task needs it too, or serverless retries each failing iteration once.
+        for task in _with_nested(settings.tasks):
+            if _serverless(task):
+                task.disable_auto_optimization = True
     if environment_version is not None:
         _set_environment_version(settings, environment_version)
     if budget_policy_id is not None:
@@ -1338,13 +1342,15 @@ def apply_task_params(
     A mapping is merged into the task's named parameters, so the template's `{{tasks.<key>.values.<name>}}`
     references survive. A list replaces the task's positional parameters, which have no names to merge on. A mapping
     for a Python wheel task clears its positional parameters and a list clears its named parameters, because the
-    Jobs API takes one or the other. Values are passed through unchanged.
+    Jobs API takes one or the other. Values are passed through unchanged. A task nested in a `for_each_task` is named
+    by its own key, and every iteration gets its parameters.
 
     Args:
         job_key: The bundle resource key of the job, for the messages.
         settings: The job's settings. They are changed in place.
         task_params: A mapping of names to strings or a list of strings, by task key.
-        allowed: The task keys that `task_params` may name. Defaults to every task of the job.
+        allowed: The task keys that `task_params` may name. Defaults to every task of the job, tasks nested in a
+            `for_each_task` included.
 
     Returns:
         `settings`.
@@ -1352,12 +1358,13 @@ def apply_task_params(
     Raises:
         LakeflowError: If a key is not an allowed task of the job, starts with `__pytest_`, names a task that is not a
             notebook, Python script, JAR, Python wheel, SQL or dbt task, has a value that does not fit the task's
-            type, or gives a dbt task an empty list of commands. Nothing is changed then.
+            type, or gives a dbt task an empty list of commands. Nothing is changed then. For a `for_each_task` whose
+            nested task may be named, the message names the nested task.
     """
     if not task_params:
         return settings
     tasks: dict[str, jobs.Task] = {}
-    for task in settings.tasks or []:
+    for task in _with_nested(settings.tasks):
         if task.task_key.startswith(PREFIX):
             continue
         if allowed is not None and task.task_key not in allowed:
@@ -1368,21 +1375,25 @@ def apply_task_params(
             raise LakeflowError(f"Unknown task {key!r} in task_params of job {job_key!r}. Available: {sorted(tasks)}")
     kinds: dict[str, str] = {}
     for key, value in task_params.items():
-        kinds[key] = _task_params_kind(tasks[key], value)
+        kinds[key] = _task_params_kind(tasks[key], value, tasks)
     for key, value in task_params.items():
         _set_task_params(getattr(tasks[key], kinds[key]), kinds[key], value)
     return settings
 
 
-def _task_params_kind(task: jobs.Task, value: object) -> str:
+def _task_params_kind(task: jobs.Task, value: object, nameable: Collection[str]) -> str:
     """Get the field of the task type that `value` edits, checking that `value` fits it."""
     for kind in TASK_PARAMS_KINDS:
         if getattr(task, kind) is not None:
             _check_task_params_shape(task, kind, value)
             return kind
+    advice = "Change it with modify_settings instead."
+    nested = task.for_each_task.task if task.for_each_task else None
+    if nested is not None and nested.task_key in nameable:
+        advice = f"Name its nested task, {nested.task_key!r}, instead."
     raise LakeflowError(
         f"task_params cannot set the parameters of task {task.task_key!r}: it is not a notebook, Python script, "
-        "JAR, Python wheel, SQL or dbt task. Change it with modify_settings instead."
+        f"JAR, Python wheel, SQL or dbt task. {advice}"
     )
 
 
@@ -1875,17 +1886,20 @@ def inject_probes(
         `settings`.
 
     Raises:
-        LakeflowError: If a task is not in the job, or a key is longer than 512 characters.
+        LakeflowError: If a task is not in the job or is a for-each task, or a key is longer than 512 characters.
     """
     if not capture_task_values:
         return settings
-    keys = {t.task_key for t in settings.tasks or []}
-    unknown = sorted(set(capture_task_values) - keys)
+    tasks: dict[str, jobs.Task] = {}
+    for task in settings.tasks or []:
+        tasks[task.task_key] = task
+    unknown = sorted(set(capture_task_values) - set(tasks))
     if unknown:
         raise LakeflowError(
-            f"capture_task_values names tasks that are not in the job: {unknown}. Available: {sorted(keys)}"
+            f"capture_task_values names tasks that are not in the job: {unknown}. Available: {sorted(tasks)}"
         )
     for target, value_keys in capture_task_values.items():
+        _check_capturable(tasks[target])
         _check_keys(target, value_keys)
     probes: list[jobs.Task] = []
     for target, value_keys in capture_task_values.items():
@@ -1922,7 +1936,8 @@ def wrap_task(
     Raises:
         LakeflowError: If the task is not in the job, the task refers to a task that is not stubbed (its task
             values or any other `{{tasks.<key>.` reference) or to an output its stub does not give, a value is too
-            large or not JSON-serialisable, or an output contains `{{` or is not JSON-serialisable.
+            large or not JSON-serialisable, an output contains `{{` or is not JSON-serialisable, or
+            `capture_task_values` is given for a for-each task.
     """
     target = require_task(settings, task_key)
     if task_key in upstream_task_values:
@@ -1944,6 +1959,8 @@ def wrap_task(
         )
     stubs = as_stubs(upstream_task_values)
     target = _rewrite_outputs(target, stubs)
+    if capture_task_values:
+        _check_capturable(target)
     _check_keys(task_key, capture_task_values)
     target.depends_on = [jobs.TaskDependency(task_key=key) for key in stubs] or None
     stub_tasks = [_stub_task(key, stub.values, helpers) for key, stub in stubs.items()]
@@ -2243,6 +2260,16 @@ def check_values(task_key: str, values: Mapping[str, object]) -> None:
                 f"Value {key!r} for task {task_key!r} is {size} characters as JSON. A task value allows "
                 f"{MAX_VALUE_CHARS}."
             )
+
+
+def _check_capturable(task: jobs.Task) -> None:
+    # The platform refuses taskValues.set in an iteration, so a probe on a for-each task finds every key missing.
+    if task.for_each_task is not None:
+        raise LakeflowError(
+            f"capture_task_values names the for-each task {task.task_key!r}, whose iterations cannot set task values. "
+            "Return the values with dbutils.notebook.exit() and read each iteration's output from "
+            f"run.task({task.task_key!r}).iterations instead."
+        )
 
 
 def _check_keys(task_key: str, keys: Collection[str]) -> None:

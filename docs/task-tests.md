@@ -67,7 +67,7 @@ The body's `{{input}}` and `{{input.<key>}}` references become `{{job.parameters
 - `task_params` and `task_overrides` name the body by its own key, such as `task_params={"inner": {"limit": "10"}}`. A value in `task_params` may refer to `{{input}}` too.
 - `input` is a string, number, boolean or mapping, as a for-each item is. `None` means not given, and the platform refuses `null` as an item anyway.
 - `lakeflow.task()` raises `LakeflowError` before anything is created when the for-each task has no task with that key, when the body refers to `{{input}}` and `input` is missing, when `input` is given and the body does not refer to it or lacks a key the body reads, when it contains `{{`, or when it makes the job parameters longer than the 10,000 characters as JSON that `jobs/create` accepts. `input=` with a two-part `ref` raises too.
-- A body that sets task values fails in its loop, because an iteration cannot set them ("setting task values is not supported for iterations"), but succeeds once lifted. `capture_task_values` on a body only shows what it would set outside a loop.
+- A body that sets task values fails in its loop, because an iteration cannot set them ("setting task values is not supported for iterations"), but succeeds once lifted. `capture_task_values` on a body only shows what it would set outside a loop, so it emits a `UserWarning` saying the body cannot set task values when it runs in its loop.
 
 ## How stubs resolve
 

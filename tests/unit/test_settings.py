@@ -198,6 +198,17 @@ class TestAutoOptimisation:
         kept = sanitised(disable_auto_optimization=False)
         assert task(kept, "extract").disable_auto_optimization is None
 
+    @pytest.mark.parametrize("disable", [True, False])
+    def test_auto_optimisation_reaches_tasks_nested_in_a_for_each_task(self, disable: bool) -> None:
+        # Without it on the nested task, serverless retried each failing iteration once.
+        settings = for_each_settings()
+        on_cluster = {"task_key": "classic_each", "job_cluster_key": "c", "notebook_task": {"notebook_path": "/x"}}
+        settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict({**for_each(on_cluster), "task_key": "c_loop"})]
+        sanitised(settings, disable_auto_optimization=disable)
+        assert nested_task(settings, "loop").disable_auto_optimization is (True if disable else None)
+        assert nested_task(settings, "c_loop").disable_auto_optimization is None
+        assert task(settings, "loop").disable_auto_optimization is None
+
 
 class TestComputeOverrides:
     """environment_version, budget_policy_id, existing_cluster_id and performance_optimized."""
@@ -776,6 +787,42 @@ class TestTaskParams:
             apply_task_params("my_job", settings, {"__pytest_probe__transform": {"limit": "10"}})
         with pytest.raises(LakeflowError, match=r"Unknown task 'extract' in task_params .*Available: \['load'\]$"):
             apply_task_params("my_job", example_settings(), {"extract": {"limit": "10"}}, allowed=["load"])
+
+    @pytest.mark.parametrize(
+        ("inner", "value", "expected"),
+        [
+            (
+                {"notebook_task": {"notebook_path": "/x", "base_parameters": {"item": "{{input}}"}}},
+                {"limit": "10"},
+                {"notebook_task": {"notebook_path": "/x", "base_parameters": {"item": "{{input}}", "limit": "10"}}},
+            ),
+            (
+                {"spark_python_task": {"python_file": "/x.py", "parameters": ["{{input}}"]}},
+                ["{{input}}", "--rows", "10"],
+                {"spark_python_task": {"python_file": "/x.py", "parameters": ["{{input}}", "--rows", "10"]}},
+            ),
+        ],
+        ids=["notebook-merged", "spark-python-replaced"],
+    )
+    def test_apply_task_params_reaches_a_task_nested_in_a_for_each_task(
+        self, inner: dict[str, Any], value: Any, expected: dict[str, Any]
+    ) -> None:
+        settings = apply_task_params("fanout", with_tasks(for_each({"task_key": "inner", **inner})), {"inner": value})
+        assert nested_task(settings, "loop") == jobs.Task.from_dict({"task_key": "inner", **expected})
+
+    def test_apply_task_params_names_the_nested_task_of_a_for_each_task(self) -> None:
+        settings = for_each_settings()
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=r"of task 'loop': it is not a .* task. Name its nested task, 'each', "):
+            apply_task_params("fanout", settings, {"loop": {"limit": "10"}})
+        with pytest.raises(LakeflowError, match=r"Unknown task 'nope' .*Available: \['after', 'each', 'loop'\]$"):
+            apply_task_params("fanout", settings, {"nope": {"limit": "10"}})
+        # task() of the for-each task allows only the for-each task, so its nested task cannot be named.
+        with pytest.raises(LakeflowError, match=r"of task 'loop': .* Change it with modify_settings instead.$"):
+            apply_task_params("fanout", settings, {"loop": {"limit": "10"}}, allowed=["loop"])
+        with pytest.raises(LakeflowError, match=r"Unknown task 'each' .*Available: \['loop'\]$"):
+            apply_task_params("fanout", settings, {"each": {"limit": "10"}}, allowed=["loop"])
+        assert settings == before
 
     def test_check_task_params_warns_on_job_parameter_collision(self, recwarn: pytest.WarningsRecorder) -> None:
         settings = example_settings()

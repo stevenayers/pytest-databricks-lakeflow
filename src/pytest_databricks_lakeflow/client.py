@@ -361,7 +361,8 @@ class Lakeflow:
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
             params: Job parameters for every run of the copy.
-            capture_task_values: The task value keys to capture, by task key.
+            capture_task_values: The task value keys to capture, by task key. A for-each task cannot be named,
+                because its iterations cannot set task values.
             name: Replaces the test node id in the job name.
             run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
                 the template's. A string with `@` names a user, any other string names a service principal by its
@@ -375,8 +376,9 @@ class Lakeflow:
                 a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list
                 replaces a Python script, JAR or Python wheel task's `parameters` or a dbt task's `commands`, which
                 must not be empty. A Python wheel task takes one or the other, so the one not given is cleared. Values
-                are passed unchanged. A name that is also a job parameter emits a `UserWarning`, because the job value
-                wins.
+                are passed unchanged. A task nested in a `for_each_task` is named by its own key, and every iteration
+                gets its parameters. A name that is also a job parameter emits a `UserWarning`, because the job
+                value wins.
             force_conditions: The outcome each if/else condition task takes in every run of the copy, by task key:
                 `True` runs the `true` branch, `False` the `false` branch. The task's operands are replaced by
                 constants, so the branch no longer depends on the data upstream of it. The upstream tasks still run.
@@ -453,11 +455,12 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
-                that is not in the job, `task_overrides` sets a field it does not take, `force_conditions` names a
-                task that is not a condition task, is disabled or downstream of a disabled task, or has an outcome
-                that is not a bool, a parameter name is reserved, an entry of `extra_dependencies` is a local path
-                that does not start with `./` or `../`, matches no file, has no uploaded copy or is used with
-                `sync="sync"`, or is a wheel with extras while the copy has a Python task on a cluster, `children` is
+                that is not in the job, `capture_task_values` names a for-each task, `task_overrides` sets a field it
+                does not take, `force_conditions` names a task that is not a condition task, is disabled or
+                downstream of a disabled task, or has an outcome that is not a bool, a parameter name is reserved,
+                an entry of `extra_dependencies` is a local path that does not start with `./` or `../`, matches no
+                file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras while the copy has
+                a Python task on a cluster, `children` is
                 `"refuse"` and the copy has a Run Job task that is not disabled, downstream of a disabled task nor
                 inside a disabled `for_each_task`, `environments` names a key starting with `__pytest_`, holds an
                 entry that is not a mapping or a field that a serverless environment does not take, sets both
@@ -574,7 +577,8 @@ class Lakeflow:
             params: Job parameters for every run.
             upstream_task_values: By upstream task key, a mapping of value keys to values, or a `Stub` with `values`
                 and `outputs`. An entry replaces the values `upstream_from` holds for that task.
-            capture_task_values: The task value keys to capture from the task.
+            capture_task_values: The task value keys to capture from the task. For a three-part `ref`, emits a
+                `UserWarning`, because the body cannot set task values when it runs in its loop.
             run_as: Who the job runs as, as for `job()`.
             task_params: Parameters for the task, as for `job()`. Only the task under test can be named.
             upstream_from: A run of the same job whose captured task values stub the task's upstream tasks.
@@ -609,7 +613,8 @@ class Lakeflow:
                 does not give, `upstream_from` is a run of another job or lacks the captured values of an upstream
                 task, a value is too large or not JSON-serialisable, an output contains `{{` or is not
                 JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
-                `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
+                `"refuse"` and the task is a Run Job task, `task_params` or `task_overrides` names another task, or
+                `capture_task_values` is given for a for-each task.
                 Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
                 cannot be applied, `setup` or `teardown` cannot run, `teardown_at` cannot be used, `pipelines` and
                 `schema` do not fit the task,
@@ -641,6 +646,14 @@ class Lakeflow:
         if nested:
             # First, so that task_params, task_overrides and upstream_from see the body as the task under test.
             lift_nested_task(settings, parts[1], task_key)
+            if capture_task_values:
+                warnings.warn(
+                    f"capture_task_values on {ref!r}: {task_key!r} cannot set task values when it runs in its loop "
+                    f"{parts[1]!r}, because the platform refuses taskValues.set in an iteration and fails it. A body "
+                    "that sets them passes here and fails in its loop; return them with dbutils.notebook.exit() "
+                    "instead.",
+                    stacklevel=2,
+                )
         # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
