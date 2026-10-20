@@ -811,6 +811,25 @@ class TestSelect:
         assert select(inject_lifecycle(three_tasks(), "/h/setup_1", None, HELPERS), ["b"]) == ["b", "__pytest_setup"]
 
     @pytest.mark.parametrize(
+        ("only", "expected"),
+        [
+            pytest.param(["transform"], ["transform", "__pytest_setup"], id="plain"),
+            pytest.param(["+transform"], ["+transform"], id="upstream"),
+            # run_now cannot leave a task out of a `key+` selection, so a selection that reaches it is spelt out.
+            pytest.param(["transform+"], ["__pytest_setup", "load", "transform"], id="downstream"),
+        ],
+    )
+    def test_select_leaves_out_excluded_tasks(self, only: list[str], expected: list[str]) -> None:
+        settings = inject_lifecycle(example_settings(), "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert select(settings, only, exclude={"__pytest_teardown"}) == expected
+
+    def test_spelt_out_selection_leaves_out_the_disabled_tasks_it_reaches(self) -> None:
+        # The platform runs a disabled task that only names, but not one that a `+` reaches.
+        settings = inject_lifecycle(disable_tasks(example_settings(), ["transform"]), "/h/s", "/h/t", HELPERS)
+        assert select(settings, ["extract+"], exclude={"__pytest_teardown"}) == ["__pytest_setup", "extract"]
+        assert select(settings, ["transform"], exclude={"__pytest_teardown"}) == ["transform", "__pytest_setup"]
+
+    @pytest.mark.parametrize(
         ("selected", "stubs", "missing"),
         [
             pytest.param({"transform"}, set(), "extract", id="left_out"),

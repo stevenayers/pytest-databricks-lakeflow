@@ -18,7 +18,7 @@ from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import bundle, helpers, session
-from pytest_databricks_lakeflow.ephemeral import EphemeralJob, EphemeralPipeline
+from pytest_databricks_lakeflow.ephemeral import TEARDOWN_AT, EphemeralJob, EphemeralPipeline, TeardownAt
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport
@@ -302,6 +302,7 @@ class Lakeflow:
         children: Children = "warn",
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
+        teardown_at: TeardownAt = "run",
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -314,7 +315,8 @@ class Lakeflow:
         """Make a throwaway copy of a bundle job.
 
         `setup` and `teardown` run on the job's compute, as notebook tasks of the copy. The setup task runs before
-        every other task on every run, and the teardown task after every other task, whether they passed or failed.
+        every other task on every run, and the teardown task after every other task, whether they passed or failed,
+        or with `teardown_at="close"` alone when the job closes.
         Each is one of three forms:
 
         - A plain function taking any of `spark`, `dbutils` and `params`, a dict of the job's parameters with their
@@ -360,6 +362,11 @@ class Lakeflow:
             teardown: A function, a list of SQL statements or a `.py` file to run last, as the task
                 `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no other task depends on. Its
                 outcome is `JobRun.teardown`, and a failure is logged as a warning.
+            teardown_at: When the teardown task runs. `"run"` runs it at the end of every run, before the test's
+                assertions. `"close"` leaves it out of every run, whose `teardown` is then `None`, and runs it alone
+                when the job closes, before it is deleted, with the job's `params`, so the assertions still see what
+                it removes. Its run is `EphemeralJob.teardown_run`. That costs a second run start per job. `keep` and
+                `--lakeflow-keep` skip it, `keep_failed` does not.
             extra_dependencies: Test-only dependencies for the copy, as PyPI requirements, workspace or Volumes
                 paths of wheels, or local wheels as paths relative to the bundle root that start with `./` or `../`,
                 such as `./dist/*.whl[test]`. A local path is pointed at the copy of each matching file that the last
@@ -430,7 +437,8 @@ class Lakeflow:
                 `environment_version` and `base_environment` on one environment, or brings the job past 10
                 environments, or `setup` or `teardown` is not a plain function with its source in a file, uses
                 variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params`, or
-                has a decorator. Also if `setup` or `teardown` is a string or an
+                has a decorator. Also if `teardown_at` is not `"run"` or `"close"`, or is `"close"` without
+                `teardown`. Also if `setup` or `teardown` is a string or an
                 empty list, a statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither
                 declared nor in `params`, or a path is missing or not a `.py` file.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
@@ -454,6 +462,7 @@ class Lakeflow:
         """
         _check_children(children)
         _check_pipelines(pipelines, schema)
+        _check_teardown_at(teardown_at, teardown)
         notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         settings = self.template(key)
@@ -487,6 +496,7 @@ class Lakeflow:
             extra_dependencies=dependencies,
             pipelines=pipelines,
             schema=schema,
+            teardown_at=teardown_at,
         )
 
     def task(
@@ -502,6 +512,7 @@ class Lakeflow:
         children: Children = "warn",
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
+        teardown_at: TeardownAt = "run",
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -533,6 +544,7 @@ class Lakeflow:
             children: What to do when the task is a Run Job task, as for `job()`.
             setup: Runs first, before the stubs, as for `job()`.
             teardown: Runs last, after the task and its probe, as for `job()`.
+            teardown_at: When the teardown task runs, at the end of every run or when the job closes, as for `job()`.
             extra_dependencies: Test-only dependencies for the job, as for `job()`.
             environments: Fields of the job's serverless environment specs, by `environment_key`, as for `job()`.
             task_overrides: Timeout and retry fields of the task, as for `job()`. Only the task under test can be
@@ -557,7 +569,8 @@ class Lakeflow:
                 JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
                 `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
                 Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
-                cannot be applied, `setup` or `teardown` cannot run, `pipelines` and `schema` do not fit the task,
+                cannot be applied, `setup` or `teardown` cannot run, `teardown_at` cannot be used, `pipelines` and
+                `schema` do not fit the task,
                 or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used, or
                 `trigger` cannot be applied.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
@@ -565,6 +578,7 @@ class Lakeflow:
         """
         _check_children(children)
         _check_pipelines(pipelines, schema)
+        _check_teardown_at(teardown_at, teardown)
         notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         job_key, _, task_key = ref.partition(".")
@@ -612,6 +626,7 @@ class Lakeflow:
             extra_dependencies=dependencies,
             pipelines=pipelines,
             schema=schema,
+            teardown_at=teardown_at,
         )
 
     def pipeline(
@@ -808,6 +823,7 @@ class Lakeflow:
         extra_dependencies: Sequence[str],
         pipelines: Pipelines,
         schema: str | None,
+        teardown_at: TeardownAt,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -852,6 +868,7 @@ class Lakeflow:
             stubs,
             extra_dependencies=extra_dependencies,
             pipelines=copies,
+            teardown_at=teardown_at,
         )
         if pipelines == "copy":
             assert schema is not None
@@ -952,6 +969,13 @@ def _flag_name(flag: str) -> str:
     if name.startswith("--"):
         return name
     return name[:2]
+
+
+def _check_teardown_at(teardown_at: str, teardown: LifecycleStep | None) -> None:
+    if teardown_at not in TEARDOWN_AT:
+        raise LakeflowError(f"teardown_at must be 'run' or 'close', not {teardown_at!r}")
+    if teardown_at == "close" and teardown is None:
+        raise LakeflowError('teardown_at="close" runs the teardown task when the job closes, so it needs teardown=')
 
 
 def _lifecycle_notebooks(setup: LifecycleStep | None, teardown: LifecycleStep | None) -> dict[str, Notebook]:
