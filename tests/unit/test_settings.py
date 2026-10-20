@@ -605,6 +605,19 @@ class TestCreateChecks:
                 r"file arrival trigger",
                 id="nested-file-arrival",
             ),
+            pytest.param(
+                lambda: replace(
+                    with_tasks({"task_key": "t", "notebook_task": {"notebook_path": "/n"}}),
+                    parameters=[
+                        jobs.JobParameterDefinition(name="day", default="{{job.trigger.time.iso_date}}"),
+                        jobs.JobParameterDefinition(name="landed", default="{{job.trigger.file_arrival.location}}"),
+                    ],
+                ),
+                r"Job parameter 'landed' of 'my_job' refers to \{\{job.trigger.file_arrival.location\}\}, but the copy "
+                r"has no file arrival trigger, and jobs/create refuses the reference without one. Set its value with "
+                r"trigger=\{'file_arrival.location': ...\} on job\(\) or task\(\).",
+                id="parameter-default",
+            ),
         ],
     )
     def test_check_trigger_references_refuses_references_the_copy_cannot_resolve(

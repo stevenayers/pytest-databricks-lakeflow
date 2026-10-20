@@ -298,6 +298,10 @@ def test_attach_rebuilds_a_kept_run(lakeflow: Lakeflow) -> None:
     finally:
         if job.job_id is not None:
             lakeflow.ws.jobs.delete(job.job_id)
+            # Kept only for attach(), so it leaves the terminal summary's kept jobs too.
+            kept_jobs = session.current().kept_jobs
+            if str(job.url) in kept_jobs:
+                kept_jobs.remove(str(job.url))
     assert run.succeeded, run
     assert again.job_key == run.job_key == "my_example_job"
     assert again.job_id == run.job_id
@@ -645,7 +649,8 @@ def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow) -> 
         teardown=report_params,
         teardown_at="close",
     ) as job:
-        # Every task but the teardown is passed in only, the disabled one included.
+        # only lists every task but the teardown, the disabled one and load downstream of it: the platform runs a
+        # disabled task that only names, so leaving them out keeps them disabled.
         run = job.run(params={"param2": "this run"})
         assert run.succeeded, run
         assert run.executed_tasks == ["extract", "my_wheel_task"]
