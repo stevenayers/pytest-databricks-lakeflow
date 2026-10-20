@@ -1292,6 +1292,32 @@ def selected_tasks(settings: jobs.JobSettings, only: Sequence[str], stubs: Colle
     return selected
 
 
+def check_disabled(settings: jobs.JobSettings, only: Sequence[str]) -> None:
+    """Fail early when `only` names a task that is disabled or downstream of a disabled task.
+
+    The platform runs a disabled task that `only` names, and with `key+` the tasks downstream of it, though jobs/get
+    still shows it disabled. A `+` that only reaches a disabled task does not run it, so that is allowed.
+
+    Args:
+        settings: The job's settings.
+        only: Task keys, as `select` takes them.
+
+    Raises:
+        LakeflowError: If a task that `only` names, with or without `+`, is one that `disabled_task_keys` returns.
+    """
+    disabled = disabled_task_keys(settings)
+    named: set[str] = set()
+    for entry in only:
+        key = entry.strip("+")
+        if key in disabled:
+            named.add(key)
+    if named:
+        raise LakeflowError(
+            f"only names {sorted(named)}, which are disabled in the copy or downstream of a disabled task, and the "
+            "platform runs a disabled task that only names. Leave them out of only, or do not disable them."
+        )
+
+
 def check_references(settings: jobs.JobSettings, selected: Collection[str], stubs: Collection[str]) -> None:
     """Fail early when a selected task refers to the task values or the output of a task that the run leaves out.
 

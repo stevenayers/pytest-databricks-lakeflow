@@ -1483,6 +1483,25 @@ def disable_classic(settings, item):
         )
         result.assert_outcomes(passed=1)
 
+    @pytest.mark.parametrize("call", ['run(only=["transform+"])', 'start(only=["load"])'], ids=["run", "start"])
+    def test_only_refuses_disabled_tasks_before_the_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, call: str
+    ) -> None:
+        result = run_tests(
+            pytester,
+            f"""
+import pytest
+
+from pytest_databricks_lakeflow import LakeflowError
+
+def test_job(lakeflow):
+    with pytest.raises(LakeflowError, match="the platform runs a disabled task that only names"):
+        lakeflow.job("my_job", disable=["transform"]).{call}
+""",
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.run_now_calls == []
+
     def test_disable_rejects_unknown_tasks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job", disable=["nope"]).run()\n')
         result.assert_outcomes(failed=1)

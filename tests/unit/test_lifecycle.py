@@ -617,6 +617,23 @@ def test_job(lakeflow):
         result.assert_outcomes(passed=1)
         assert only_of_each_run(fake_ws) == [["extract", "classic"], ["__pytest_teardown"]]
 
+    def test_only_refuses_disabled_tasks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            """
+import pytest
+
+from pytest_databricks_lakeflow import LakeflowError
+
+def test_job(lakeflow):
+    job = lakeflow.job("my_job", disable=["transform"], teardown=cleanup, teardown_at="close")
+    with pytest.raises(LakeflowError, match=r"only names \\['transform'\\]"):
+        job.run(only=["transform"])
+""",
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.run_now_calls == [], "a job that never ran needs no teardown run"
+
     def test_cancelled_run_is_still_cleaned_up(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(make_run(76, FULL_RUN_STATES), polls=100)
         fake_ws.jobs.queue(make_run(77, TEARDOWN_ONLY_STATES))

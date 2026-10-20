@@ -39,6 +39,7 @@ from pytest_databricks_lakeflow.results import (
 from pytest_databricks_lakeflow.settings import (
     TIMEOUT_GRACE_SECONDS,
     check_compute,
+    check_disabled,
     check_output_references,
     check_params,
     check_references,
@@ -359,7 +360,8 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a selected task refers to the task values or the output of a task that `only` leaves out
+                task or a task that is disabled in the copy or downstream of a disabled task, which the platform
+                would run, a selected task refers to the task values or the output of a task that `only` leaves out
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
                 is set and the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`.
                 Also if `replay` is passed without `only` or to a job that has been created, is a run of another job, or
@@ -430,7 +432,8 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
-                task, a selected task refers to the task values or the output of a task that `only` leaves out
+                task or a task that is disabled in the copy or downstream of a disabled task, which the platform
+                would run, a selected task refers to the task values or the output of a task that `only` leaves out
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, or a
                 selection is set and the installed databricks-sdk cannot send it.
             ValueError: If `performance_target` is not a known performance target.
@@ -465,6 +468,7 @@ class EphemeralJob:
         if self.teardown_at == "close":
             exclude.add(TEARDOWN_KEY)
         if only:
+            check_disabled(self.settings, only)
             check_references(self.settings, selected_tasks(self.settings, only, self.stubs), self.stubs)
             return select(self.settings, only, self.stubs, exclude)
         if not exclude:

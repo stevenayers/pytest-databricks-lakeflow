@@ -21,6 +21,7 @@ from pytest_databricks_lakeflow.settings import (
     add_dependencies,
     apply_task_params,
     check_compute,
+    check_disabled,
     check_params,
     check_references,
     check_task_params,
@@ -828,6 +829,31 @@ class TestSelect:
         settings = inject_lifecycle(disable_tasks(example_settings(), ["transform"]), "/h/s", "/h/t", HELPERS)
         assert select(settings, ["extract+"], exclude={"__pytest_teardown"}) == ["__pytest_setup", "extract"]
         assert select(settings, ["transform"], exclude={"__pytest_teardown"}) == ["transform", "__pytest_setup"]
+
+    @pytest.mark.parametrize(
+        ("only", "named"),
+        [
+            pytest.param(["transform"], "['transform']", id="disabled"),
+            pytest.param(["transform+"], "['transform']", id="disabled_with_downstream"),
+            pytest.param(["extract", "+load"], "['load']", id="downstream_of_disabled"),
+            pytest.param(["transform", "load"], "['load', 'transform']", id="several"),
+            # A `+` that reaches a disabled task does not run it, nor the tasks downstream of it.
+            pytest.param(["extract+"], None, id="reached"),
+            pytest.param(["extract", "classic"], None, id="enabled"),
+        ],
+    )
+    def test_check_disabled_refuses_naming_a_disabled_task(self, only: list[str], named: str | None) -> None:
+        # Probed: the platform runs a disabled task that only names, and with `key+` the tasks downstream of it.
+        settings = inject_lifecycle(disable_tasks(example_settings(), ["transform"]), "/h/s", "/h/t", HELPERS)
+        if named is None:
+            check_disabled(settings, only)
+            return
+        with pytest.raises(LakeflowError) as raised:
+            check_disabled(settings, only)
+        assert str(raised.value) == (
+            f"only names {named}, which are disabled in the copy or downstream of a disabled task, and the platform "
+            "runs a disabled task that only names. Leave them out of only, or do not disable them."
+        )
 
     @pytest.mark.parametrize(
         ("selected", "stubs", "missing"),

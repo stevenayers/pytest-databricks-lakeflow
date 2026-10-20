@@ -658,6 +658,16 @@ def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow) -> 
     assert teardown.output_json == {"param1": "every run", "param2": "world", "schema": "", "mode": "full"}
 
 
+def test_only_refuses_a_disabled_task(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", disable=["transform"]) as job:
+        # The platform runs a disabled task that only names, and with transform+ the load task after it.
+        with pytest.raises(LakeflowError, match=r"only names \['transform'\]"):
+            job.run(only=["transform+"])
+        assert job.job_id is not None
+        assert list(lakeflow.ws.jobs.list_runs(job_id=job.job_id)) == []
+        assert job.runs == []
+
+
 def test_teardown_at_close_runs_after_a_cancelled_run(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", teardown=report_params, teardown_at="close") as job:
         job.start(only=["extract"])
