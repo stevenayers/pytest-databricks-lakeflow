@@ -78,6 +78,7 @@ These apply to one pytest run and win over the matching arguments.
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
 | `--lakeflow-debug-notebook` | When a test fails, write a notebook for each notebook task that failed in the last run of each of its jobs, which sets the task's resolved parameters as widgets and runs the task's notebook. See [Reproduce a failed notebook task](job-tests.md#reproduce-a-failed-notebook-task). |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`, relative to the directory pytest was invoked from: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](#report-directory). |
+| `--lakeflow-live` | Print each task state change to the terminal while a run waits, with the start and end of the run, without `--log-cli-level` or `-s`. `run(stream=...)` overrides it for one run. Under xdist the lines are only logged. See [logging and reports](#logging-and-reports). |
 
 ### Sweeping leftovers
 
@@ -197,6 +198,15 @@ transform: RUNNING -> FAILED in 0:00:42 ValueError: no rows
 ```
 
 A retried task run is labelled with its attempt, such as `transform (attempt 1): PENDING`. A task that has already terminated when it is first seen logs one line with its final state. The output of each task run is read once, as soon as it has terminated, which supplies the error for the line and is reused when the `JobRun` is built.
+
+To watch a run without turning on INFO for every logger, pass `--lakeflow-live`, or `stream=True` to one `job.run()`. The plugin then also prints the start of each run, each of these lines and the end of the run straight to the terminal, prefixed `lakeflow: `, while the test is still running, past pytest's output capture as its own live logging does, so neither `--log-cli-level` nor `-s` is needed. `job.run(stream=False)` keeps one run quiet under `--lakeflow-live`, and a run from `start()` streams when `--lakeflow-live` is set. The log lines and the report section are the same either way, so with `--log-cli-level=INFO` as well each line shows twice. Under xdist (`-n`) a worker cannot write to the controller's terminal, so `--lakeflow-live` and `stream=True` print nothing there and the lines are only logged and kept in the report section.
+
+```text
+lakeflow: Started run 77 of job 1001: https://<workspace host>/jobs/runs/77
+lakeflow: transform: PENDING -> RUNNING
+lakeflow: transform: RUNNING -> FAILED in 0:00:07 ValueError: no rows
+lakeflow: Run 77 finished FAILED in 0:00:51: https://<workspace host>/jobs/runs/77
+```
 
 Each test's job and run coordinates are appended to `item.user_properties`, so they appear as JUnit XML properties:
 

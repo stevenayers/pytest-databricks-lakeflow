@@ -6,6 +6,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
@@ -89,10 +90,14 @@ LoggedStates = dict[tuple[str, int], tuple[str, bool]]
 
 @dataclass
 class _Polling:
-    """What polling one run has seen: the task states logged, the outputs read, and whether the plugin cancelled it."""
+    """What polling one run has seen: the task states logged, the outputs read, and whether the plugin cancelled it.
+
+    With `stream`, each task state change is also written to the terminal.
+    """
 
     run_id: int
     item: pytest.Item
+    stream: bool = False
     logged: LoggedStates = field(default_factory=dict)
     outputs: dict[int, jobs.RunOutput] = field(default_factory=dict)
     cancelled: bool = False
@@ -306,6 +311,7 @@ class EphemeralJob:
         refresh_flow_selection: Sequence[str] | None = None,
         reset_checkpoint_selection: Sequence[str] | None = None,
         replay: JobRun | None = None,
+        stream: bool | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
 
@@ -343,6 +349,10 @@ class EphemeralJob:
                 `capture_task_values={"<upstream key>": [...]}` on `job()`. The stubs are part of the job's settings,
                 so `replay` needs `only` and a job that has not been created yet: pass it to the first run of a new
                 `lakeflow.job(...)`.
+            stream: Whether to print the start of the run, each task state change and the end of the run to the
+                terminal while waiting, as `lakeflow: <line>`, whatever the output capture and `--log-cli-level`.
+                Defaults to whether `--lakeflow-live` is set. An xdist worker cannot write to the terminal, so there
+                the lines are only logged.
 
         Returns:
             The run's outcome.
@@ -376,6 +386,7 @@ class EphemeralJob:
             refresh_flow_selection=refresh_flow_selection,
             reset_checkpoint_selection=reset_checkpoint_selection,
         )
+        handle._stream = stream
         return handle.wait(stop_after=stop_after)
 
     def start(
@@ -590,12 +601,14 @@ class EphemeralJob:
         first: jobs.Run | None = None,
         first_at: float = 0.0,
         stop_after: timedelta | None = None,
+        stream: bool = False,
     ) -> tuple[jobs.Run, dict[int, jobs.RunOutput]]:
         """Poll the run until it terminates, starting from `first`, the poll that `start()` made at `first_at`.
 
         With `stop_after`, the run is cancelled once `stop_after` has passed since `first_at` and polled until it
         terminates. When `timeout` expires first, the run is cancelled, unless `stop_after` already did that, reported
-        with `--lakeflow-report-dir`, and `LakeflowTimeout` is raised.
+        with `--lakeflow-report-dir`, and `LakeflowTimeout` is raised. With `stream`, each task state change is also
+        written to the terminal.
         """
         deadline = time.monotonic() + timeout.total_seconds()
         stop_at = None
@@ -604,7 +617,7 @@ class EphemeralJob:
         # A snapshot older than one poll interval is polled again at once, without a sleep or the deadline check, so
         # a wait() long after start() neither sleeps on it nor times out a run that has finished since.
         stale = first is not None and time.monotonic() - first_at >= _poll_seconds(self.lakeflow)
-        polling = _Polling(run_id, item)
+        polling = _Polling(run_id, item, stream)
         run = self._poll(polling, deadline, first, stale, stop_at)
         if terminated(run):
             return run, polling.outputs
@@ -639,7 +652,7 @@ class EphemeralJob:
             run = ws.jobs.get_run(polling.run_id)
         while True:
             self._record_url(polling.run_id, run, polling.item)
-            self._log_progress(run, polling.logged, polling.outputs, progress)
+            self._log_progress(run, polling, progress)
             if terminated(run):
                 return run
             if not stale:
@@ -706,14 +719,14 @@ class EphemeralJob:
         self._run_urls[run_id] = run.run_page_url
         item.user_properties.append(("lakeflow_run_url", run.run_page_url))
 
-    def _log_progress(
-        self, run: jobs.Run, logged: LoggedStates, outputs: dict[int, jobs.RunOutput], progress: list[str]
-    ) -> None:
+    def _log_progress(self, run: jobs.Run, polling: _Polling, progress: list[str]) -> None:
         """Log each task run whose state changed since the last poll, reading the output of those that finished.
 
         A task attempt that was logged as terminated is not logged again, so a result state that appears on a later
-        poll does not log a second line.
+        poll does not log a second line. Each line is also written to the terminal when `polling` streams.
         """
+        logged = polling.logged
+        outputs = polling.outputs
         states: list[tuple[jobs.RunTask, str | None, bool]] = []
         finished: list[jobs.RunTask] = []
         for task in run.tasks or []:
@@ -730,6 +743,8 @@ class EphemeralJob:
             line = _transition(task, previous, state, outputs.get(task.run_id or 0), done)
             logged[key] = (state, done)
             log.info("%s", line)
+            if polling.stream:
+                emit(polling.item, line)
             progress.append(line)
 
     def debug_notebook(self, task_key: str, run: JobRun | None = None) -> DebugNotebook:
@@ -965,6 +980,8 @@ class RunHandle:
         self._first = first
         self._first_at = time.monotonic()
         self._timeout = timeout
+        # Set by run(stream=...); None follows --lakeflow-live.
+        self._stream: bool | None = None
         self._result: JobRun | None = None
 
     @property
@@ -1008,9 +1025,14 @@ class RunHandle:
             timeout = job.lakeflow.timeout
         if stop_after is not None:
             _check_stop_after(job.job_key, stop_after, timeout)
+        stream = self._stream
+        if stream is None:
+            stream = session.current().live
+        if stream:
+            emit(self._item, f"Started run {self.run_id} of job {job.job_id}: {self.url}")
         first = self._first
         self._first = None
-        run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at, stop_after)
+        run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at, stop_after, stream)
         job._forget(self.run_id)
         result = job._job_run(run, outputs)
         self._result = result
@@ -1019,7 +1041,10 @@ class RunHandle:
         if session.current().report_dir is not None:
             self._item.stash.setdefault(RUNS, []).append((job, result))
         record_outcome(self._item, result)
-        log.info("Run %s finished %s in %s: %s", self.run_id, result.result_state, result.duration, result.run_url)
+        finished = f"Run {self.run_id} finished {result.result_state} in {result.duration}: {result.run_url}"
+        log.info("%s", finished)
+        if stream:
+            emit(self._item, finished)
         _warn_on_failed_teardown(result)
         if job.lakeflow.run_finished is not None:
             job.lakeflow.run_finished(result, self._item)
@@ -1253,6 +1278,24 @@ def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
         log.info("Cancelled run %s", run_id)
     except DatabricksError as e:
         log.warning("Could not cancel run %s: %s", run_id, e)
+
+
+def emit(item: pytest.Item, line: str) -> None:
+    """Write `lakeflow: <line>` to the terminal straight away, past output capture, as pytest's live logging does.
+
+    Does nothing without a terminal reporter, such as under `-p no:terminal`.
+    """
+    plugins = item.config.pluginmanager
+    reporter = plugins.get_plugin("terminalreporter")
+    if reporter is None:
+        return
+    # An xdist worker has a terminal reporter too, but execnet discards what it writes, so the line goes nowhere.
+    capture = plugins.get_plugin("capturemanager")
+    suspended: AbstractContextManager[object] = nullcontext()
+    if capture is not None:
+        suspended = capture.global_and_fixture_disabled()
+    with suspended:
+        reporter.write_line(f"lakeflow: {line}")
 
 
 def _check_stop_after(job_key: str, stop_after: timedelta, timeout: timedelta) -> None:
