@@ -358,9 +358,10 @@ class Lakeflow:
             task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
                 mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
                 a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list
-                replaces a Python script, JAR or Python wheel task's `parameters` or a dbt task's `commands`. A Python
-                wheel task takes one or the other, so the one not given is cleared. Values are passed unchanged. A name
-                that is also a job parameter emits a `UserWarning`, because the job value wins.
+                replaces a Python script, JAR or Python wheel task's `parameters` or a dbt task's `commands`, which
+                must not be empty. A Python wheel task takes one or the other, so the one not given is cleared. Values
+                are passed unchanged. A name that is also a job parameter emits a `UserWarning`, because the job value
+                wins.
             force_conditions: The outcome each if/else condition task takes in every run of the copy, by task key:
                 `True` runs the `true` branch, `False` the `false` branch. The task's operands are replaced by
                 constants, so the branch no longer depends on the data upstream of it. The upstream tasks still run.
@@ -453,13 +454,13 @@ class Lakeflow:
                 empty list, a statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither
                 declared nor in `params`, or a path is missing or not a `.py` file.
                 Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
-                Python wheel, SQL or dbt task, gives a task a value that does not fit its type, or holds a parameter
-                name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
-                a value that is too large or not JSON-serialisable, an output that contains `{{` or is not
-                JSON-serialisable, or no output for a path that a task of the copy refers to. When the job is created,
-                also if a task of the copy refers to the output of a notebook task that is not a stub, or keeps a
-                `{{job.trigger.table_update.*}}` or `{{job.trigger.file_arrival.*}}` reference that `trigger` does not
-                set. Also if
+                Python wheel, SQL or dbt task, gives a task a value that does not fit its type or a dbt task no
+                commands, or holds a parameter name starting with `__pytest_`, or `upstream_task_values` names a task
+                that is not in the job or holds a value that is too large or not JSON-serialisable, an output that
+                contains `{{` or is not JSON-serialisable, or no output for a path that a task of the copy refers to.
+                When the job is created, also if a task of the copy refers to the output of a notebook task that is not
+                a stub, or keeps a `{{job.trigger.table_update.*}}` or `{{job.trigger.file_arrival.*}}` reference that
+                `trigger` does not set. Also if
                 `pipelines` is `"copy"` without `schema` or the copy has no enabled pipeline task, `schema` is passed
                 without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
                 Also if `for_each_inputs` names a task that is not in the job or has no `for_each_task`, or gives a
