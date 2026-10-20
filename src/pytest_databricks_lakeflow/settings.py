@@ -2251,13 +2251,15 @@ def inject_probes(
         `settings`.
 
     Raises:
-        LakeflowError: If a task is not in the job or is a for-each task, or a key is longer than 512 characters.
+        LakeflowError: If a task is not in the job, is a for-each task or is nested in one, or a key is longer than 512
+            characters.
     """
     if not capture_task_values:
         return settings
     tasks: dict[str, jobs.Task] = {}
     for task in settings.tasks or []:
         tasks[task.task_key] = task
+    _check_not_nested(settings, capture_task_values)
     unknown = sorted(set(capture_task_values) - set(tasks))
     if unknown:
         raise LakeflowError(
@@ -2635,6 +2637,17 @@ def _check_capturable(task: jobs.Task) -> None:
             "Return the values with dbutils.notebook.exit() and read each iteration's output from "
             f"run.task({task.task_key!r}).iterations instead."
         )
+
+
+def _check_not_nested(settings: jobs.JobSettings, capture_task_values: Mapping[str, Sequence[str]]) -> None:
+    # A nested task runs only as the loop's iterations, which cannot set task values either.
+    for loop_key, body_key in for_each_bodies(settings).items():
+        if body_key in capture_task_values:
+            raise LakeflowError(
+                f"capture_task_values names the task {body_key!r}, nested in the for-each task {loop_key!r}, whose "
+                "iterations cannot set task values. Return the values with dbutils.notebook.exit() and read each "
+                f"iteration's output from run.task({loop_key!r}).iterations instead."
+            )
 
 
 def _check_keys(task_key: str, keys: Collection[str]) -> None:

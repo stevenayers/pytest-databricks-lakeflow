@@ -577,7 +577,7 @@ Each iteration is built like a task: its `task_key` is the nested task's key, he
 
 `for_each_stats` is a `ForEachStats` with `total_iterations`, `succeeded_iterations`, `failed_iterations` and `errors`, each a `ForEachError` with `message`, `count` and `termination_category`. The platform counts each iteration once, however often it was retried, and groups the errors by message: an iteration whose code raised reports `Workload failed, see run output for details` there, and its own error is in `iterations`.
 
-An iteration cannot set task values: `dbutils.jobs.taskValues.set()` in it raises `Py4JJavaError` with `INVALID_PARAMETER_VALUE: Run <id> is an iteration of a For each run; setting task values is not supported for iterations.`, which fails the iteration. So `capture_task_values={"loop": [...]}`, which could never capture anything, raises `LakeflowError` before anything is created, naming the for-each task, and so does `capture_task_values` on `lakeflow.task("fanout.loop")`. Return a value with `dbutils.notebook.exit()` and read it from the iteration's `output` instead.
+An iteration cannot set task values: `dbutils.jobs.taskValues.set()` in it raises `Py4JJavaError` with `INVALID_PARAMETER_VALUE: Run <id> is an iteration of a For each run; setting task values is not supported for iterations.`, which fails the iteration. So `capture_task_values={"loop": [...]}`, which could never capture anything, raises `LakeflowError` before anything is created, naming the for-each task, and so do `capture_task_values={"each": [...]}`, which names the nested task and its loop, and `capture_task_values` on `lakeflow.task("fanout.loop")`. Return a value with `dbutils.notebook.exit()` and read it from the iteration's `output` instead.
 
 The nested task cannot be the target of `run(only=...)`. To run the nested task once, without its loop, with an item you choose, see [For-each bodies](task-tests.md#for-each-bodies).
 
@@ -698,7 +698,7 @@ A copy is deleted on leaving its `with` block, or at the end of the test, unless
 
 ## Capture task values
 
-Task values are not exposed by the Jobs API. `capture_task_values` adds a probe task after each task you name. A for-each task cannot be named, because its iterations cannot set task values, see [For-each tasks](#for-each-tasks). The probe depends on the task, runs even when the task failed, and reports the values it finds:
+Task values are not exposed by the Jobs API. `capture_task_values` adds a probe task after each task you name. A for-each task, or the task nested in one, cannot be named, because the loop's iterations cannot set task values, see [For-each tasks](#for-each-tasks). The probe depends on the task, runs even when the task failed, and reports the values it finds:
 
 ```python
 def test_values_captured_even_on_failure(lakeflow: Lakeflow) -> None:

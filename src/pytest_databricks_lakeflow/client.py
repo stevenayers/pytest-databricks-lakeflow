@@ -431,8 +431,8 @@ class Lakeflow:
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
             params: Job parameters for every run of the copy.
-            capture_task_values: The task value keys to capture, by task key. A for-each task cannot be named,
-                because its iterations cannot set task values.
+            capture_task_values: The task value keys to capture, by task key. A for-each task and the task nested
+                in it cannot be named, because the loop's iterations cannot set task values.
             name: Replaces the test node id in the job name.
             run_as: Who the copy runs as. `None` takes `Lakeflow`'s `run_as`, which by default removes the template's
                 `run_as`, so the copy runs as you. `"keep"` keeps the template's. A string with `@` names a user, any
@@ -510,8 +510,8 @@ class Lakeflow:
             for_each_inputs: The list each for-each task of the copy iterates over, by task key, such as
                 `{"loop": ["a", "b"]}`, so a test of two items runs two iterations rather than the deployed list. Each
                 list replaces the task's `for_each_task.inputs` as JSON, with `{{` escaped so a value is not read as
-                a reference, and may be empty. The run reports the for-each task as one task: its iterations are not
-                in the result.
+                a reference, and may be empty. The run reports the for-each task as one task, with its iterations in
+                `TaskRun.iterations` and their counts in `TaskRun.for_each_stats`.
             trigger: The values the copy's `{{job.trigger.<path>}}` references take, by the path after `job.trigger.`,
                 such as `{"type": "table", "table_update.updated_tables": "cat.sch.orders"}`. The copy is started with
                 run-now, which cannot say that a trigger fired, so each such reference is rewritten to
@@ -539,13 +539,13 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
-                that is not in the job, `capture_task_values` names a for-each task, `task_overrides` sets a field it
-                does not take, `force_conditions` names a task that is not a condition task, is disabled or
-                downstream of a disabled task, or has an outcome that is not a bool, a parameter name is reserved,
-                an entry of `extra_dependencies` is a local path that does not start with `./` or `../`, matches no
-                file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras while the copy has
-                a Python task on a cluster, `children` is
-                `"refuse"` and the copy has a Run Job task that is not disabled, downstream of a disabled task nor
+                that is not in the job, `capture_task_values` names a for-each task or the task nested in one,
+                `task_overrides` sets a field it does not take, `force_conditions` names a task that is not a condition
+                task, is disabled or downstream of a disabled task, or has an outcome that is not a bool, a parameter
+                name is reserved, an entry of `extra_dependencies` is a local path that does not start with `./` or
+                `../`, matches no file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras
+                while the copy has a Python task on a cluster, `children` is `"refuse"` and the copy has a Run Job task
+                that is not disabled, downstream of a disabled task nor
                 inside a disabled `for_each_task`, `environments` names a key starting with `__pytest_`, holds an
                 entry that is not a mapping or a field that a serverless environment does not take, sets both
                 `environment_version` and `base_environment` on one environment, or brings the job past 10

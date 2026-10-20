@@ -414,6 +414,19 @@ class TestInjectProbes:
             wrap_task(settings, "loop", {}, ["seen"], HELPERS)
         assert settings == before
 
+    def test_a_task_nested_in_a_for_each_task_is_refused(self) -> None:
+        # The nested task runs only as iterations, which cannot set task values either.
+        message = (
+            "capture_task_values names the task 'each', nested in the for-each task 'loop', whose iterations cannot "
+            "set task values. Return the values with dbutils.notebook.exit() and read each iteration's output from "
+            "run.task('loop').iterations instead."
+        )
+        settings = for_each_settings()
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=re.escape(message)):
+            inject_probes(settings, {"after": ["k"], "each": ["seen"]}, HELPERS)
+        assert settings == before
+
 
 class TestRecoverInjected:
     """`recover_injected` reads back the stubs and probes that a created copy carries."""
