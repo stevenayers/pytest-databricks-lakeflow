@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Collection
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +15,8 @@ from databricks.sdk.service import compute, jobs
 from pytest_databricks_lakeflow import settings as settings_module
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
+    ALL_RULES,
+    DEFAULT_RULES,
     ENV_KEY,
     PIPELINE_CREATE_PARAMETERS,
     TASK_OVERRIDES,
@@ -56,6 +59,7 @@ from pytest_databricks_lakeflow.settings import (
 from .conftest import NEEDS_REFRESH_SELECTION
 from .fakes import (
     branching_settings,
+    build_wheel,
     dbt_settings,
     example_settings,
     fanout_objects_settings,
@@ -1091,6 +1095,205 @@ class TestLint:
         before = copy.deepcopy(settings.as_dict())
         assert lint(settings)
         assert settings.as_dict() == before
+
+
+def wheel_settings(entry_point: str, package: str = "pkg") -> jobs.JobSettings:
+    """Build `example_settings` with `load` running `entry_point` of the wheel `package`."""
+    settings = example_settings()
+    task(settings, "load").python_wheel_task = jobs.PythonWheelTask(package_name=package, entry_point=entry_point)
+    return settings
+
+
+CONSOLE_SCRIPTS = "[console_scripts]\nmain = pkg.main:main\n"
+
+
+def trigger_message(owner: str, path: str) -> str:
+    return (
+        f"{owner}: refers to {{{{job.trigger.{path}}}}}, which a test's run-now run does not resolve as its trigger "
+        f"would. Set its value with trigger={{{path!r}: ...}} on job() or task()."
+    )
+
+
+class TestLintRules:
+    """The named rules of lint: built wheels, workspace paths, dashed task keys, trigger references and EQUAL_TO."""
+
+    @pytest.mark.parametrize(
+        ("entry_point", "entry_points", "init", "problems"),
+        [
+            ("main", CONSOLE_SCRIPTS, "", []),
+            # The Databricks docs build their wheel with entry_points={"group_1": "run=..."}: any group will do.
+            ("run", "[group_1]\nrun = pkg.main:main\n", "", []),
+            ("run", CONSOLE_SCRIPTS, "def run():\n    pass\n", []),
+            ("run", CONSOLE_SCRIPTS, "from pkg.main import main as run\n", []),
+            (
+                "run",
+                "[console_scripts]\nmain = pkg.main:main\n[group_1]\nstart = pkg.main:main\nmain = pkg.main:main\n",
+                "def other():\n    pass\n",
+                [
+                    "Task 'load': entry point 'run' is not in dist/pkg-0.1.0-py3-none-any.whl. Entry points: "
+                    "['main', 'start'], and pkg/__init__.py does not define it."
+                ],
+            ),
+        ],
+        ids=["console-script", "other-group", "init-def", "init-import", "undefined"],
+    )
+    def test_lint_wheel_rule(
+        self, tmp_path: Path, entry_point: str, entry_points: str, init: str, problems: list[str]
+    ) -> None:
+        build_wheel(tmp_path / "dist", entry_points=entry_points, init=init)
+        assert lint(wheel_settings(entry_point), bundle_root=tmp_path) == problems
+
+    def test_lint_wheel_rule_reads_the_newest_wheel_of_the_normalised_package(self, tmp_path: Path) -> None:
+        build_wheel(tmp_path / "dist", "Lakeflow.Example", init="def run():\n    pass\n", modified=1_000)
+        build_wheel(tmp_path / "dist", "Lakeflow.Example", version="0.2.0", modified=2_000)
+        build_wheel(tmp_path / "dist", "other")
+        # A wheel that is not a zip, such as one an interrupted build left behind, is skipped.
+        (tmp_path / "dist" / "broken-0.1.0-py3-none-any.whl").write_bytes(b"partial")
+        settings = wheel_settings("main", "lakeflow_example")
+        assert lint(settings, bundle_root=tmp_path) == []
+        inner = {"task_key": "inner", "python_wheel_task": {"package_name": "lakeflow-example", "entry_point": "run"}}
+        nested = for_each(inner)
+        settings.tasks = [*(settings.tasks or []), jobs.Task.from_dict(nested)]
+        assert lint(settings, bundle_root=tmp_path) == [
+            "Task 'inner': entry point 'run' is not in dist/lakeflow_example-0.2.0-py3-none-any.whl. Entry points: "
+            "['main'], and lakeflow-example/__init__.py does not define it."
+        ]
+        assert lint(wheel_settings("main", "missing"), bundle_root=tmp_path) == [
+            "Task 'load': no wheel in dist/ is package 'missing'. Packages: ['lakeflow-example', 'other']"
+        ]
+
+    def test_lint_skips_wheel_rule_without_dist(self, tmp_path: Path) -> None:
+        settings = wheel_settings("nope")
+        assert lint(settings, bundle_root=tmp_path) == []
+        (tmp_path / "dist").mkdir()
+        assert lint(settings, bundle_root=tmp_path) == []
+        build_wheel(tmp_path / "dist")
+        assert lint(settings) == []
+        assert lint(settings, rules=DEFAULT_RULES - {"wheel"}, bundle_root=tmp_path) == []
+        assert lint(settings, bundle_root=tmp_path)
+
+    def test_lint_library_paths(self) -> None:
+        settings = with_tasks(
+            {
+                "task_key": "py",
+                "spark_python_task": {"python_file": "/Workspace/files/main.py"},
+                "libraries": [
+                    {"whl": "/Workspace/libs/a.whl"},
+                    {"jar": "/Volumes/c/s/v/b.jar"},
+                    {"whl": "dbfs:/libs/c.whl"},
+                    {"pypi": {"package": "inflection"}},
+                ],
+            },
+            for_each({"task_key": "inner", "notebook_task": {"notebook_path": "/n"}, "libraries": [{"whl": "/w.whl"}]}),
+        )
+        spec = (settings.environments or [])[0].spec
+        assert spec is not None
+        spec.dependencies = ["/Workspace/libs/env.whl", "pandas==2.2.3", "./dist/*.whl"]
+        called: list[str] = []
+
+        def exists(path: str) -> bool:
+            called.append(path)
+            return path == "/Workspace/libs/a.whl"
+
+        assert lint(settings, exists=exists) == [
+            "Task 'py': /Volumes/c/s/v/b.jar does not exist.",
+            "Task 'py': /Workspace/files/main.py does not exist.",
+            "Task 'inner': /w.whl does not exist.",
+            "Environment 'default': /Workspace/libs/env.whl does not exist.",
+        ]
+        assert called == [
+            "/Workspace/libs/a.whl",
+            "/Volumes/c/s/v/b.jar",
+            "/Workspace/files/main.py",
+            "/w.whl",
+            "/Workspace/libs/env.whl",
+        ]
+        called.clear()
+        assert lint(settings, rules=DEFAULT_RULES - {"library"}, exists=exists) == []
+        assert called == []
+
+    def test_lint_dashed_task_keys(self) -> None:
+        loop = for_each(notebook("inner", n="{{tasks.load-raw.values.n}}"))
+        settings = jobs.JobSettings.from_dict(
+            {
+                "tasks": [
+                    notebook("load-raw"),
+                    notebook(
+                        "a",
+                        "load-raw",
+                        n="{{tasks.load-raw.values.n}}",
+                        m="{{ tasks.load-raw.values.m }}",
+                        s="{{tasks.load-raw.result_state}}",
+                    ),
+                    {**loop, "depends_on": [{"task_key": "load-raw"}]},
+                    # A key in backticks may hold a dash.
+                    notebook("b", "load-raw", n="{{tasks.`load-raw`.values.n}}"),
+                ]
+            }
+        )
+        message = (
+            "refers to task 'load-raw', whose key has a dash, which task references do not support. Rename the task "
+            "without dashes, or escape the key with backticks, as in {{tasks.`load-raw`.values.<name>}}."
+        )
+        assert lint(settings) == [f"Task 'a': {message}", f"Task 'inner': {message}"]
+        assert lint(settings, rules=DEFAULT_RULES - {"dash"}) == []
+
+    def test_lint_trigger_references(self) -> None:
+        settings = jobs.JobSettings.from_dict(
+            {
+                "parameters": [{"name": "day", "default": "{{job.trigger.time.iso_date}}"}],
+                "tasks": [
+                    notebook(
+                        "a", t="{{job.trigger.type}}", u="{{ job.trigger.type }}", d="{{job.trigger.time.iso_date}}"
+                    ),
+                    for_each(notebook("inner", t="{{job.trigger.type}}")),
+                ],
+            }
+        )
+        assert lint(settings) == [
+            trigger_message("Task 'a'", "time.iso_date"),
+            trigger_message("Task 'a'", "type"),
+            trigger_message("Task 'inner'", "type"),
+            trigger_message("Parameter 'day'", "time.iso_date"),
+        ]
+        assert lint(settings, rules=DEFAULT_RULES - {"trigger"}) == []
+
+    def test_lint_equal_to_is_opt_in(self) -> None:
+        assert "equal_to" not in DEFAULT_RULES
+        assert {*DEFAULT_RULES, "equal_to"} == ALL_RULES
+
+        def condition(key: str, op: str, left: str, right: str) -> dict[str, Any]:
+            return {
+                "task_key": key,
+                "depends_on": [{"task_key": "a"}],
+                "condition_task": {"op": op, "left": left, "right": right},
+            }
+
+        settings = jobs.JobSettings.from_dict(
+            {
+                "tasks": [
+                    notebook("a"),
+                    condition("c", "EQUAL_TO", "{{tasks.a.values.n}}", "0"),
+                    condition("d", "NOT_EQUAL", "yes", "07"),
+                    condition("e", "EQUAL_TO", "true", "false"),
+                    condition("f", "GREATER_THAN", "{{tasks.a.values.n}}", "0"),
+                ]
+            }
+        )
+        assert lint(settings) == []
+        assert lint(settings, rules=ALL_RULES) == [
+            "Task 'c': EQUAL_TO compares '{{tasks.a.values.n}}' with '0' as text, so a number written another way, "
+            "such as 7.0 for 7, does not match.",
+            "Task 'd': NOT_EQUAL compares 'yes' with '07' as text, so a number written another way, such as 7.0 for "
+            "7, does not match.",
+        ]
+
+    def test_unknown_rule(self) -> None:
+        with pytest.raises(
+            LakeflowError,
+            match=r"Unknown lint rules \['wheels'\]. Rules: \['dash', 'equal_to', 'library', 'trigger', 'wheel'\]",
+        ):
+            lint(example_settings(), rules={"wheels"})
 
 
 class TestInjectLifecycle:

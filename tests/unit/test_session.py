@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import PermissionDenied
-from databricks.sdk.service import jobs
+from databricks.sdk.service import compute, jobs
 
 from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
@@ -24,6 +24,7 @@ from .fakes import (
     TOKEN_RACE,
     ContendedTokenCache,
     FakeWorkspaceClient,
+    build_wheel,
     example_settings,
     sp_rule_set,
 )
@@ -727,6 +728,32 @@ class TestCheck:
         )
         pytester.runpytest().assert_outcomes(passed=1)
         assert [args for args in fake_cli.calls if args[0] == "bundle"] == [VALIDATE]
+        assert fake_ws.jobs.created == []
+        assert fake_ws.jobs.run_now_calls == []
+
+    def test_check_reads_the_built_wheels_and_the_workspace(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        settings = example_settings()
+        load = next(task for task in settings.tasks or [] if task.task_key == "load")
+        load.libraries = [compute.Library(whl="/Workspace/libs/gone.whl"), compute.Library(whl="/Workspace/libs/a.whl")]
+        fake_ws.workspace.objects.add("/Workspace/libs/a.whl")
+        fake_cli.deployed["my_job"] = fake_ws.jobs.add(settings)
+        build_wheel(bundle_dir / "dist")
+        pytester.makepyfile(
+            """
+            from pytest_databricks_lakeflow import DEFAULT_RULES
+
+            def test_check(lakeflow):
+                assert lakeflow.check("my_job") == [
+                    "Task 'load': entry point 'load' is not in dist/pkg-0.1.0-py3-none-any.whl. Entry points: "
+                    "['main'], and pkg/__init__.py does not define it.",
+                    "Task 'load': /Workspace/libs/gone.whl does not exist.",
+                ]
+                assert lakeflow.check("my_job", rules=DEFAULT_RULES - {"wheel", "library"}) == []
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
         assert fake_ws.jobs.created == []
         assert fake_ws.jobs.run_now_calls == []
 

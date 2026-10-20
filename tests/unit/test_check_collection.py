@@ -69,6 +69,20 @@ class TestCheckItems:
         result.assert_outcomes(passed=1, failed=1)
         assert_nothing_written(fake_ws)
 
+    def test_passes_a_job_that_reads_its_own_trigger(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        # The trigger rule is advice for a test that runs the job, not a wiring mistake in the deployed job.
+        settings = example_settings()
+        assert settings.tasks is not None
+        transform = settings.tasks[1]
+        assert transform.notebook_task is not None
+        transform.notebook_task.base_parameters = {"type": "{{job.trigger.type}}"}
+        fake_cli.deployed["triggered"] = fake_ws.jobs.add(settings)
+        result = pytester.runpytest("--lakeflow-check", "-v")
+        result.stdout.fnmatch_lines(["*databricks.yml::my_job PASSED*", "*databricks.yml::triggered PASSED*"])
+        result.assert_outcomes(passed=2)
+
     def test_fails_a_job_that_cannot_be_a_template(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
     ) -> None:
