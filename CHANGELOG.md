@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.11.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.10.0...v0.11.0) (2026-10-20)
+
+
+### Features
+
+* cap active runs per process with --lakeflow-max-concurrent-runs ([#194](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/194)) ([8ea383a](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/8ea383a2563ae51f961f2e88a2a6e405af2afb08))
+* collect one check per job template with --lakeflow-check ([#193](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/193)) ([264bfce](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/264bfce62421c92bea3c129144e30a895580ccbd))
+* run a for-each body once with lakeflow.task("job.loop.body", input=...) ([#196](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/196)) ([312f56e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/312f56ec08256d3124013e63224dd5994bcd46a8))
+* surface for-each iterations and stats on TaskRun ([#195](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/195)) ([329ba50](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/329ba5002dccd4d4ff8d193ce768e8099216af01))
+
+
+### Bug Fixes
+
+* land the wave 7 and wave 8 review notes ([#197](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/197)) ([f429f87](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/f429f873253eecb85caa7be3ee65ab7c8bb60334))
+* settle the wave 8 for-each gaps: nested task_params, serverless retries in loops and task values that iterations cannot set ([#198](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/198)) ([7764d6d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/7764d6dae263f97d39be94871ef4281cd1d9a75d))
+
 ## [0.10.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.9.0...v0.10.0) (2026-10-20)
 
 
