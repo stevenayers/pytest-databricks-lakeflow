@@ -354,7 +354,7 @@ class Lakeflow:
                 Service Principal User role on it, which is checked before the copy is created when the workspace
                 client knows its account id.
             disable: Task keys to disable in the copy. Runs skip them, and the platform disables every task downstream
-                of them too. Both appear in `JobRun.disabled_tasks`.
+                of them too. Both appear in `JobRun.disabled_tasks`, and `run(only=...)` refuses to name them.
             task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
                 mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
                 a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list
