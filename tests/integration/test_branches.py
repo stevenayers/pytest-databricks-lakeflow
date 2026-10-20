@@ -77,13 +77,13 @@ def keep_one_task_enabled():
     return None
 
 
-def test_disabling_the_upstream_of_a_forced_condition_disables_its_branches(lakeflow: Lakeflow) -> None:
+def test_disabling_the_upstream_of_a_condition_disables_its_branches(lakeflow: Lakeflow) -> None:
     # The platform disables every task downstream of a disabled one ("This task was disabled because it is downstream
-    # of a disabled task"), the forced condition task and both branches included. The setup task keeps one task
-    # enabled: without it the platform skips the whole run with "Skipped because every task is disabled".
-    job = lakeflow.job(
-        "branching_job", disable=["check_input"], force_conditions={"check": True}, setup=keep_one_task_enabled
-    )
+    # of a disabled task"), the condition task and both branches included. The setup task keeps one task enabled:
+    # without it the platform skips the whole run with "Skipped because every task is disabled".
+    with pytest.raises(LakeflowError, match="Task 'check' in force_conditions is disabled"):
+        lakeflow.job("branching_job", disable=["check_input"], force_conditions={"check": True})
+    job = lakeflow.job("branching_job", disable=["check_input"], setup=keep_one_task_enabled)
     with job:
         run = job.run()
         assert run.result_state == "SUCCESS"
