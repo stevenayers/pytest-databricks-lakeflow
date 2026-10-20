@@ -277,7 +277,7 @@ Do not use `run.result_state`, the parent run's state, as the verdict. A job wit
 
 `run.tasks` maps task keys to `TaskRun`s. `run.task("transform")` does the same and raises a `KeyError` that lists the available keys when the task was not part of the run. `run.skipped_tasks` holds only the tasks left out by `only`. `run.disabled_tasks` holds the tasks disabled in the job, in the bundle or with `disable`, and the tasks downstream of them, which the platform disables too (see [Disable a task](#disable-a-task)). Tasks in both groups end `DISABLED`; the run itself does not say why, so the plugin reads the copy's settings to tell them apart. The plugin's stubs and probes are in `run.injected_tasks`. `run.task(key)` says `Skipped by only: [...]` or `Disabled in the job: [...]` for such a task. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
 
-`run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out.
+`run.parameters` is a dict of the run's job parameters: the value passed for the run, or the default when none was. Parameters the plugin injects are left out. `run.trigger_type` is what started the run as the Jobs API reports it, `ONE_TIME` for a copy started with run-now, even when [`trigger`](#simulate-a-trigger) simulates another.
 
 Each `TaskRun` has:
 
@@ -526,6 +526,24 @@ Each list replaces the task's `for_each_task.inputs` on the copy as JSON, here `
 A key that is not a task of the job, or a task without a `for_each_task`, raises `LakeflowError` listing the job's for-each tasks, and so does a list that is not JSON-serialisable or is longer than 5,000 characters as JSON, the most `jobs/create` accepts. The platform also refuses, when the job is created, a list that mixes objects with strings, numbers or booleans, or holds `None` or a nested list. `lakeflow.task()` takes a list for the task under test, see [Make a task job](task-tests.md#make-a-task-job).
 
 `run.task("loop")` describes the for-each task as one task: its iterations are not in the result yet, and the nested task cannot be the target of `lakeflow.task()` or `run(only=...)`.
+
+## Simulate a trigger
+
+A copy has no schedule or trigger and is started with run-now, which cannot say that a trigger fired. In it `{{job.trigger.type}}` resolves to `one_time` and the `{{job.trigger.time.*}}` references to the time of the run, and `jobs/create` refuses `{{job.trigger.table_update.*}}` and `{{job.trigger.file_arrival.*}}` references, because the copy has no such trigger. To run the branch a trigger takes, pass `trigger`, which maps the path of each reference after `job.trigger.` to the value it takes. In the `triggers` integration bundle, the job `file_job` has a file arrival trigger, and its notebook task `read_trigger` reads `{{job.trigger.type}}`, `{{job.trigger.file_arrival.location}}` and `{{job.trigger.time.iso_date}}`:
+
+```python
+def test_new_file(lakeflow: Lakeflow) -> None:
+    trigger = {"type": "file_arrival", "file_arrival.location": "/Volumes/main/landing/orders/"}
+    with lakeflow.job("file_job", trigger=trigger) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.task("read_trigger").output_json["kind"] == "file_arrival"
+        assert run.trigger_type == "ONE_TIME"
+```
+
+The keys are dotted paths, spelt as the references spell them, such as `type`, `table_update.updated_tables`, `file_arrival.location` or `time.iso_date`, not nested dicts. Each reference to a path in `trigger` is rewritten in the copy's settings to `{{job.parameters.__pytest_trigger_<path>}}`, with each `.` of the path as `_`, such as `{{job.parameters.__pytest_trigger_file_arrival_location}}`, and that job parameter is declared with the value as its default, after the job's own parameters, which are kept. The plugin's parameters are left out of `run.parameters`, and `run(params=...)` cannot set them, because names starting with `__pytest_` are reserved. Every run of the copy sees the same values; make another copy for other values.
+
+Each value is a string, passed as given. A reference the platform fills with a list, such as `table_update.updated_tables`, gets exactly the string the test writes, so write it in the form the job code parses. A path that no reference of the copy uses raises `LakeflowError` before anything is created, listing the trigger references it has: `trigger names 'nope', but the job has no {{job.trigger.nope}} reference.`. A reference that `trigger` leaves out, such as `{{job.trigger.time.iso_date}}` above, emits a `UserWarning` naming it (`The job still refers to ['job.trigger.time.iso_date'], which trigger does not set.`) and keeps the value run-now gives it. `run.trigger_type` is what really started the run, `ONE_TIME`: the simulated values are what the task code sees. `lakeflow.task()` takes `trigger` too, for the references of the task under test.
 
 ## Pipeline tasks
 

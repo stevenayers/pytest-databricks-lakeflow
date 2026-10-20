@@ -697,6 +697,7 @@ def make_run(
     notebooks: Collection[str] = (),
     sql_files: Mapping[str, str] | None = None,
     pipeline_tasks: Mapping[str, str] | None = None,
+    trigger: jobs.TriggerType = jobs.TriggerType.ONE_TIME,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -718,6 +719,8 @@ def make_run(
 
     `pipeline_tasks` makes the tasks it names pipeline tasks that update the pipeline with the given id. Every task run
     starts at 1,000 ms and ends at 3,000 ms, so an update created in between is the one the task started.
+
+    `trigger` is what started the run, `ONE_TIME` for a run-now run, as the platform reports it.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -750,6 +753,7 @@ def make_run(
         run_page_url=f"{HOST}/jobs/runs/{run_id}",
         start_time=1_000,
         end_time=6_000,
+        trigger=trigger,
     )
 
 
@@ -1122,3 +1126,16 @@ def for_each_settings() -> jobs.JobSettings:
             ],
         }
     )
+
+
+def triggered_settings() -> jobs.JobSettings:
+    """Build `example_settings` with `transform` reading the trigger type and the tables a table update trigger saw."""
+    settings = example_settings()
+    transform = next(task for task in settings.tasks or [] if task.task_key == "transform")
+    assert transform.notebook_task is not None
+    transform.notebook_task.base_parameters = {
+        **(transform.notebook_task.base_parameters or {}),
+        "kind": "{{job.trigger.type}}",
+        "tables": "{{job.trigger.table_update.updated_tables}}",
+    }
+    return settings

@@ -1,0 +1,20 @@
+bundle:
+  name: lakeflow_triggers
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: The catalog of the volume the file arrival trigger watches. Passed by the tests from LAKEFLOW_CATALOG.
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest

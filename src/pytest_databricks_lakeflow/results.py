@@ -895,6 +895,9 @@ class JobRun:
             reported none; a run with several tasks reports its time on the tasks instead.
         effective_performance_target: The serverless performance mode the run used, `STANDARD` or
             `PERFORMANCE_OPTIMIZED`, or `None` when the platform did not say.
+        trigger_type: What started the run, as the Jobs API reports it: `ONE_TIME` for a run of an ephemeral job,
+            which is started with run-now. A trigger simulated with `trigger=` on `Lakeflow.job` or `Lakeflow.task`
+            changes only what the task code sees, not this. `None` when the platform did not say.
     """
 
     job_key: str
@@ -912,6 +915,7 @@ class JobRun:
     parameters: dict[str, str] = field(default_factory=dict)
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
+    trigger_type: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -1160,6 +1164,7 @@ def _serialise_run(run: JobRun, files: dict[str, str]) -> dict[str, Any]:
         "parameters": run.parameters,
         "timing": _serialise_timing(run.timing),
         "effective_performance_target": run.effective_performance_target,
+        "trigger_type": run.trigger_type,
     }
 
 
@@ -1372,6 +1377,7 @@ def build_job_run(
         parameters=_job_parameters(run.job_parameters),
         timing=Timing.from_run(run),
         effective_performance_target=_enum(run.effective_performance_target),
+        trigger_type=_enum(run.trigger),
     )
 
 

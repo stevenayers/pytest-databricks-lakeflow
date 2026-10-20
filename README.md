@@ -106,7 +106,7 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 ## How it works
 
 1. The first test that needs a job runs `databricks bundle deploy` for the target once per session and reads each deployed job's settings through the Jobs API.
-2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed and dashboard and SQL alert subscriptions paused (alert and Power BI tasks are left as they are), tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`.
+2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed and dashboard and SQL alert subscriptions paused (alert and Power BI tasks are left as they are), tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`, and `trigger=` to give the `{{job.trigger.*}}` references the values a trigger would.
 3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values.
 4. Leaving the `with` block deletes the job unless the test failed. Session end cancels anything still running.
 5. `lakeflow.task()` does the same for one task, with the stub and probe tasks on serverless compute or a job cluster you name.
@@ -117,7 +117,7 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 Everything else is on the docs site: <https://stevenayers.github.io/pytest-databricks-lakeflow/>
 
 - [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, bundle target, first test
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, repeated runs, failures, temporary schemas, pipeline copies, shared runs
+- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, simulated triggers, repeated runs, failures, temporary schemas, pipeline copies, shared runs
 - [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): stubs, probes, value rules, helper compute
 - [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every `Lakeflow` argument, command-line flag and sync strategy
 - [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): the deploy and teardown lifecycle, xdist, timing
