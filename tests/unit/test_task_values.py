@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Callable, Collection, Mapping
@@ -18,8 +19,10 @@ from pytest_databricks_lakeflow.settings import (
     add_dependencies,
     check_values,
     escape,
+    inject_input,
     inject_lifecycle,
     inject_probes,
+    lift_nested_task,
     merge_environments,
     recover_injected,
     stub_upstream,
@@ -28,7 +31,15 @@ from pytest_databricks_lakeflow.settings import (
 )
 
 from .conftest import FakeCli, configure_lakeflow
-from .fakes import FakeWorkspaceClient, dbt_settings, example_settings, for_each_settings, make_run, recorded
+from .fakes import (
+    FakeWorkspaceClient,
+    dbt_settings,
+    example_settings,
+    fanout_objects_settings,
+    for_each_settings,
+    make_run,
+    recorded,
+)
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
@@ -470,6 +481,176 @@ class TestTaskValues:
             inject_probes(example_settings(), {"load": ["k" * 513]}, HELPERS)
 
 
+def lifted_each(**parameters: str) -> jobs.JobSettings:
+    """Lift `each` out of `for_each_settings()`, giving it `parameters` as its base parameters when any are given."""
+    settings = for_each_settings()
+    each = lift_nested_task(settings, "loop", "each")
+    if parameters:
+        assert each.notebook_task is not None
+        each.notebook_task.base_parameters = parameters
+    return settings
+
+
+def base_parameters(settings: jobs.JobSettings, key: str) -> dict[str, str] | None:
+    task = next(t for t in settings.tasks or [] if t.task_key == key)
+    return task.notebook_task.base_parameters if task.notebook_task else None
+
+
+class TestInjectInput:
+    """inject_input points the lifted body's {{input}} references at job parameters that hold the chosen input."""
+
+    def test_scalar_and_object(self) -> None:
+        settings = inject_input(lifted_each(), "each", "a")
+        assert base_parameters(settings, "each") == {"item": "{{job.parameters.__pytest_input}}"}
+        assert settings.parameters == [jobs.JobParameterDefinition(name="__pytest_input", default="a")]
+
+        settings = fanout_objects_settings()
+        lift_nested_task(settings, "loop", "inner")
+        inject_input(settings, "inner", {"id": 7, "path": "/x"})
+        assert base_parameters(settings, "inner") == {
+            "item": "{{job.parameters.__pytest_input}}",
+            "item_id": "{{job.parameters.__pytest_input_id}}",
+            "rows": "{{tasks.extract.values.rows}}",
+        }
+        # A for-each iteration over [{"id": 7, "path": "/x"}] gives these two texts, the id as a double.
+        assert settings.parameters == [
+            jobs.JobParameterDefinition(name="__pytest_input", default='{"id":7.0,"path":"/x"}'),
+            jobs.JobParameterDefinition(name="__pytest_input_id", default="7.0"),
+        ]
+
+    # What for-each iterations gave {{input}} and {{input.<key>}} in the workspace, items of primitives and of objects.
+    @pytest.mark.parametrize(
+        ("reference", "value", "expected"),
+        [
+            pytest.param("{{input}}", "t {x}", "t {x}", id="string"),
+            pytest.param("{{input}}", 1, "1", id="integer"),
+            pytest.param("{{input}}", 12345678901234567890, "12345678901234567890", id="big-integer"),
+            pytest.param("{{input}}", 2.5, "2.5", id="float"),
+            pytest.param("{{input}}", 1e20, "1.0E20", id="large-float"),
+            pytest.param("{{input}}", -0.0, "-0.0", id="negative-zero"),
+            pytest.param("{{input}}", True, "true", id="boolean"),
+            pytest.param(
+                "{{input}}",
+                {"e": {"f": 1, "g": "x"}, "u": "é", "neg": -3, "c": None, "d": [1, 2]},
+                '{"e":{"f":1.0,"g":"x"},"u":"é","neg":-3.0,"c":null,"d":[1.0,2.0]}',
+                id="object",
+            ),
+            pytest.param("{{ input.k }}", {"k": "é"}, "é", id="key-string"),
+            pytest.param("{{input.k}}", {"k": 10}, "10.0", id="key-integer"),
+            pytest.param("{{input.k}}", {"k": 0.1}, "0.1", id="key-float"),
+            pytest.param("{{input.k}}", {"k": 12345678901234567890}, "1.2345678901234567E19", id="key-big-integer"),
+            pytest.param("{{input.k}}", {"k": 12345678}, "1.2345678E7", id="key-seven-digits"),
+            pytest.param("{{input.k}}", {"k": 0.00001}, "1.0E-5", id="key-small-float"),
+            pytest.param("{{input.k}}", {"k": False}, "false", id="key-boolean"),
+            pytest.param("{{input.k}}", {"k": None}, "null", id="key-null"),
+            pytest.param("{{input.k}}", {"k": []}, "[]", id="key-list"),
+            pytest.param("{{input.k}}", {"k": {"g": "y", "f": 2}}, '{"g":"y","f":2.0}', id="key-object"),
+        ],
+    )
+    def test_values_render_as_an_iteration_gives_them(self, reference: str, value: object, expected: str) -> None:
+        settings = inject_input(lifted_each(item=reference), "each", value)
+        [definition] = settings.parameters or []
+        assert base_parameters(settings, "each") == {"item": f"{{{{job.parameters.{definition.name}}}}}"}
+        assert definition.default == expected
+
+    def test_a_template_definition_is_replaced(self) -> None:
+        settings = lifted_each(a="{{input.a}}", c="on_{{input.c}}_{{input}}")
+        settings.parameters = [
+            jobs.JobParameterDefinition(name="__pytest_input_c", default="old"),
+            jobs.JobParameterDefinition(name="day", default=""),
+        ]
+        inject_input(settings, "each", {"a": "x", "c": "y"})
+        assert base_parameters(settings, "each") == {
+            "a": "{{job.parameters.__pytest_input_a}}",
+            "c": "on_{{job.parameters.__pytest_input_c}}_{{job.parameters.__pytest_input}}",
+        }
+        assert settings.parameters == [
+            jobs.JobParameterDefinition(name="day", default=""),
+            jobs.JobParameterDefinition(name="__pytest_input", default='{"a":"x","c":"y"}'),
+            jobs.JobParameterDefinition(name="__pytest_input_a", default="x"),
+            jobs.JobParameterDefinition(name="__pytest_input_c", default="y"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("parameters", "value", "match"),
+        [
+            pytest.param(
+                {"item": "{{input}}", "item_id": "{{input.id}}"},
+                None,
+                r"Task 'each' refers to \{\{input\}\} and \{\{input.id\}\} in its settings. Pass input= to "
+                r"lakeflow.task\(\)",
+                id="required",
+            ),
+            pytest.param(
+                {"other": "x"},
+                "a",
+                r"Task 'each' does not refer to \{\{input\}\}, so input= has no effect",
+                id="no-references",
+            ),
+            pytest.param(
+                {"item": "{{input}}"},
+                [1, 2],
+                r"input for task 'each' is \[1, 2\]. A for-each item is a string, number, boolean or object.",
+                id="list",
+            ),
+            pytest.param(
+                {"item_id": "{{input.id}}"},
+                {"path": "/x"},
+                r"\{\{input.id\}\} in task 'each' needs key 'id', but input has \['path'\]",
+                id="missing-key",
+            ),
+            pytest.param(
+                {"item_id": "{{input.id}}"},
+                "a",
+                r"\{\{input.id\}\} in task 'each' needs an object as input, got 'a'",
+                id="not-an-object",
+            ),
+            pytest.param(
+                {"item": "{{input}}"},
+                {"k": "{{job.id}}"},
+                r"input for task 'each' contains '\{\{', which the platform would substitute",
+                id="braces",
+            ),
+            pytest.param(
+                {"item": "{{input}}"},
+                "x" * 9_956,
+                r"input for task 'each' makes the job parameters 10001 characters as JSON. jobs/create allows 10000.",
+                id="too-long",
+            ),
+            pytest.param(
+                {"item": "{{input}}"},
+                {"k": object()},
+                r"input for task 'each' is not JSON-serialisable: Object of type object",
+                id="not-serialisable",
+            ),
+            pytest.param(
+                {"item": "{{input}}"},
+                float("nan"),
+                r"input for task 'each' is not JSON-serialisable: Out of range float values",
+                id="nan",
+            ),
+        ],
+    )
+    def test_rejects(self, parameters: dict[str, str], value: object, match: str) -> None:
+        settings = lifted_each(**parameters)
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=match):
+            inject_input(settings, "each", value)
+        assert settings == before
+
+    def test_the_job_parameters_fit_jobs_create(self) -> None:
+        inject_input(lifted_each(item="{{input}}"), "each", "x" * 9_955)
+        settings = lifted_each(item="{{input}}")
+        settings.parameters = [jobs.JobParameterDefinition(name="day", default='"')]
+        with pytest.raises(LakeflowError, match="makes the job parameters 10035 characters as JSON"):
+            inject_input(settings, "each", "x" * 9_955)
+
+    def test_no_change_without_references_or_input(self) -> None:
+        settings = lifted_each(other="x")
+        before = copy.deepcopy(settings)
+        assert inject_input(settings, "each", None) == before
+
+
 class TestUpstreamFrom:
     """`upstream_values_from` takes the stub values for a task's upstream tasks from a run that captured them."""
 
@@ -601,6 +782,86 @@ class TestEndToEnd:
         [created] = fake_ws.jobs.created
         assert [t.task_key for t in created["tasks"]] == ["loop"]
         assert created["tasks"][0].for_each_task.inputs == '["a"]'
+
+    def test_nested_task_end_to_end(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
+        fake_cli.deployed["strings"] = fake_ws.jobs.add(for_each_settings())
+        fake_ws.jobs.queue(make_run(82, {"extract": "SUCCESS", "inner": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            def test_body(lakeflow):
+                with lakeflow.task(
+                    "fanout.loop.inner",
+                    input={"id": 7, "path": "/x"},
+                    upstream_task_values={"extract": {"rows": 3}},
+                    task_params={"inner": {"limit": "10"}},
+                ) as task:
+                    run = task.run()
+                assert run.succeeded
+                assert run.executed_tasks == ["inner"]
+
+            def test_string_body(lakeflow):
+                with lakeflow.task("strings.loop.each", input="a"):
+                    pass
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=2)
+        body, strings = fake_ws.jobs.created
+        assert [t.task_key for t in body["tasks"]] == ["extract", "inner"]
+        assert "for_each_task" not in json.dumps(jobs.JobSettings(tasks=body["tasks"]).as_dict())
+        inner = body["tasks"][1]
+        assert inner.depends_on == [jobs.TaskDependency(task_key="extract")]
+        assert inner.timeout_seconds == 600
+        assert inner.notebook_task.base_parameters == {
+            "item": "{{job.parameters.__pytest_input}}",
+            "item_id": "{{job.parameters.__pytest_input_id}}",
+            "rows": "{{tasks.extract.values.rows}}",
+            "limit": "10",
+        }
+        assert body["parameters"] == [
+            jobs.JobParameterDefinition(name="__pytest_input", default='{"id":7.0,"path":"/x"}'),
+            jobs.JobParameterDefinition(name="__pytest_input_id", default="7.0"),
+        ]
+        assert [t.task_key for t in strings["tasks"]] == ["each"]
+        assert strings["tasks"][0].notebook_task.notebook_path.endswith("/each")
+        assert strings["parameters"][-1] == jobs.JobParameterDefinition(name="__pytest_input", default="a")
+
+    def test_nested_task_rejects(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
+        pytester.makepyfile(
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            UPSTREAM = {"extract": {"rows": 3}}
+
+            @pytest.mark.parametrize(
+                ("ref", "kwargs", "match"),
+                [
+                    ("fanout.loop.nope", {"input": "a"}, r"for_each_task 'loop' nests 'inner', not 'nope'"),
+                    ("fanout.extract.x", {"input": "a"}, r"Task 'extract' has no for_each_task"),
+                    ("fanout.loop", {"input": "a"}, r"input= gives the iteration input of a for_each_task body, so "
+                        r"ref must be 'job_key.loop_key.nested_key', got 'fanout.loop'"),
+                    ("a.b.c.d", {}, r"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key', got 'a.b.c.d'"),
+                    ("fanout..inner", {}, r"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key'"),
+                    ("fanout.loop.inner", {}, r"Task 'inner' refers to \\{\\{input\\}\\} and \\{\\{input.id\\}\\}"),
+                    ("fanout.loop.inner", {"input": {"path": "/x"}}, r"needs key 'id', but input has \\['path'\\]"),
+                    ("fanout.loop.inner", {"input": "a", "task_params": {"loop": {"k": "v"}}},
+                        r"Unknown task 'loop' in task_params of job 'fanout'. Available: \\['inner'\\]"),
+                ],
+            )
+            def test_rejects(lakeflow, ref, kwargs, match):
+                with pytest.raises(LakeflowError, match=match):
+                    lakeflow.task(ref, upstream_task_values=UPSTREAM, **kwargs)
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=8)
+        assert fake_ws.jobs.created == []
 
     def test_dbt_commands_on_a_task_job(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

@@ -1,0 +1,28 @@
+resources:
+  jobs:
+    fanout_objects:
+      name: fanout_objects
+      description: For-each job over objects for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: extract
+          notebook_task:
+            notebook_path: ../src/notebooks/extract.py
+        - task_key: loop
+          depends_on:
+            - task_key: extract
+          for_each_task:
+            inputs: '[{"id": 1, "path": "/a"}, {"id": 2, "path": "/b"}]'
+            concurrency: 2
+            task:
+              task_key: inner
+              notebook_task:
+                notebook_path: ../src/notebooks/inner.py
+                base_parameters:
+                  item: "{{input}}"
+                  item_id: "{{input.id}}"
+                  rows: "{{tasks.extract.values.rows}}"
+        - task_key: after
+          depends_on:
+            - task_key: loop
+          notebook_task:
+            notebook_path: ../src/notebooks/after.py

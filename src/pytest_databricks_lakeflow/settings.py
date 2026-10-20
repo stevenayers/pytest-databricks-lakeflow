@@ -7,9 +7,10 @@ import logging
 import math
 import re
 import warnings
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Literal, get_args
 
 from databricks.sdk.service import compute, jobs, pipelines
@@ -83,6 +84,15 @@ TRIGGER_REFERENCE = re.compile(r"\{\{\s*job\.trigger\.([\w.]+)\s*\}\}")
 TRIGGER_PARAM_PREFIX = f"{PREFIX}trigger_"
 # The trigger references that jobs/create refuses in a job without that trigger, by the first part of their path.
 TRIGGER_KINDS = {"table_update": "table update", "file_arrival": "file arrival"}
+# jobs/create refuses a deeper reference: "Invalid reference: 'input.e.f'. Input reference can only access top-level
+# keys."
+INPUT_REFERENCE = re.compile(r"\{\{\s*input(?:\.([^.\s}]+))?\s*\}\}")
+INPUT_PARAMETER = f"{PREFIX}input"
+# jobs/create refuses job parameters longer than this as JSON: "The provided parameters (in json representation) are
+# too long (10032 bytes); it cannot exceed 10000 bytes." for one parameter `p` with a default of 10,000 characters.
+# It counts 29 characters for each definition plus its name and its JSON-escaped default, a comma between two
+# definitions and 2 for the brackets, and a non-ASCII character as one.
+MAX_PARAMETERS_JSON_CHARS = 10_000
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
@@ -896,12 +906,12 @@ def inject_trigger(settings: jobs.JobSettings, trigger: Mapping[str, str]) -> jo
             stacklevel=3,
         )
 
-    def replacement(match: re.Match[str]) -> str:
-        if match[1] not in trigger:
-            return match[0]
-        return f"{{{{job.parameters.{_trigger_parameter(match[1])}}}}}"
+    def name_for(path: str) -> str | None:
+        if path not in trigger:
+            return None
+        return _trigger_parameter(path)
 
-    rewritten = jobs.JobSettings.from_dict(json.loads(TRIGGER_REFERENCE.sub(replacement, text)))
+    rewritten = jobs.JobSettings.from_dict(json.loads(_point_at_parameters(text, TRIGGER_REFERENCE, name_for)))
     definitions: list[jobs.JobParameterDefinition] = []
     for path, value in trigger.items():
         definitions.append(jobs.JobParameterDefinition(name=_trigger_parameter(path), default=value))
@@ -911,6 +921,210 @@ def inject_trigger(settings: jobs.JobSettings, trigger: Mapping[str, str]) -> jo
 
 def _trigger_parameter(path: str) -> str:
     return f"{TRIGGER_PARAM_PREFIX}{path.replace('.', '_')}"
+
+
+def _point_at_parameters(text: str, pattern: re.Pattern[str], name_for: Callable[[str], str | None]) -> str:
+    """Replace each match of `pattern` in `text` with a reference to the job parameter `name_for` gives its group.
+
+    A group that did not take part in the match is passed as `""`, and a match `name_for` gives no name for is left as
+    it is.
+    """
+
+    def replacement(match: re.Match[str]) -> str:
+        name = name_for(match[1] or "")
+        if name is None:
+            return match[0]
+        return f"{{{{job.parameters.{name}}}}}"
+
+    return pattern.sub(replacement, text)
+
+
+def for_each_bodies(settings: jobs.JobSettings) -> dict[str, str]:
+    """Get the key of the task nested in each top-level `for_each_task`, by the key of its for-each task."""
+    bodies: dict[str, str] = {}
+    for task in settings.tasks or []:
+        if task.for_each_task and task.for_each_task.task:
+            bodies[task.task_key] = task.for_each_task.task.task_key
+    return bodies
+
+
+def lift_nested_task(settings: jobs.JobSettings, loop_key: str, nested_key: str) -> jobs.Task:
+    """Replace the for-each task `loop_key` with the task nested in it, in the same place, so it runs once.
+
+    The nested task keeps all of its own settings and takes the for-each task's `depends_on`, which `upstream_from`
+    reads to choose the stubs. The for-each task's `inputs`, `concurrency` and other fields are dropped.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        loop_key: The key of the top-level task with the `for_each_task`.
+        nested_key: The key of the task nested in it.
+
+    Returns:
+        The nested task, now a top-level task of `settings`.
+
+    Raises:
+        LakeflowError: If `loop_key` is not a task of the job, has no `for_each_task`, or nests a task with another
+            key. Nothing is changed then.
+    """
+    loop = require_task(settings, loop_key)
+    bodies = [f"{key}.{body}" for key, body in for_each_bodies(settings).items()]
+    body = loop.for_each_task.task if loop.for_each_task else None
+    if body is None:
+        raise LakeflowError(
+            f"Task {loop_key!r} has no for_each_task, so {f'{loop_key}.{nested_key}'!r} names no nested task. "
+            f"For-each bodies: {bodies}"
+        )
+    if body.task_key != nested_key:
+        raise LakeflowError(
+            f"for_each_task {loop_key!r} nests {body.task_key!r}, not {nested_key!r}. For-each bodies: {bodies}"
+        )
+    body.depends_on = loop.depends_on
+    settings.tasks = [body if task is loop else task for task in settings.tasks or []]
+    return body
+
+
+def inject_input(settings: jobs.JobSettings, task_key: str, value: object | None) -> jobs.JobSettings:
+    """Point the `{{input}}` references of one task at job parameters whose defaults hold `value`.
+
+    `{{input}}` becomes `{{job.parameters.__pytest_input}}` and `{{input.<key>}}` becomes
+    `{{job.parameters.__pytest_input_<key>}}`. Each parameter is declared with the text a for-each iteration would
+    give the reference: a string as it is, an integer item as written, and anything else as the platform writes JSON.
+    A definition of the same name in the template is replaced, and the rest are appended after the job's own, in the
+    order of their keys.
+
+    Args:
+        settings: The job's settings, holding `task_key` as a top-level task. They are changed in place.
+        task_key: The task, a for-each body that `lift_nested_task` lifted.
+        value: The iteration input, a string, number, boolean or mapping. `None` means none was given.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If the task refers to `{{input}}` and `value` is `None`, or `value` is given and the task does
+            not refer to it, `value` is not a string, number, boolean or mapping, a key is not in `value`, or a
+            rendered value contains `{{` or is not JSON-serialisable, or the job parameters would be longer than 10,000
+            characters as JSON. Nothing is changed then.
+    """
+    target = require_task(settings, task_key)
+    text = json.dumps(target.as_dict())
+    keys = sorted(set(INPUT_REFERENCE.findall(text)))
+    if not keys:
+        if value is not None:
+            raise LakeflowError(f"Task {task_key!r} does not refer to {{{{input}}}}, so input= has no effect")
+        return settings
+    if value is None:
+        references = " and ".join(_input_reference(key) for key in keys)
+        raise LakeflowError(f"Task {task_key!r} refers to {references} in its settings. Pass input= to lakeflow.task()")
+    if not isinstance(value, (str, int, float, Mapping)):
+        raise LakeflowError(
+            f"input for task {task_key!r} is {value!r}. A for-each item is a string, number, boolean or object."
+        )
+    definitions: list[jobs.JobParameterDefinition] = []
+    for key in keys:
+        default = _render_input(task_key, key, value)
+        definitions.append(jobs.JobParameterDefinition(name=_input_parameter(key), default=default))
+    names = {definition.name for definition in definitions}
+    kept: list[jobs.JobParameterDefinition] = []
+    for parameter in settings.parameters or []:
+        if parameter.name not in names:
+            kept.append(parameter)
+    size = _parameters_json_chars([*kept, *definitions])
+    if size > MAX_PARAMETERS_JSON_CHARS:
+        raise LakeflowError(
+            f"input for task {task_key!r} makes the job parameters {size} characters as JSON. jobs/create allows "
+            f"{MAX_PARAMETERS_JSON_CHARS}."
+        )
+    rewritten = _point_at_parameters(text, INPUT_REFERENCE, _input_parameter)
+    lifted = jobs.Task.from_dict(json.loads(rewritten))
+    settings.tasks = [lifted if task is target else task for task in settings.tasks or []]
+    settings.parameters = [*kept, *definitions]
+    return settings
+
+
+def _parameters_json_chars(parameters: Sequence[jobs.JobParameterDefinition]) -> int:
+    size = 2 + max(len(parameters) - 1, 0)
+    for parameter in parameters:
+        size += 29 + len(_json_escaped(parameter.name or "")) + len(_json_escaped(parameter.default or ""))
+    return size
+
+
+def _json_escaped(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
+def _input_reference(key: str) -> str:
+    if not key:
+        return "{{input}}"
+    return f"{{{{input.{key}}}}}"
+
+
+def _input_parameter(key: str) -> str:
+    if not key:
+        return INPUT_PARAMETER
+    return f"{INPUT_PARAMETER}_{key}"
+
+
+def _render_input(task_key: str, key: str, value: object) -> str:
+    """Get the text a for-each iteration over the item `value` gives `{{input}}`, or `{{input.<key>}}` with a key."""
+    reference = _input_reference(key)
+    if not key:
+        part = value
+    elif not isinstance(value, Mapping):
+        raise LakeflowError(f"{reference} in task {task_key!r} needs an object as input, got {value!r}")
+    elif key not in value:
+        raise LakeflowError(f"{reference} in task {task_key!r} needs key {key!r}, but input has {list(value)}")
+    else:
+        part = value[key]
+    try:
+        text = _rendered_item(part, whole=not key)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise LakeflowError(f"input for task {task_key!r} is not JSON-serialisable: {e}") from None
+    if "{{" in text:
+        raise LakeflowError(f"input for task {task_key!r} contains '{{{{', which the platform would substitute")
+    return text
+
+
+def _rendered_item(value: object, *, whole: bool) -> str:
+    # A for-each iteration gives a string as it is and an integer item as written, but turns every number in an
+    # object into a double: {"id": 7} gives {{input}} '{"id":7.0}' and {{input.id}} '7.0'.
+    if isinstance(value, str):
+        return value
+    if whole and isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return _platform_json(value)
+
+
+def _platform_json(value: object) -> str:
+    """Write `value` as JSON the way a for-each iteration does: compact, non-ASCII as it is, numbers as Java doubles."""
+    if value is None or isinstance(value, (bool, str)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (int, float)):
+        return _java_double(float(value))
+    if isinstance(value, Mapping):
+        members: list[str] = []
+        for key, member in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"keys must be str, not {type(key).__name__}")
+            members.append(f"{json.dumps(key, ensure_ascii=False)}:{_platform_json(member)}")
+        return "{" + ",".join(members) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_platform_json(member) for member in value) + "]"
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _java_double(number: float) -> str:
+    """Write a number as Java's `Double.toString` does: `7.0`, `0.1`, `1.0E20`, `1.2345678E7`, `1.0E-5`."""
+    if not math.isfinite(number):
+        raise ValueError(f"Out of range float values are not JSON compliant: {number!r}")
+    if number == 0 or 1e-3 <= abs(number) < 1e7:
+        # repr writes these without an exponent, with at least one digit after the point, as Java does.
+        return repr(number)
+    sign, digits, exponent = Decimal(repr(number)).normalize().as_tuple()
+    assert isinstance(exponent, int)
+    figures = "".join(str(digit) for digit in digits)
+    mantissa = f"{figures[0]}.{figures[1:] or '0'}"
+    return f"{'-' if sign else ''}{mantissa}E{exponent + len(figures) - 1}"
 
 
 def pipeline_params(
