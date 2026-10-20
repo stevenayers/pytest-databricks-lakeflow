@@ -132,6 +132,8 @@ class EphemeralJob:
             of every run and runs it alone when the job closes, so the test's assertions still see what it removes.
         job_id: The job's id, once created.
         runs: The outcome of each finished run, in order. The teardown run that closing the job starts is not one.
+        query_files: The SQL text of each saved query that `saved_queries="inline"` inlined, by the workspace path of
+            its file. They are uploaded just before the job is created and deleted with it, or kept with it.
         teardown_run: The run of the teardown task alone that closing the job started, with `teardown_at="close"`,
             once it has finished. Its `teardown` is the task's outcome. `None` until then, and when the job never
             ran, `keep` or `--lakeflow-keep` kept the job, or the run did not finish.
@@ -149,6 +151,7 @@ class EphemeralJob:
         extra_dependencies: Sequence[str] = (),
         pipelines: Sequence[EphemeralPipeline] = (),
         teardown_at: TeardownAt = "run",
+        query_files: Mapping[str, str] | None = None,
     ) -> None:
         self.lakeflow = lakeflow
         self.job_key = job_key
@@ -159,6 +162,8 @@ class EphemeralJob:
         self.extra_dependencies = list(extra_dependencies)
         self.pipelines = list(pipelines)
         self.teardown_at = teardown_at
+        self.query_files = dict(query_files or {})
+        self._query_files_uploaded = False
         # Set by `pipelines="copy"`: copies the pipeline with the given id, once modify_settings has run.
         self._copy_pipeline: Callable[[str], EphemeralPipeline] | None = None
         self.job_id: int | None = None
@@ -221,6 +226,7 @@ class EphemeralJob:
         check_trigger_references(self.job_key, self.settings)
         self._warn_unreached_dependencies()
         self._create_pipelines()
+        self._upload_query_files()
         self.job_id = self._create_job()
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
@@ -267,6 +273,14 @@ class EphemeralJob:
             if copy.pipeline_id is not None:
                 chosen.append(copy)
         return chosen
+
+    def _upload_query_files(self) -> None:
+        if not self.query_files:
+            return
+        # Set first, so that closing the job deletes the files a failed upload left behind.
+        self._query_files_uploaded = True
+        for path, source in self.query_files.items():
+            helpers.upload_query_file(self.lakeflow.ws, path, source)
 
     def _create_job(self) -> int | None:
         """Create the job, checking first that its creator may make it run as the service principal it names."""
@@ -1008,7 +1022,8 @@ class EphemeralJob:
         module- or session-scoped fixture closes, the test being torn down. Outside a test the run is not polled.
         The job is deleted even when the polling is interrupted. The pipeline copies go after the job, with the same
         keep rules, so a kept job never points at a deleted pipeline, and they go even when deleting the job fails.
-        When the job was never created, no job points at them, so `keep_failed` does not keep them.
+        When the job was never created, no job points at them, so `keep_failed` does not keep them. The SQL files of
+        `query_files` go with the job, or stay with it, the same way; a failure to delete one only logs a warning.
 
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.
@@ -1031,6 +1046,7 @@ class EphemeralJob:
             try:
                 self._delete_unless_kept(failed)
             finally:
+                self._delete_query_files(failed)
                 self._close_pipelines(failed)
 
     def _run_teardown_alone(self) -> None:
@@ -1118,6 +1134,17 @@ class EphemeralJob:
             return
         self.lakeflow.ws.jobs.delete(self.job_id)
         log.info("Deleted job %s", self.job_id)
+
+    def _delete_query_files(self, failed: bool) -> None:
+        if not self._query_files_uploaded:
+            return
+        if self.job_id is not None and session.current().keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
+            return
+        for path in self.query_files:
+            try:
+                self.lakeflow.ws.workspace.delete(path)
+            except DatabricksError as e:
+                log.warning("Could not delete %s, which --lakeflow-sweep-notebooks deletes later: %s", path, e)
 
     def _teardown(self, item: pytest.Item) -> None:
         """Close the job at the end of the test that made it, unless a `with` block closes it."""

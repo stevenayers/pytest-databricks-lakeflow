@@ -292,7 +292,7 @@ Each `TaskRun` has:
 - `output`, the value a notebook passed to `dbutils.notebook.exit()`, and `output_truncated`. `output_json` parses `output` as JSON. For a clean room notebook task whose top-level notebook output is missing or has no result, `output` comes from `clean_rooms_notebook_output.notebook_output`.
 - The outputs of other task types, as the Databricks SDK objects from `runs/get-output`, each `None` for any other task or when the platform reported none: `sql_output` (a `jobs.SqlOutput` whose `query_output`, `alert_output` or `dashboard_output` holds the `warehouse_id`, `output_link` and the SQL that ran, but no rows; databricks-sdk does not model the `file_output` of a SQL file task, so its `sql_output` is empty), `alert_output` (a `jobs.AlertTaskOutput`), `dbt_output` (`artifacts_link` and `artifacts_headers`, see [dbt tasks](task-tests.md#dbt-tasks)), `run_job_output` (the triggered run's `run_id`), `dashboard_output` and `clean_rooms_notebook_output`.
 - `dbt`, the artefacts of a dbt task as a `DbtArtifacts` with `artifacts_dir`, `results`, `failed_models`, `all_passed`, `run_results` and `manifest`, downloaded with `Lakeflow(dbt_artifacts=True)`, or `None`. See [dbt tasks](task-tests.md#dbt-tasks).
-- `sql_result`, the rows a SQL file task returned, as a `SqlResult` with `columns`, `types`, `rows`, `first_row`, `truncated`, `warehouse_id` and `query_text`, or `None` for any other task, including a saved query task. See [SQL file task rows](#sql-file-task-rows).
+- `sql_result`, the rows a SQL file task returned, as a `SqlResult` with `columns`, `types`, `rows`, `first_row`, `truncated`, `warehouse_id` and `query_text`, or `None` for any other task, including a saved query task unless `saved_queries="inline"` runs it as a SQL file. See [SQL file task rows](#sql-file-task-rows) and [Saved query rows](#saved-query-rows).
 - `pipeline_update`, the update a pipeline task started, as a `PipelineUpdate` with `pipeline_id`, `update_id`, `state`, `cause`, `full_refresh` and `events()`, or `None` for any other task. See [pipeline tasks](#pipeline-tasks).
 - `child_run_id`, the id of the run a run-job task triggered, read from `run_job_output.run_id`, or `None` for any other task, and `child_run`, that run as a `JobRun`. See [Jobs that run other jobs](#jobs-that-run-other-jobs).
 - `alert_state`, the state an alert evaluated to, read from `alert_output` or, for a legacy SQL alert task, from `sql_output.alert_output`; `None` for any other task. An alert task succeeds whether or not the alert triggered, ending with `TRIGGERED` or `OK`, so assert on `alert_state`. When the alert cannot be evaluated, for example because its query failed, the task fails and `alert_state` is `ERROR`. The Jobs API reports no error for such a task, so its `error` holds the task's termination message, such as `An error occurred during execution of task Alert task: Query execution failed. ...`, with `type` `None`. databricks-sdk lists one more state, `UNKNOWN`, which the integration tests have not seen on a task run.
@@ -376,6 +376,33 @@ def test_parameterised_query(lakeflow: Lakeflow) -> None:
 ```
 
 The rows come from a field the Jobs API reference does not document, read with one extra request per SQL file task that ran; see [Limitations](limitations.md).
+
+### Saved query rows
+
+A SQL task that runs a saved query (`sql_task.query.query_id`) reports no rows: the platform keeps only the query text and a link to the result page in the Databricks UI. `saved_queries="inline"` runs each saved query task of the copy as a SQL file task instead, so `sql_result` holds its rows:
+
+```python
+def test_open_orders_are_counted(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("daily_report", saved_queries="inline") as job:
+        run = job.run().raise_for_failure()
+        result = run.task("open_orders").sql_result
+        assert result is not None
+        assert result.columns == ["n"]
+        assert result.rows == [{"n": "3"}]
+```
+
+`job()` reads each enabled saved query task's query with `queries.get`, nested `for_each_task` tasks included, and when the job is created uploads its text to `helpers_path` as a workspace file named `query_<run id>_<task key>_<8 hex digits>.sql`, after a `USE CATALOG` and a `USE SCHEMA` line for the catalog and schema the query sets, so unqualified table names resolve as they do in the saved query. The task then runs that file on its own warehouse, and `sql_result` holds the rows of the last statement. The file is deleted with the job, or kept with it, and [`--lakeflow-sweep-notebooks`](configuration.md#sweeping-leftovers) deletes leftover ones. A task disabled in the copy, or downstream of one, is left as deployed.
+
+A saved query falls back to its own parameter defaults when the task does not set a parameter, and a SQL file task has none, so the copy adds each default of a parameter that neither the task nor a job parameter sets to the task's parameters: text, a number (`10` as `"10"`) or a single enum value, as a string. `:name` and legacy `{{ name }}` markers both bind from them. An explicit value wins:
+
+```python
+with lakeflow.job("daily_report", saved_queries="inline", task_params={"open_orders": {"region": "apac"}}) as job:
+    run = job.run()  # the inlined query runs with region = 'apac', not its default
+```
+
+Any other default the task leaves unset, a date, a date range, several enum values or a query-backed one, raises `LakeflowError` before anything is created, naming the task and the parameter; set it with `task_params`, or for a task nested in a for-each task with `lakeflow.task("<job>.<loop>.<task>", task_params=...)`. A saved query that does not exist raises `LakeflowError` too. `Lakeflow(saved_queries="inline")` makes it the default of every `job()` and `task()`, and `saved_queries="deployed"` on a call runs that copy's saved queries as deployed, with `sql_result` `None`.
+
+The inlined query is not the saved query object, so two things differ. It runs as the job's `run_as`, normally you, and not as the query's owner, which a saved query with `run_as_mode` `OWNER` uses. And the SQL editor's automatic `LIMIT 1000` (`apply_auto_limit`), which the platform appends to a saved query's text when it runs as a task, is not added; the platform keeps at most 1,000 rows of a SQL file task's result anyway, and `truncated` says when it cut them.
 
 ### Branches
 
