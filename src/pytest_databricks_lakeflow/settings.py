@@ -1137,8 +1137,8 @@ def apply_task_params(
 
     Raises:
         LakeflowError: If a key is not an allowed task of the job, starts with `__pytest_`, names a task that is not a
-            notebook, Python script, JAR, Python wheel, SQL or dbt task, or has a value that does not fit the task's
-            type. Nothing is changed then.
+            notebook, Python script, JAR, Python wheel, SQL or dbt task, has a value that does not fit the task's
+            type, or gives a dbt task an empty list of commands. Nothing is changed then.
     """
     if not task_params:
         return settings
@@ -1178,6 +1178,11 @@ def _check_task_params_shape(task: jobs.Task, kind: str, value: object) -> None:
         fits = kind in MAPPING_PARAMS and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
     elif isinstance(value, Sequence) and not isinstance(value, str):
         fits = kind in LIST_PARAMS and all(isinstance(item, str) for item in value)
+    if fits and kind == "dbt_task" and not value:
+        raise LakeflowError(
+            f"task_params[{task.task_key!r}]: dbt commands must not be empty. Give task {task.task_key!r} at least "
+            "one command, such as ['dbt build']."
+        )
     if fits:
         return
     shapes: list[str] = []
