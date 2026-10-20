@@ -14,21 +14,18 @@ from pathlib import Path
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat, Language
 
-from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.results import PREFIX
+from pytest_databricks_lakeflow.limits import WIDGET_LIMIT_BYTES
+from pytest_databricks_lakeflow.naming import (
+    KEYS_WIDGET,
+    MISSING,
+    NOTEBOOK_DIGEST_CHARS,
+    PARAMS_WIDGET,
+    PREFIX,
+    TASK_KEY_WIDGET,
+    VALUES_WIDGET,
+)
 
-# Widget names carry the injected-task prefix because every job parameter is also pushed to every notebook task's
-# widgets, overriding base_parameters of the same name.
-VALUES_WIDGET = "__pytest_values"
-TASK_KEY_WIDGET = "__pytest_task_key"
-KEYS_WIDGET = "__pytest_keys"
-PARAMS_WIDGET = "__pytest_params"
-MISSING = "__pytest_missing__"
 ARGUMENT_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-NOTEBOOK_DIGEST_CHARS = 12
-# `query_<run id>_<task key>_<8 hex digits>.sql`, as `query_file_path` names the SQL file of an inlined saved query.
-QUERY_FILE = re.compile(r"query_.+_[0-9a-f]{8}\.sql")
-
 SET_VALUES = f"""# Databricks notebook source
 import json
 
@@ -36,7 +33,6 @@ values = json.loads(dbutils.widgets.get("{VALUES_WIDGET}"))
 for key, value in values.items():
     dbutils.jobs.taskValues.set(key=key, value=value)
 """
-
 GET_VALUES = f"""# Databricks notebook source
 import json
 
@@ -50,9 +46,7 @@ dbutils.notebook.exit(json.dumps({{
     "missing": [k for k, v in found.items() if v == missing],
 }}))
 """
-
 NOTEBOOKS = {"set_values": SET_VALUES, "get_values": GET_VALUES}
-
 # Job parameters are read from the widgets, because the platform pushes every job parameter to every notebook task,
 # one passed to run_now that the job does not declare included. `getAll` returns them with the task's own base
 # parameters, which for these tasks all start with the plugin's prefix. Runtimes before Databricks Runtime 13.3 LTS
@@ -63,7 +57,6 @@ except Exception:
     __pytest_names = json.loads(dbutils.widgets.get("{PARAMS_WIDGET}"))
     __pytest_widgets = {{name: dbutils.widgets.get(name) for name in __pytest_names}}
 __pytest_job_params = {{k: v for k, v in __pytest_widgets.items() if not k.startswith("{PREFIX}")}}"""
-
 # The source of `fn`, then a call that passes the arguments it declares.
 # The future import keeps annotations unevaluated: serverless environment 4 runs Python 3.12, which evaluates them
 # when the def runs, and the names they use, such as SparkSession, are not imported in the notebook.
@@ -80,7 +73,6 @@ if __pytest_result is not None:
     dbutils.notebook.exit(json.dumps(__pytest_result, default=str))
 """
 LIFECYCLE_VALUES = {"spark": "spark", "dbutils": "dbutils", "params": "__pytest_job_params"}
-
 # The statements are a Python literal in the source, not a widget, so `{{` in them needs no escaping.
 LIFECYCLE_SQL = """# Databricks notebook source
 import json
@@ -94,9 +86,6 @@ dbutils.notebook.exit(json.dumps({{"statements": len(__pytest_statements)}}))
 """
 NOTEBOOK_MARKER = "# Databricks notebook source"
 CELL_SEPARATOR = "# COMMAND ----------"
-DEBUG_FOLDER = "debug"
-# dbutils.widgets.text refuses a longer default with DefaultValueIsTooLong ("longer than 2048 bytes").
-WIDGET_LIMIT_BYTES = 2048
 DEBUG_HINT = (
     "# Edit the widgets above, then run all cells. dbutils.jobs.taskValues.get() raises outside a job\n"
     "# unless the notebook passes debugValue=."
@@ -111,12 +100,7 @@ LONG_VALUES_HINT = (
     "Their widgets hold a truncated copy, which is\n"
     "# what the notebook reads."
 )
-
 LifecycleStep = Callable[..., object] | Sequence[str] | Path
-
-
-def default_folder(user: str | None) -> str:
-    return f"/Users/{user}/.pytest-databricks-lakeflow"
 
 
 def upload(ws: WorkspaceClient, folder: str) -> dict[str, str]:
@@ -134,7 +118,7 @@ def upload(ws: WorkspaceClient, folder: str) -> dict[str, str]:
     paths: dict[str, str] = {}
     for name, source in NOTEBOOKS.items():
         path = f"{folder}/{name}"
-        ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
+        _upload_python(ws, path, source)
         paths[name] = path
     return paths
 
@@ -157,15 +141,15 @@ def lifecycle_source(step: LifecycleStep, rootpath: Path, argument: str) -> tupl
         whose reads cannot be known before they run.
 
     Raises:
-        LakeflowError: If `step` is a string or an empty list, a statement is not a string or has a `$` that is
-            neither a placeholder nor `$$`, the file does not exist or is not a `.py` file, or the function is not a
-            plain function defined with `def`, uses variables of an enclosing function, takes a parameter other than
+        ValueError: If `step` is a string or an empty list, a statement is not a string or has a `$` that is neither a
+            placeholder nor `$$`, the file does not exist or is not a `.py` file, or the function is not a plain
+            function defined with `def`, uses variables of an enclosing function, takes a parameter other than
             `spark`, `dbutils` and `params`, has no source to read, or has a decorator.
     """
     if isinstance(step, Path):
         return _file_source(step, rootpath, argument), frozenset()
     if isinstance(step, str):
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}= takes a list of SQL statements, not a string: pass [{step!r}], or a Path to a .py file."
         )
     if isinstance(step, Sequence):
@@ -177,7 +161,7 @@ def check_lifecycle_step(step: LifecycleStep, argument: str) -> None:
     """Run the checks of `lifecycle_source` that need no rootdir, so that a bad `Lakeflow` default fails early.
 
     Raises:
-        LakeflowError: In the cases where `lifecycle_source` raises it, except that a file is not looked for.
+        ValueError: In the cases where `lifecycle_source` raises it, except that a file is not looked for.
     """
     if isinstance(step, Path):
         _check_file_suffix(step, argument)
@@ -189,7 +173,7 @@ def _file_source(path: Path, rootpath: Path, argument: str) -> str:
     _check_file_suffix(path, argument)
     resolved = rootpath / path
     if not resolved.is_file():
-        raise LakeflowError(f"{argument}= file {resolved} does not exist. A relative path starts at {rootpath}.")
+        raise ValueError(f"{argument}= file {resolved} does not exist. A relative path starts at {rootpath}.")
     text = resolved.read_text(encoding="utf-8")
     if text.startswith(NOTEBOOK_MARKER):
         return text
@@ -198,7 +182,7 @@ def _file_source(path: Path, rootpath: Path, argument: str) -> str:
 
 def _check_file_suffix(path: Path, argument: str) -> None:
     if path.suffix != ".py":
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}= must be a .py file, got {path}. Put SQL statements in a list, or run them from a .py file "
             "through spark.sql."
         )
@@ -206,16 +190,16 @@ def _check_file_suffix(path: Path, argument: str) -> None:
 
 def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, frozenset[str]]:
     if not statements:
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}= is an empty list of SQL statements. Pass at least one statement, or leave {argument}= out."
         )
     names: set[str] = set()
     for number, statement in enumerate(statements, start=1):
         if not isinstance(statement, str):
-            raise LakeflowError(f"{argument}= statement {number} is not a string: {statement!r}")
+            raise ValueError(f"{argument}= statement {number} is not a string: {statement!r}")
         template = string.Template(statement)
         if not template.is_valid():
-            raise LakeflowError(
+            raise ValueError(
                 f"{argument}= statement {number} has an invalid placeholder: {statement!r}. Write ${{name}} for a job "
                 "parameter and $$ for a literal dollar."
             )
@@ -227,18 +211,18 @@ def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, froze
 def _function_source(fn: Callable[..., object], argument: str) -> str:
     """Build a notebook that calls `fn` with the arguments it declares and exits with what it returns."""
     if not inspect.isfunction(fn):
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}= must be a plain function defined with def, a list of SQL statements or a Path to a .py "
             f"file, got {fn!r}. A function runs as a notebook on the job's compute, so the plugin ships its source."
         )
     name = fn.__name__
     if name == "<lambda>":
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}= cannot be a lambda, because the plugin ships the function's source to the job's compute. "
             "Define it with def instead."
         )
     if fn.__code__.co_freevars:
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}={name} uses variables of the function that encloses it: {sorted(fn.__code__.co_freevars)}. "
             "It runs on the job's compute, where they do not exist. Pass the values as job parameters and read them "
             "through params instead."
@@ -247,12 +231,12 @@ def _function_source(fn: Callable[..., object], argument: str) -> str:
     try:
         source = textwrap.dedent(inspect.getsource(fn)).strip()
     except (OSError, TypeError) as e:
-        raise LakeflowError(
+        raise ValueError(
             f"Cannot read the source of {argument}={name}: {e}. Define it in a file, not in a REPL or notebook cell, "
             "so the plugin can ship its source."
         ) from None
     if source.startswith("@"):
-        raise LakeflowError(
+        raise ValueError(
             f"{argument}={name} has a decorator, which would be shipped with its source to the job's compute, where "
             "it does not exist. Remove the decorator."
         )
@@ -269,7 +253,7 @@ def _declared_arguments(fn: Callable[..., object], label: str) -> list[str]:
         else:
             refused.append(str(parameter))
     if refused:
-        raise LakeflowError(
+        raise ValueError(
             f"{label} takes {refused}, but it can only take spark, dbutils and params. Remove the others and pass "
             "values as job parameters, which it reads through params."
         )
@@ -292,7 +276,7 @@ def upload_lifecycle(ws: WorkspaceClient, folder: str, role: str, source: str, u
     digest = hashlib.sha256(source.encode()).hexdigest()[:NOTEBOOK_DIGEST_CHARS]
     path = f"{folder.rstrip('/')}/{role}_{digest}"
     if path not in uploaded:
-        ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
+        _upload_python(ws, path, source)
         uploaded.add(path)
     return path
 
@@ -381,7 +365,12 @@ def upload_notebook(ws: WorkspaceClient, path: str, source: str) -> str:
         The notebook's page in the workspace, `<host>/#notebook/<object id>`.
     """
     ws.workspace.mkdirs(posixpath.dirname(path))
-    ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
+    _upload_python(ws, path, source)
     # The documented notebook URL names the notebook by its object id, which the upload does not return.
     object_id = ws.workspace.get_status(path).object_id
     return f"{ws.config.host}/#notebook/{object_id}"
+
+
+def _upload_python(ws: WorkspaceClient, path: str, source: str) -> None:
+    """Upload a Python notebook in the SOURCE format, replacing any at `path`, into a folder that exists."""
+    ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)

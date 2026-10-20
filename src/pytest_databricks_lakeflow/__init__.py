@@ -20,8 +20,9 @@ from pytest_databricks_lakeflow.results import (
     TaskValues,
     Timing,
 )
-from pytest_databricks_lakeflow.session import SweepReport
-from pytest_databricks_lakeflow.settings import ALL_RULES, DEFAULT_RULES, Stub
+from pytest_databricks_lakeflow.settings.lint import ALL_RULES, DEFAULT_RULES
+from pytest_databricks_lakeflow.settings.stubs import Stub
+from pytest_databricks_lakeflow.sweep import SweepReport
 
 __all__ = [
     "ALL_RULES",

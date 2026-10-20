@@ -1,3 +1,5 @@
+"""Downloading and reading the artefacts a dbt task leaves behind."""
+
 from __future__ import annotations
 
 import logging
@@ -8,7 +10,7 @@ from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import dbt
 
-from .fakes import DBT_HEADERS, DBT_LINK, FakeDbtLinks, dbt_tarball
+from .fakes.dbt import DBT_HEADERS, DBT_LINK, FakeDbtLinks, dbt_tarball
 
 OUTPUT = jobs.DbtOutput(artifacts_link=DBT_LINK, artifacts_headers=DBT_HEADERS)
 ORDERS_AND_BAD = {"model.proj.orders": "success", "model.proj.bad": "error"}

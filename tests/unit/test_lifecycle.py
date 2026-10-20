@@ -1,3 +1,5 @@
+"""Setup and teardown steps that run first and last in every run of the copy, or when the job closes."""
+
 from __future__ import annotations
 
 import functools
@@ -10,15 +12,20 @@ from typing import Any
 import pytest
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.helpers import PARAMS_WIDGET, LifecycleStep, lifecycle_source
-from pytest_databricks_lakeflow.settings import check_lifecycle_params
+from pytest_databricks_lakeflow import LakeflowError
+from pytest_databricks_lakeflow.helpers import LifecycleStep, lifecycle_source
+from pytest_databricks_lakeflow.naming import ENV_KEY, PARAMS_WIDGET
+from pytest_databricks_lakeflow.settings.compute import Helpers
+from pytest_databricks_lakeflow.settings.lifecycle import check_lifecycle_params, inject_lifecycle
+from pytest_databricks_lakeflow.settings.stubs import wrap_task
 
-from .conftest import configure_lakeflow
-from .fakes import FakeDbutils, FakeSpark, FakeWorkspaceClient, example_settings, make_run, run_notebook
+from .conftest import HELPERS, configure_lakeflow, task, three_tasks
+from .fakes.notebooks import FakeDbutils, FakeSpark, run_notebook
+from .fakes.runs import make_run
+from .fakes.templates import example_settings
+from .fakes.workspace import FakeWorkspaceClient
 
 pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
-
 HELPERS_FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow"
 JOB_TASKS = ["__pytest_setup", "extract", "transform", "load", "classic", "__pytest_teardown"]
 WIDGETS = {PARAMS_WIDGET: json.dumps(["param1", "schema"]), "param1": "hello", "schema": "dev.s"}
@@ -34,7 +41,6 @@ from databricks.sdk.service import jobs
 def declare_run_date(settings, item):
     settings.parameters = [*(settings.parameters or []), jobs.JobParameterDefinition(name="run_date", default="d")]
 """
-
 LIFECYCLE_FUNCTIONS = """
 def seed(spark, dbutils, params):
     spark.sql(f"CREATE OR REPLACE TABLE {params['schema']}.orders AS SELECT 1 AS id")
@@ -240,7 +246,7 @@ class TestRejectedSteps:
     )
     def test_rejects(self, tmp_path: Path, step: LifecycleStep, message: str) -> None:
         (tmp_path / "seed.sql").write_text("SELECT 1")
-        with pytest.raises(LakeflowError, match=message):
+        with pytest.raises(ValueError, match=message):
             lifecycle_source(step, tmp_path, "setup")
 
 
@@ -270,7 +276,7 @@ class TestRejectedFunctions:
         ],
     )
     def test_rejects(self, fn: Callable[..., object], message: str) -> None:
-        with pytest.raises(LakeflowError, match=message):
+        with pytest.raises(ValueError, match=message):
             notebook(fn, "setup")
 
     def test_rejected_before_anything_is_created(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
@@ -286,19 +292,19 @@ from pytest_databricks_lakeflow import LakeflowError
 
 
 def test_job(lakeflow):
-    with pytest.raises(LakeflowError, match="teardown= cannot be a lambda"):
+    with pytest.raises(ValueError, match="teardown= cannot be a lambda"):
         lakeflow.job("my_job", setup=seed, teardown=lambda dbutils: None)
-    with pytest.raises(LakeflowError, match="setup= cannot be a lambda"):
+    with pytest.raises(ValueError, match="setup= cannot be a lambda"):
         lakeflow.task("my_job.load", setup=lambda spark: None)
     with pytest.raises(LakeflowError, match="nope"):
         lakeflow.job("my_job", params={"schema": "s"}, setup=["SELECT ${schema}"], teardown=["DROP ${nope}"])
     with pytest.raises(LakeflowError, match="nope"):
         lakeflow.task("my_job.load", setup=["SELECT ${nope}"])
-    with pytest.raises(LakeflowError, match="not a string"):
+    with pytest.raises(ValueError, match="not a string"):
         lakeflow.job("my_job", setup="SELECT 1")
-    with pytest.raises(LakeflowError, match="does not exist"):
+    with pytest.raises(ValueError, match="does not exist"):
         lakeflow.job("my_job", teardown=Path("missing.py"))
-    with pytest.raises(LakeflowError, match=r"\\.py file"):
+    with pytest.raises(ValueError, match=r"\\.py file"):
         lakeflow.job("my_job", setup=Path("seed.sql"))
 """,
         )
@@ -730,18 +736,69 @@ def test_job(lakeflow, caplog):
             """
 import pytest
 
-from pytest_databricks_lakeflow import LakeflowError
-
 
 def test_job(lakeflow):
-    with pytest.raises(LakeflowError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
+    with pytest.raises(ValueError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
         lakeflow.job("my_job", setup=seed, teardown_at="close")
-    with pytest.raises(LakeflowError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
+    with pytest.raises(ValueError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
         lakeflow.task("my_job.load", teardown_at="close")
-    with pytest.raises(LakeflowError, match=r"teardown_at must be 'run' or 'close', not 'later'"):
+    with pytest.raises(ValueError, match=r"teardown_at must be one of run, close, got 'later'"):
         lakeflow.job("my_job", teardown=cleanup, teardown_at="later")
 """,
         )
         result.assert_outcomes(passed=1)
         assert fake_ws.jobs.created == []
         assert lifecycle_uploads(fake_ws) == []
+
+
+class TestInjectLifecycle:
+    """inject_lifecycle runs setup before every root task and teardown after every leaf, whatever happened."""
+
+    @staticmethod
+    def dependencies(settings: jobs.JobSettings) -> dict[str, list[str]]:
+        return {t.task_key: [d.task_key for d in t.depends_on or []] for t in settings.tasks or [] if t.task_key}
+
+    def test_rewires_a_three_task_dag(self) -> None:
+        settings = inject_lifecycle(three_tasks(), "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert self.dependencies(settings) == {
+            "__pytest_setup": [],
+            "a": ["__pytest_setup"],
+            "b": ["a"],
+            "c": ["__pytest_setup"],
+            "__pytest_teardown": ["b", "c"],
+        }
+        setup, teardown = task(settings, "__pytest_setup"), task(settings, "__pytest_teardown")
+        assert setup.run_if is None
+        assert teardown.run_if == jobs.RunIf.ALL_DONE
+        for injected, path in ((setup, "/h/setup_1"), (teardown, "/h/teardown_1")):
+            assert injected.notebook_task == jobs.NotebookTask(
+                notebook_path=path, base_parameters={"__pytest_params": '["day"]'}
+            )
+            assert injected.environment_key == ENV_KEY
+        assert [e.environment_key for e in settings.environments or []] == [ENV_KEY]
+
+    def test_teardown_follows_probes_and_stubs_follow_setup(self) -> None:
+        settings = wrap_task(example_settings(), "transform", {"extract": {"row_count": 1}}, ["rows"], HELPERS)
+        settings = inject_lifecycle(settings, "/h/setup_1", "/h/teardown_1", HELPERS)
+        assert self.dependencies(settings) == {
+            "__pytest_setup": [],
+            "extract": ["__pytest_setup"],
+            "transform": ["extract"],
+            "__pytest_probe__transform": ["transform"],
+            "__pytest_teardown": ["__pytest_probe__transform"],
+        }
+        assert [e.environment_key for e in settings.environments or []].count(ENV_KEY) == 1
+
+    def test_either_alone(self) -> None:
+        setup_only = inject_lifecycle(three_tasks(), "/h/setup_1", None, HELPERS)
+        assert [t.task_key for t in setup_only.tasks or []] == ["__pytest_setup", "a", "b", "c"]
+        teardown_only = inject_lifecycle(three_tasks(), None, "/h/teardown_1", HELPERS)
+        assert self.dependencies(teardown_only) == {"a": [], "b": ["a"], "c": [], "__pytest_teardown": ["b", "c"]}
+        assert inject_lifecycle(three_tasks(), None, None, HELPERS) == three_tasks()
+
+    def test_on_the_helper_job_cluster(self) -> None:
+        helpers = Helpers("/s", "/g", job_cluster_key="classic")
+        settings = inject_lifecycle(example_settings(), "/h/setup_1", "/h/teardown_1", helpers)
+        assert task(settings, "__pytest_setup").job_cluster_key == "classic"
+        assert task(settings, "__pytest_teardown").job_cluster_key == "classic"
+        assert ENV_KEY not in [e.environment_key for e in settings.environments or []]

@@ -27,8 +27,7 @@ from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 from databricks.sdk.service.workspace import ExportFormat, ImportFormat, Language, ObjectType
 
-from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session
-from pytest_databricks_lakeflow.results import serialise
+from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session, sweep
 
 from .conftest import BUNDLES, lakeflow_for
 
@@ -103,7 +102,7 @@ def test_job_surfaces_permission_error(forbidden_run: JobRun) -> None:
     assert notebook.failed_cell.error == "PermissionError: forbidden may not read /Volumes/example/raw/landing"
     assert forbidden_run.task("extract").notebook is None
     # --lakeflow-report-dir writes this as report.json, with the notebook saved as <run_id>/transform.html.
-    data = json.loads(json.dumps(serialise(forbidden_run)))
+    data = json.loads(json.dumps(forbidden_run.as_dict()))
     transform = data["tasks"]["transform"]
     assert transform["notebook_file"] == f"{forbidden_run.run_id}/transform.html"
     assert transform["error"]["type"] == "PermissionError"
@@ -825,8 +824,8 @@ def test_sweep_dry_run_lists_without_deleting(lakeflow: Lakeflow) -> None:
         setup, teardown = notebooks["__pytest_setup"], notebooks["__pytest_teardown"]
         time.sleep(1)
         # Swept as another run with no age limit would sweep, so this test's job, schema and notebooks are listed.
-        options = session.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
-        report = session.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
+        options = sweep.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
+        report = sweep.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
         assert report.dry_run
         assert report.errors == ()
         assert job.job_id in report.jobs
@@ -853,8 +852,8 @@ def test_keep_ttl_tag_protects_a_job_from_the_sweep(lakeflow: Lakeflow, monkeypa
         setup = next(task.notebook_task.notebook_path for task in stored.tasks or [] if task.notebook_task)
         time.sleep(1)
         # A dry run, because the helpers folder is shared with every other test of this user.
-        options = session.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
-        report = session.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
+        options = sweep.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
+        report = sweep.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
         assert job.job_id not in report.jobs
         assert schema not in report.schemas
         assert setup not in report.notebooks, report.notebooks
@@ -874,8 +873,8 @@ def test_sweep_deletes_a_stale_notebook(lakeflow: Lakeflow) -> None:
             ws.workspace.upload(path, source, format=ImportFormat.SOURCE, language=Language.PYTHON)
         time.sleep(1)
         # A user who created nothing, so that the creator filter keeps every job and schema out of the sweep.
-        options = session.SweepOptions(notebooks=True)
-        report = session.sweep(ws, "another_run", 0, folder, options, user="pytest_nobody")
+        options = sweep.SweepOptions(notebooks=True)
+        report = sweep.sweep(ws, "another_run", 0, folder, options, user="pytest_nobody")
         assert report.errors == ()
         assert report.jobs == ()
         assert sorted(report.notebooks) == sorted([setup, debug])

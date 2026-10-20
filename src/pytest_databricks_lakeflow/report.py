@@ -13,15 +13,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from pytest_databricks_lakeflow.ephemeral import DEBUG_NOTEBOOKS, REPORTS, RUNS
-from pytest_databricks_lakeflow.results import serialise_with_files
+from pytest_databricks_lakeflow.ephemeral.outcome import DEBUG_NOTEBOOKS, REPORTS, RUNS
+from pytest_databricks_lakeflow.results.serialise import serialise_with_files
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.ephemeral import EphemeralJob
     from pytest_databricks_lakeflow.results import JobRun
 
 log = logging.getLogger("pytest_databricks_lakeflow")
-
 UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 NAME_LIMIT = 80
 DIGEST_CHARS = 8
@@ -51,7 +50,7 @@ def clear(report_dir: Path) -> None:
             if TEST_DIRECTORY.fullmatch(path.name) and (path / "report.json").is_file():
                 shutil.rmtree(path)
     except OSError as e:
-        log.warning("Could not clear the lakeflow reports of an earlier session from %s: %s", report_dir, e)
+        log.warning(f"Could not clear the lakeflow reports of an earlier session from {report_dir}: {e}")
 
 
 def write(report_dir: Path, item: pytest.Item) -> None:
@@ -73,7 +72,7 @@ def write(report_dir: Path, item: pytest.Item) -> None:
         report, files = _build(item, runs)
         _write_files(directory, report, files)
     except Exception as e:
-        log.warning("Could not write the lakeflow report of %s to %s: %s", item.nodeid, directory, e)
+        log.warning(f"Could not write the lakeflow report of {item.nodeid} to {directory}: {e}")
 
 
 def _build(item: pytest.Item, runs: list[tuple[EphemeralJob, JobRun]]) -> tuple[dict[str, Any], dict[str, str]]:

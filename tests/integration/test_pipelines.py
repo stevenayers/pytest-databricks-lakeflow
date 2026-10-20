@@ -116,7 +116,7 @@ def test_pipeline_copy_writes_to_the_test_schema(lakeflow: Lakeflow) -> None:
 def test_job_copy_points_at_the_pipeline_copy(lakeflow: Lakeflow) -> None:
     deployed_id = deployed_pipeline_id(lakeflow)
     with lakeflow.schema() as schema, lakeflow.job("pipeline_job", pipelines="copy", schema=schema) as job:
-        [copy] = job.pipelines
+        [copy] = job.pipeline_copies
         assert copy.pipeline_key == "numbers"
         run = job.run(full_refresh=True)
         assert run.succeeded, run

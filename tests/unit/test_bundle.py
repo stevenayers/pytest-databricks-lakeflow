@@ -1,3 +1,5 @@
+"""The Databricks CLI wrapper, and what the plugin reads from a bundle's `validate` and `summary` output."""
+
 from __future__ import annotations
 
 import os
@@ -7,8 +9,7 @@ from typing import Any
 
 import pytest
 
-from pytest_databricks_lakeflow import bundle
-from pytest_databricks_lakeflow.errors import LakeflowBundleError
+from pytest_databricks_lakeflow import LakeflowBundleError, bundle
 
 
 class FakeRunner:

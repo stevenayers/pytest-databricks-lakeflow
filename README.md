@@ -1,6 +1,6 @@
 # pytest-databricks-lakeflow
 
-Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest: deploy a throwaway copy of a job or a single task, run it, assert on the result, tear it down.
+Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest. Each test gets a throwaway copy of a job, or of one task, runs it with the parameters the test chooses, asserts on the result, and deletes the copy.
 
 [![PyPI](https://img.shields.io/pypi/v/pytest-databricks-lakeflow?style=flat-square)](https://pypi.org/project/pytest-databricks-lakeflow/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pytest-databricks-lakeflow?style=flat-square)](https://pypi.org/project/pytest-databricks-lakeflow/)
@@ -8,25 +8,27 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest: deploy
 [![Coverage](https://img.shields.io/codecov/c/github/stevenayers/pytest-databricks-lakeflow?style=flat-square)](https://codecov.io/gh/stevenayers/pytest-databricks-lakeflow)
 [![Docs](https://img.shields.io/github/actions/workflow/status/stevenayers/pytest-databricks-lakeflow/docs.yml?branch=main&style=flat-square&label=docs)](https://stevenayers.github.io/pytest-databricks-lakeflow/)
 [![Licence](https://img.shields.io/github/license/stevenayers/pytest-databricks-lakeflow?style=flat-square)](https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/LICENSE)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json&style=flat-square)](https://github.com/astral-sh/ruff)
 
-## Why this exists
+## What you get
 
-- A job in a bundle is usually checked by deploying it and pressing Run. This turns that into a pytest test, with `assert`, `parametrize` and xdist.
-- Every test runs its own copy of the job, so tests run in parallel and never touch the jobs your bundle deployed, except the children of Run Job tasks, which the plugin warns about. With `pipelines="copy"`, the pipelines that a job's pipeline tasks update are copied too and publish to the test's temporary schema, and `lakeflow.pipeline()` copies one pipeline on its own, so a pipeline change is checked without touching the deployed pipeline's tables.
-- Task values cannot be read through the Jobs API. The plugin injects tasks that set and capture them, so one task can be tested on its own with the upstream values you choose.
-- Test data needs no seed task in the bundle and no Databricks Connect. `setup=` and `teardown=` run plain Python functions with the real `spark` and `dbutils`, a list of SQL statements, or a notebook file as the first and last tasks of the copy, or with `teardown_at="close"` the teardown alone when the job closes, after the test's assertions.
-- `bundle validate` passes wiring mistakes, such as an undeclared `{{job.parameters.<name>}}` or a `depends_on` task that does not exist, that the deploy then refuses one at a time. `lakeflow.check(key)` lists them all from the template, without creating a job, along with wheel entry points missing from `dist/`, library paths missing from the workspace and `{{job.trigger.*}}` references, and `pytest --lakeflow-check` collects one such check per bundle job.
+- **A job test is a pytest test.** `assert`, `parametrize`, fixtures and pytest-xdist work as they do everywhere else. Tests that need a workspace get the `lakeflow` marker, so `pytest -m "not lakeflow"` keeps the fast suite fast.
+- **The deployed jobs are never run.** Every test runs its own copy, named and tagged after the test, with schedules, triggers, notifications and `run_as` removed. Copies run in parallel and are deleted when the test ends, unless it failed.
+- **Results you can assert on.** `run.task("transform")` gives the task's state, output, logs, error, resolved parameters, task values, SQL rows, pipeline update, dbt artefacts and what a failed notebook printed.
+- **One task at a time.** Task values are not exposed by the Jobs API, so `lakeflow.task("job.task")` runs a single task between a stub task that sets the upstream values you choose and a probe task that reads the values it set.
+- **Test data without a seed task.** `setup=` and `teardown=` run a plain function with the real `spark` and `dbutils`, a list of SQL statements or a notebook file as the first and last tasks of the copy. `lakeflow.schema()` gives each test a temporary schema.
+- **Pipelines too.** `pipelines="copy"` points a job's pipeline tasks at copies that publish to the test's schema, and `lakeflow.pipeline()` copies one pipeline on its own.
+- **Failures explain themselves.** A failed assertion names the failing tasks with their errors and links to the run. The job is kept for you to open, `--lakeflow-debug-notebook` writes a notebook that replays the failed task, and `--lakeflow-report-dir` keeps every run's output as a CI artefact.
+- **Wiring checks without a run.** `lakeflow.check("my_job")` lists the mistakes that `bundle validate` passes, such as an undeclared `{{job.parameters.x}}`, and `pytest --lakeflow-check` collects one check per bundle job.
 
 ## Quickstart
 
-You need Python 3.11 or later, the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install) v1.7.0 or later on `PATH`, credentials that both the CLI and the SDK can use (a `~/.databrickscfg` profile or the `DATABRICKS_*` variables), and a workspace with serverless jobs.
+You need Python 3.11 or later, the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) v1.7.0 or later on `PATH`, credentials that both the CLI and the SDK can use (a `~/.databrickscfg` profile or the `DATABRICKS_*` variables), a workspace with serverless jobs, and a [Databricks Asset Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/) with at least one job.
 
 ```bash
 uv add --dev pytest-databricks-lakeflow
 ```
 
-Or `pip install pytest-databricks-lakeflow`. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps test deployments away from everyone else's:
+Or `pip install pytest-databricks-lakeflow`. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps the test deployment apart from your `dev` deployment:
 
 ```yaml
 targets:
@@ -50,15 +52,27 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
         assert "Success! hello" in run.task("my_wheel_task").logs
 ```
 
-Run `pytest`. The first test deploys the bundle's `test` target once, then every test creates, runs and deletes its own job. A failing test keeps its job, and the job and run URLs appear in the test report. Write `assert run.succeeded, run` and a failure reads:
+Run `pytest`. The first test deploys the bundle's `test` target once, then every test creates, runs and deletes its own job. Write `assert run.succeeded, run` and a failure reads:
 
 ```text
 AssertionError: JobRun('my_example_job', FAILED, https://<workspace>/#job/123/run/456, params={'param1': 'forbidden', 'param2': 'world', 'mode': 'full', 'schema': ''}, failing=['transform: PermissionError: forbidden may not read /Volumes/example/raw/landing'])
 ```
 
-`run.raise_for_failure()` does the same in one call. It returns the run when it succeeded and otherwise raises `LakeflowRunFailed` with that repr followed by one line per failing task: its full error, its root cause (the last `Caused by:` line, or the first exception of a Python chain) when the trace has one, and the task's run URL. The run's job parameters and each failing task's resolved parameters follow on `params:` lines.
+To test one task, name it as `job_key.task_key`, give the upstream task values it reads, and capture the values it sets:
 
-`pytest --lakeflow-report-dir=build/lakeflow` also writes each test's runs, those the plugin cancelled included, to a `report.json`, with every task's state, output, error and task values, next to the raw logs and exported notebooks, so a CI build can keep them as an artefact after the jobs are deleted. `pytest --lakeflow-debug-notebook` writes, for each notebook task that failed in a failed test, a notebook in your workspace that sets the task's resolved parameters as widgets and runs the task's notebook, and `job.debug_notebook("transform")` writes one on demand. `pytest --lakeflow-sweep` deletes what crashed sessions left behind, and `Lakeflow().sweep(dry_run=True)` does the same from a script, such as a nightly clean-up, without a test.
+```python
+def test_transform(lakeflow: Lakeflow) -> None:
+    with lakeflow.task(
+        "my_example_job.transform",
+        params={"param1": "hello", "param2": "world"},
+        upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
+        capture_task_values=["rows_written"],
+    ) as task:
+        run = task.run()
+        assert run.succeeded, run
+        assert run.task("transform").output == "hello world"
+        assert run.task("transform").task_values["rows_written"] == 42
+```
 
 To change the target, set a catalog for temporary schemas or lengthen the timeout, override the `lakeflow` fixture in `conftest.py`:
 
@@ -75,54 +89,15 @@ def lakeflow() -> Lakeflow:
     return Lakeflow(target="test", catalog="dev_sandbox", timeout=timedelta(minutes=20))
 ```
 
-To skip cluster start-up, pass `existing_cluster_id="<cluster id>"` to `Lakeflow`: tasks that the bundle puts on job clusters then run on that running cluster instead. To keep job clusters but run each on one node, pass `single_node=True`; single node compute needs dedicated access mode.
+## Where next
 
-## Testing one task
+The docs site is at <https://stevenayers.github.io/pytest-databricks-lakeflow/>.
 
-`lakeflow.task("job_key.task_key")` builds a job that holds only that task. Each upstream task you name in `upstream_task_values` is replaced by a stub task that sets those task values, or by a `Stub` that also answers the task's `{{tasks.<key>.output.<path>}}` references with literals, and `capture_task_values` adds a probe task that reports the values the task set, even when it failed. `upstream_from=run` takes the stub values from the task values a previous run of the job captured, so a task can be replayed against real upstream data. `lakeflow.task("job_key.loop_key.nested_key", input={"id": 7})` runs the task nested in a for-each task once, without its loop, with the item you choose.
-
-```python
-import pytest
-
-from pytest_databricks_lakeflow import Lakeflow
-
-
-@pytest.mark.parametrize(("greeting", "expected"), [("hello", "hello world"), ("goodbye", "goodbye world")])
-def test_transform(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
-    with lakeflow.task(
-        "my_example_job.transform",
-        params={"param1": greeting, "param2": "world"},
-        upstream_task_values={"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}},
-        capture_task_values=["rows_written"],
-    ) as task:
-        run = task.run()
-        assert run.succeeded
-        assert run.task("transform").output == expected
-        assert run.task("transform").task_values["rows_written"] == 42
-```
-
-Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_path")` and `{{tasks.extract.values.row_count}}` resolve against the stub. Reading a value the task never set raises a `KeyError` that says so.
-
-## How it works
-
-1. The first test that needs a job runs `databricks bundle deploy` for the target once per session and reads each deployed job's settings through the Jobs API.
-2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed and dashboard and SQL alert subscriptions paused (alert and Power BI tasks are left as they are), tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`, and `trigger=` to give the `{{job.trigger.*}}` references the values a trigger would.
-3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values, and the rows of each SQL file task. With `saved_queries="inline"`, a saved query task runs its query's text as a SQL file task, so its rows come back too.
-4. Leaving the `with` block deletes the job unless the test failed. Session end cancels anything still running.
-5. `lakeflow.task()` does the same for one task, with the stub and probe tasks on serverless compute or a job cluster you name.
-6. `lakeflow.pipeline()`, or `pipelines="copy"` on `job()` and `task()`, makes a pipeline from a deployed pipeline's spec that publishes to the schema you pass, runs it in development mode, and deletes it with its tables before the schema is dropped.
-
-## Documentation
-
-Everything else is on the docs site: <https://stevenayers.github.io/pytest-databricks-lakeflow/>
-
-- [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, bundle target, first test
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, simulated triggers, for-each inputs and iterations, repeated runs, failures, temporary schemas, pipeline copies, shared runs
-- [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): stubs, probes, value rules, helper compute
-- [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every `Lakeflow` argument, command-line flag and sync strategy
-- [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): the deploy and teardown lifecycle, xdist, timing
-- [Limitations and FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/limitations/): notebook output read from the rendered notebook, what probes cost, what stays in the workspace
-- [API reference](https://stevenayers.github.io/pytest-databricks-lakeflow/api/)
+- [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): from an installed plugin to a passing test against your own bundle.
+- [Job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/) and [task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): the two kinds of test and what a run gives back.
+- [Recipes](https://stevenayers.github.io/pytest-databricks-lakeflow/recipes/): an "I want to..." index covering every option, from disabling a task to running the suite in CI.
+- [Reference](https://stevenayers.github.io/pytest-databricks-lakeflow/reference/lakeflow/): every `Lakeflow` argument, command-line flag, environment variable and report format, the API, and the limitations.
+- [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/) and the [FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/faq/).
 
 ## Contributing and licence
 

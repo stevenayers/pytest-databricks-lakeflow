@@ -4,7 +4,7 @@ labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: Thanks for the report. Please check the [FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/limitations/) and existing issues first.
+      value: Thanks for the report. Please check the [FAQ](https://stevenayers.github.io/pytest-databricks-lakeflow/faq/) and existing issues first.
   - type: textarea
     id: what
     attributes:
