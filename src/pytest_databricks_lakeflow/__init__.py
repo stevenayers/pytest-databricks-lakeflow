@@ -20,9 +20,11 @@ from pytest_databricks_lakeflow.results import (
     Timing,
 )
 from pytest_databricks_lakeflow.session import SweepReport
-from pytest_databricks_lakeflow.settings import Stub
+from pytest_databricks_lakeflow.settings import ALL_RULES, DEFAULT_RULES, Stub
 
 __all__ = [
+    "ALL_RULES",
+    "DEFAULT_RULES",
     "DebugNotebook",
     "EphemeralJob",
     "EphemeralPipeline",

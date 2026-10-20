@@ -48,6 +48,20 @@
 
 Checking a bundle's schema and types is the CLI's job, and `bundle validate` does it. It does not model the Jobs API's own rules, so it passes a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose task is not upstream, a `depends_on` task that is not in the job and retries on a `for_each_task`, and the deploy refuses most of them later, one at a time. `lakeflow.check(key)` checks those Jobs API rules on the template without creating anything, see [Check a job without running it](job-tests.md#check-a-job-without-running-it).
 
+What `bundle validate` reports of each rule of `lakeflow.check`, checked against the CLI version the plugin requires at least and checked again each time that minimum is raised. A rule is dropped once the CLI reports what it does.
+
+| Rule | `bundle validate` | CLI version checked |
+|---|---|---|
+| Undeclared `{{job.parameters.<name>}}` (always applied) | Passes it | 1.7.0 |
+| `{{tasks.<key>.values.<name>}}` whose task is not upstream (always applied) | Passes it | 1.7.0 |
+| `depends_on` task that is not in the job (always applied) | Passes it | 1.7.0 |
+| Retries on a `for_each_task` (always applied) | Passes it | 1.7.0 |
+| `wheel`: entry point missing from the built wheel | Passes it | 1.7.0 |
+| `library`: absolute library, Python file or environment dependency path that does not exist | Passes it | 1.7.0 |
+| `dash`: task reference to a task key with a dash | Passes it | 1.7.0 |
+| `trigger`: `{{job.trigger.*}}` reference | Passes it | 1.7.0 |
+| `equal_to`: `EQUAL_TO` or `NOT_EQUAL` on a number or a task value | Passes it | 1.7.0 |
+
 ### Why do my tests never run the deployed job?
 
 The deployed job keeps its schedule, notifications, `run_as` and bundle lock, and running it would mix test runs with real ones. Each test instead gets a copy with those removed and its dashboard and SQL alert subscriptions paused, named and tagged after the test, so runs are isolated and attributable and do not email subscribers. Alert and Power BI tasks are left alone; see [Limitations](#limitations). Jobs are cheap to create and delete.

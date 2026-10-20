@@ -31,10 +31,14 @@ from pytest_databricks_lakeflow.session import (
     resolve_root,
     resolve_run_id,
 )
+from pytest_databricks_lakeflow.settings import DEFAULT_RULES
 
 STATE = pytest.StashKey[SessionState]()
 DURATION = re.compile(r"([0-9]+)([hd])")
 DURATION_UNITS = {"h": "hours", "d": "days"}
+# The trigger rule is advice for a test that runs the job, which --lakeflow-check does not: a job that reads its own
+# trigger context is wired correctly.
+CHECK_RULES = DEFAULT_RULES - {"trigger"}
 SWEEP_FLAGS = {
     "lakeflow_sweep_scope": "--lakeflow-sweep-scope",
     "lakeflow_sweep_schemas": "--lakeflow-sweep-schemas",
@@ -424,7 +428,7 @@ class _BundleLakeflow:
 def _check(key: str, bundle_lakeflow: _BundleLakeflow) -> Callable[[Lakeflow], None]:
     def check(lakeflow: Lakeflow) -> None:
         try:
-            problems = bundle_lakeflow(lakeflow).check(key)
+            problems = bundle_lakeflow(lakeflow).check(key, rules=CHECK_RULES)
         except LakeflowError as e:
             problems = [f"{type(e).__name__}: {e}"]
         if problems:

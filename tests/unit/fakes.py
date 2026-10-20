@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import os
 import re
 import time
 import urllib.parse
+import zipfile
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
@@ -1404,3 +1406,31 @@ def triggered_settings() -> jobs.JobSettings:
         "tables": "{{job.trigger.table_update.updated_tables}}",
     }
     return settings
+
+
+def build_wheel(
+    dist: Path,
+    name: str = "pkg",
+    *,
+    version: str = "0.1.0",
+    entry_points: str = "[console_scripts]\nmain = pkg.main:main\n",
+    init: str = "",
+    modified: float | None = None,
+) -> Path:
+    """Write a wheel of project `name` to `dist`, with `entry_points` as its entry_points.txt and `init` in its package.
+
+    The package is `name` with underscores, as `uv build` names it, and `modified` is the wheel's modification time.
+    """
+    package = re.sub(r"[-.]+", "_", name).lower()
+    stem = f"{package}-{version}"
+    dist.mkdir(parents=True, exist_ok=True)
+    path = dist / f"{stem}-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as wheel:
+        wheel.writestr(f"{package}/__init__.py", init)
+        wheel.writestr(f"{package}/main.py", "def main():\n    pass\n")
+        wheel.writestr(f"{stem}.dist-info/METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+        if entry_points:
+            wheel.writestr(f"{stem}.dist-info/entry_points.txt", entry_points)
+    if modified is not None:
+        os.utime(path, (modified, modified))
+    return path
