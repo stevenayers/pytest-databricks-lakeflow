@@ -368,10 +368,30 @@ def _pointed_at(function: Callable[..., Any], conftest: Path, collector: pytest.
             stacklevel=1,
         )
         return None
-    with _called(function) as lakeflow:
-        if _points_at(lakeflow, collector.path.parent):
-            return conftest
+    # The call happens while collecting every bundle that sees only the default fixture, so a skip or an error from an
+    # override meant for another bundle must not reach this one's check.
+    try:
+        with _called(function) as lakeflow:
+            points = _points_at(lakeflow, collector.path.parent)
+    except pytest.exit.Exception:
+        raise
+    except (Exception, pytest.skip.Exception, pytest.fail.Exception) as e:
+        warnings.warn(
+            f"--lakeflow-check called the lakeflow fixture that {_relative(conftest, collector)} overrides while "
+            f"collecting, to read its bundle_root, and it {_outcome(e)}. So it checks this bundle with the default "
+            "Lakeflow(): put an override meant for this bundle in a conftest.py in the bundle's directory or above it",
+            stacklevel=1,
+        )
+        return None
+    if points:
+        return conftest
     return None
+
+
+def _outcome(error: BaseException) -> str:
+    if isinstance(error, pytest.skip.Exception):
+        return f"skipped: {error}"
+    return f"raised {type(error).__name__}: {error}"
 
 
 def _relative(path: Path, collector: pytest.Collector) -> str:

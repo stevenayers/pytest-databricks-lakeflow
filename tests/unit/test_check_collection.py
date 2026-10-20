@@ -231,6 +231,40 @@ class TestConfiguredLakeflow:
         )
         result.assert_outcomes(passed=1, warnings=1)
 
+    @pytest.mark.parametrize(
+        ("body", "outcome", "own_bundle"),
+        [
+            pytest.param('pytest.skip("no workspace")', "skipped: no workspace", {"skipped": 1}, id="skips"),
+            pytest.param(
+                'raise KeyError("DATABRICKS_HOST")', "raised KeyError: 'DATABRICKS_HOST'", {"errors": 1}, id="raises"
+            ),
+        ],
+    )
+    def test_an_override_outside_every_bundle_that_skips_or_raises_is_not_for_this_bundle(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        body: str,
+        outcome: str,
+        own_bundle: dict[str, int],
+    ) -> None:
+        conftest = LAKEFLOW_CONFTEST.format(arguments="").replace("return Lakeflow()", body)
+        write(pytester, "services/alpha/conftest.py", conftest)
+        write(pytester, "services/alpha/bundle/databricks.yml", "bundle:\n  name: a\n")
+        write(pytester, "services/bar/databricks.yml", "bundle:\n  name: b\n")
+        # Without the flag, alpha's collection error would stop the session before bar's check runs.
+        result = pytester.runpytest("--lakeflow-check", "--continue-on-collection-errors")
+        result.stdout.fnmatch_lines(
+            [
+                "*UserWarning: --lakeflow-check called the lakeflow fixture that services/alpha/conftest.py overrides "
+                f"while collecting, to read its bundle_root, and it {outcome}. So it checks this bundle with the "
+                "default Lakeflow()*"
+            ]
+        )
+        # bar's check runs with the default Lakeflow(); alpha's own bundle skips or errors as its fixture does.
+        result.assert_outcomes(passed=1, warnings=1, **own_bundle)
+
     def test_sync_none_fails_a_job_validate_cannot_resolve(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
     ) -> None:
