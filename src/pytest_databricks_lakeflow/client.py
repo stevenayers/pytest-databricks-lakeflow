@@ -267,6 +267,11 @@ class Lakeflow:
         """The deployed settings of each usable bundle job, by resource key, as dicts."""
         return self._state()["templates"]
 
+    @property
+    def template_errors(self) -> dict[str, str]:
+        """Why each bundle job that cannot be used as a template cannot, by resource key."""
+        return self._state()["template_errors"]
+
     def template(self, key: str) -> jobs.JobSettings:
         """Get a fresh copy of the deployed settings of a bundle job.
 
