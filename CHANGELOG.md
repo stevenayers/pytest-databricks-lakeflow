@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.9.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.8.0...v0.9.0) (2026-10-20)
+
+
+### Features
+
+* add Lakeflow.check() to lint job templates without running them ([#176](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/176)) ([e9fdff8](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/e9fdff8122b1f93cb57bf629e72297500d83f296))
+* copy bundle pipelines into a test schema with lakeflow.pipeline() and pipelines="copy" ([#178](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/178)) ([be367ef](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/be367ef2c8c0f03013f8e9a885421e5ae29d108c))
+* override for_each_task inputs on the ephemeral copy ([#177](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/177)) ([d7b2f8c](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/d7b2f8c6833825733011f9090d6a3c7506d81c2b))
+* simulate trigger context with trigger= on job() and task() ([#179](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/179)) ([5a91a4f](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/5a91a4fda42b6481eb34f09cc7f7ff7ee168f4de))
+
+
+### Bug Fixes
+
+* land the wave 5 and wave 6 review notes ([#181](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/181)) ([84dee67](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/84dee67536d918c33eec1e9cf1d2c4d64a88e27e))
+* settle the wave 6 bugs in pipeline copies, for-each inputs and trigger references ([#182](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/182)) ([be1688b](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/be1688b5606aa0bd880291339bf8c0277f4a4853))
+
 ## [0.8.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.7.0...v0.8.0) (2026-10-20)
 
 
