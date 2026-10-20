@@ -844,6 +844,17 @@ pytest -n 4
 
 One worker deploys the bundle and loads the templates while the others wait, then all of them reuse the result. [How it works](how-it-works.md#parallel-sessions) has the details.
 
+A test that waits for each run with `run()` has at most one run active, so `-n 4` already keeps at most four runs active at once. A test that fans out with [`start()`](#start-a-run-without-waiting), or a workspace whose serverless quota is below the `-n` count, can cap the runs of each process with `--lakeflow-max-concurrent-runs=N` or `Lakeflow(max_concurrent_runs=N)`; the flag wins. When `N` runs started by the process are active, the next `start()` or `run()` waits for one of them to end before it calls `run_now`, logging `Waiting to start a run of job ...` at INFO. While it waits it polls the active runs every `poll_interval`, so a run that has ended frees its slot even before anyone waits for it, and one thread can start more runs than the cap:
+
+```python
+def test_fan_out(lakeflow: Lakeflow) -> None:
+    copies = [lakeflow.job("my_example_job", name=f"fan out {i}") for i in range(6)]
+    handles = [copy.start() for copy in copies]  # with N=2, the third start() waits for a run to end
+    assert all(handle.wait().succeeded for handle in handles)
+```
+
+A `start()` or `run()` that finds no free slot within its `timeout` raises `LakeflowError` naming the active runs. The cap is per xdist worker, not per session: each worker counts only its own runs, so `-n 4 --lakeflow-max-concurrent-runs=2` can have eight runs active. Lower `N` or the `-n` count to stay under a quota for the whole session.
+
 ## Keep a job for debugging
 
 - The default, `keep_failed=True`, keeps the job when the test fails. The job and run URLs are logged at WARNING and added to the test report.

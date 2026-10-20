@@ -8,6 +8,9 @@ from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow
 
+from .conftest import configure_lakeflow
+from .fakes import FakeWorkspaceClient, make_run
+
 TESTS = """
 import pytest
 
@@ -68,8 +71,10 @@ class TestCommandLine:
                 "*--lakeflow-report-dir*",
                 "*--lakeflow-debug-notebook*",
                 "*--lakeflow-live*",
+                "*--lakeflow-max-concurrent-runs=N*",
             ]
         )
+        assert "The cap is per xdist worker." in " ".join(result.stdout.str().split())
         assert "--lakeflow-target" not in result.stdout.str()
         assert "lakeflow_target" not in result.stdout.str()
 
@@ -197,3 +202,42 @@ class TestDeployFlags:
 
     def test_accepts_other_flags(self) -> None:
         assert Lakeflow(deploy_flags=["--fail-on-active-runs"]).deploy_flags == ["--fail-on-active-runs"]
+
+
+class TestRunCapFlag:
+    """`--lakeflow-max-concurrent-runs` and `max_concurrent_runs` take 1 or more, and the flag wins."""
+
+    @pytest.mark.parametrize("cap", [0, -1])
+    def test_argument_below_one_is_rejected(self, cap: int) -> None:
+        with pytest.raises(ValueError, match=f"^max_concurrent_runs must be 1 or more, got {cap}$"):
+            Lakeflow(max_concurrent_runs=cap)
+
+    def test_flag_below_one_is_rejected(self, pytester: pytest.Pytester) -> None:
+        pytester.makepyfile(TESTS)
+        result = pytester.runpytest("--lakeflow-max-concurrent-runs=0")
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(["*--lakeflow-max-concurrent-runs must be 1 or more, got 0*"])
+
+    @pytest.mark.usefixtures("fake_cli", "bundle_dir")
+    def test_flag_wins_over_the_argument(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        for run_id in (77, 78):
+            fake_ws.jobs.queue(make_run(run_id, {"t": "SUCCESS"}), polls=100)
+        configure_lakeflow(pytester, "max_concurrent_runs=5")
+        pytester.makepyfile(
+            """
+            from datetime import timedelta
+
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as a, lakeflow.job("my_job") as b, lakeflow.job("my_job") as c:
+                    a.start()
+                    b.start()
+                    with pytest.raises(LakeflowError, match="may have 2 runs active at once"):
+                        c.start(timeout=timedelta(0))
+            """
+        )
+        pytester.runpytest("--lakeflow-max-concurrent-runs=2").assert_outcomes(passed=1)
+        assert len(fake_ws.jobs.run_now_calls) == 2

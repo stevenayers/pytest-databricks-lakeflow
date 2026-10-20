@@ -129,6 +129,11 @@ class Lakeflow:
             A longer `timeout` passed to `run()` raises the job's `timeout_seconds` before that run starts.
         poll_interval: How long to wait between two polls of a run that has not finished. Defaults to two seconds.
             Zero or less raises `ValueError`.
+        max_concurrent_runs: How many runs this process may have active at once, for a workspace with a tight
+            serverless quota. `start()` and `run()` wait for one of them to end before starting another, and raise
+            `LakeflowError` when none ends within the run's timeout. Every `Lakeflow` in the process shares the cap of
+            the first run started under one, and each xdist worker has its own. `--lakeflow-max-concurrent-runs`
+            overrides it. Less than 1 raises `ValueError`. Defaults to no cap.
         catalog: The catalog in which `schema()` creates temporary schemas.
         helpers_path: The workspace folder for the helper notebooks. Defaults to
             `/Users/<you>/.pytest-databricks-lakeflow`.
@@ -188,6 +193,7 @@ class Lakeflow:
     deploy_flags: Sequence[str] = ()
     timeout: timedelta = timedelta(minutes=30)
     poll_interval: timedelta | None = None
+    max_concurrent_runs: int | None = None
     catalog: str | None = None
     helpers_path: str | None = None
     helpers_compute: str | None = None
@@ -225,6 +231,8 @@ class Lakeflow:
             )
         if self.poll_interval is not None and self.poll_interval <= timedelta(0):
             raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
+        if self.max_concurrent_runs is not None and self.max_concurrent_runs < 1:
+            raise ValueError(f"max_concurrent_runs must be 1 or more, got {self.max_concurrent_runs}")
         _check_deploy_flags(self.deploy_flags)
         _check_permissions(self.access_control_list())
 
