@@ -1141,6 +1141,47 @@ def for_each_settings() -> jobs.JobSettings:
     )
 
 
+def fanout_objects_settings() -> jobs.JobSettings:
+    """Build the `for_each` bundle's `fanout_objects`: `extract`, then `loop` over objects with the body `inner`.
+
+    `inner` reads the whole item, its `id` and a task value of `extract`, and `after` runs once `loop` is done.
+    """
+    nb = "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks"
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] fanout_objects",
+            "tasks": [
+                {"task_key": "extract", "notebook_task": {"notebook_path": f"{nb}/extract"}},
+                {
+                    "task_key": "loop",
+                    "depends_on": [{"task_key": "extract"}],
+                    "for_each_task": {
+                        "inputs": '[{"id": 1, "path": "/a"}, {"id": 2, "path": "/b"}]',
+                        "concurrency": 2,
+                        "task": {
+                            "task_key": "inner",
+                            "timeout_seconds": 600,
+                            "notebook_task": {
+                                "notebook_path": f"{nb}/inner",
+                                "base_parameters": {
+                                    "item": "{{input}}",
+                                    "item_id": "{{input.id}}",
+                                    "rows": "{{tasks.extract.values.rows}}",
+                                },
+                            },
+                        },
+                    },
+                },
+                {
+                    "task_key": "after",
+                    "depends_on": [{"task_key": "loop"}],
+                    "notebook_task": {"notebook_path": f"{nb}/after"},
+                },
+            ],
+        }
+    )
+
+
 def dbt_settings() -> jobs.JobSettings:
     """Build a deployed bundle job with a serverless dbt task, `dbt_build`, and a notebook task downstream of it."""
     files = "/Workspace/Users/someone@example.com/.bundle/analytics/test/files"

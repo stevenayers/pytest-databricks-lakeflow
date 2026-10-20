@@ -15,7 +15,7 @@ with lakeflow.task(
     assert run.task("transform").task_values["rows_written"] == 42
 ```
 
-- `ref` names the job and the task as `"job_key.task_key"`.
+- `ref` names the job and the task as `"job_key.task_key"`, or the task nested in a for-each task as `"job_key.loop_key.nested_key"`, see [For-each bodies](#for-each-bodies).
 - `params` are job parameters for every run. The job's declared parameters are kept, and the same rules apply as for [job tests](job-tests.md#make-a-job).
 - `upstream_task_values` maps upstream task keys to the task values their stubs set, or to a `Stub` that also answers the task's `{{tasks.<key>.output.<path>}}` references, see [Output references](#output-references). Each named task becomes a stub with the same key, and the target's `depends_on` is replaced by the stubs. Upstream tasks you do not name are dropped.
 - `capture_task_values` lists the task value keys to capture from the task. It adds one probe task.
@@ -43,6 +43,31 @@ with lakeflow.schema() as schema:
 ```
 
 The result is an `EphemeralJob`, the same object that `lakeflow.job()` returns. `run()`, `only`, the keep rules and the result objects all work the same way, and `with` is optional.
+
+### For-each bodies
+
+A three-part `ref` names the task nested in a for-each task, its body, and `input=` gives the one item it runs with. The job holds the body in place of the for-each task, so it runs once, as an ordinary task, and `run.task()` describes it by its own key. In the `for_each` integration bundle, the for-each task `loop` of `fanout_objects` runs `inner` over a list of objects, after `extract`, which sets the task value `rows`:
+
+```python
+def test_nested_task_runs_once(lakeflow: Lakeflow) -> None:
+    with lakeflow.task(
+        "fanout_objects.loop.inner",
+        input={"id": 7, "path": "/x"},
+        upstream_task_values={"extract": {"rows": 3}},
+    ) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.executed_tasks == ["inner"]
+        assert run.task("inner").parameters["item_id"] == "7.0"
+```
+
+The body's `{{input}}` and `{{input.<key>}}` references become `{{job.parameters.__pytest_input}}` and `{{job.parameters.__pytest_input_<key>}}`, job parameters whose defaults hold the text an iteration over that item would give them. A for-each iteration in the workspace gives a string as it is and an integer item as written, but writes an object as compact JSON with every number as a double, so `{"id": 7, "path": "/x"}` gives `{{input}}` `{"id":7.0,"path":"/x"}` and `{{input.id}}` `7.0`, and the plugin does the same. Read an object with `json.loads` rather than comparing its text: for an object with more than a few keys, the platform does not keep their order. `JobRun.parameters` leaves the `__pytest_input` parameters out.
+
+- The body keeps all of its own settings, and takes the for-each task's `depends_on`, so `upstream_task_values` and `upstream_from` stub the for-each task's upstream tasks. The for-each task's `inputs` and `concurrency` are dropped.
+- `task_params` and `task_overrides` name the body by its own key, such as `task_params={"inner": {"limit": "10"}}`. A value in `task_params` may refer to `{{input}}` too.
+- `input` is a string, number, boolean or mapping, as a for-each item is. `None` means not given, and the platform refuses `null` as an item anyway.
+- `lakeflow.task()` raises `LakeflowError` before anything is created when the for-each task has no task with that key, when the body refers to `{{input}}` and `input` is missing, when `input` is given and the body does not refer to it or lacks a key the body reads, when it contains `{{`, or when it makes the job parameters longer than the 10,000 characters as JSON that `jobs/create` accepts. `input=` with a two-part `ref` raises too.
+- A body that sets task values fails in its loop, because an iteration cannot set them ("setting task values is not supported for iterations"), but succeeds once lifted. `capture_task_values` on a body only shows what it would set outside a loop.
 
 ## How stubs resolve
 

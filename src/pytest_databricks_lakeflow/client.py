@@ -43,10 +43,12 @@ from pytest_databricks_lakeflow.settings import (
     check_task_params,
     disable_tasks,
     disabled_task_keys,
+    inject_input,
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
     inject_trigger,
+    lift_nested_task,
     lint,
     merge_environments,
     override_for_each_inputs,
@@ -531,6 +533,7 @@ class Lakeflow:
         pipelines: Pipelines = "deployed",
         schema: str | None = None,
         for_each_inputs: Sequence[object] | None = None,
+        input: object | None = None,
         trigger: Mapping[str, str] | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
@@ -544,8 +547,17 @@ class Lakeflow:
         depends on is stubbed with its `task_values` in that run. The platform returns no task values with a run, so
         that run must have captured them, with `capture_task_values={"<upstream key>": [...]}` on `job()`.
 
+        A three-part `ref` names the task nested in a for-each task, such as `"fanout.loop.inner"`. The job holds that
+        task in place of the for-each task, so it runs once, as an ordinary task, with `input` as its iteration input
+        and the for-each task's upstream tasks as its own:
+
+            upstream = {"extract": {"rows": 3}}
+            with lakeflow.task("fanout.loop.inner", input={"id": 7}, upstream_task_values=upstream) as task:
+                assert task.run().task("inner").parameters["item_id"] == "7.0"
+
         Args:
-            ref: The job and task as `"job_key.task_key"`.
+            ref: The job and task as `"job_key.task_key"`, or `"job_key.loop_key.nested_key"` for the task nested in
+                the for-each task `loop_key`.
             params: Job parameters for every run.
             upstream_task_values: By upstream task key, a mapping of value keys to values, or a `Stub` with `values`
                 and `outputs`. An entry replaces the values `upstream_from` holds for that task.
@@ -566,6 +578,11 @@ class Lakeflow:
             schema: The full name of the schema the pipeline copy publishes to, as for `job()`.
             for_each_inputs: The list the task iterates over when it is a for-each task, such as `["a"]`, as for
                 `job()`.
+            input: The iteration input of the nested task a three-part `ref` names: a string, number, boolean or
+                mapping, such as `{"id": 7}`. Its `{{input}}` and `{{input.<key>}}` references take it through job
+                parameters, written as an iteration writes them: a string as it is, an integer input as written, and
+                anything else as compact JSON with every number in a mapping as a double, so `{"id": 7}` gives
+                `{{input}}` `'{"id":7.0}'` and `{{input.id}}` `"7.0"`. `None` means not given.
             trigger: The values the task's `{{job.trigger.<path>}}` references take, by the path after
                 `job.trigger.`, as for `job()`.
 
@@ -584,7 +601,11 @@ class Lakeflow:
                 cannot be applied, `setup` or `teardown` cannot run, `teardown_at` cannot be used, `pipelines` and
                 `schema` do not fit the task,
                 or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used, or
-                `trigger` cannot be applied.
+                `trigger` cannot be applied. Also if `ref` has neither two nor three parts, a three-part `ref` names
+                no task nested in a for-each task, `input` is given with a two-part `ref` or for a nested task that
+                does not refer to `{{input}}`, is missing for one that does, is not a string, number, boolean or
+                mapping, lacks a key a reference names, contains `{{` or is not JSON-serialisable, or makes the job
+                parameters longer than the 10,000 characters as JSON that `jobs/create` accepts.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
@@ -593,10 +614,20 @@ class Lakeflow:
         _check_teardown_at(teardown_at, teardown)
         notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
-        job_key, _, task_key = ref.partition(".")
-        if not job_key or not task_key:
-            raise LakeflowError(f"Expected 'job_key.task_key', got {ref!r}")
+        parts = ref.split(".")
+        if len(parts) not in (2, 3) or not all(parts):
+            raise LakeflowError(f"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key', got {ref!r}")
+        nested = len(parts) == 3
+        if input is not None and not nested:
+            raise LakeflowError(
+                "input= gives the iteration input of a for_each_task body, so ref must be "
+                f"'job_key.loop_key.nested_key', got {ref!r}"
+            )
+        job_key, task_key = parts[0], parts[-1]
         settings = self.template(job_key)
+        if nested:
+            # First, so that task_params, task_overrides and upstream_from see the body as the task under test.
+            lift_nested_task(settings, parts[1], task_key)
         # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
@@ -604,6 +635,9 @@ class Lakeflow:
         # Applied first, as in job().
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
         check_task_params(job_key, settings, task_params or {}, params or {})
+        if nested:
+            # After task_params, so that a value it gives may refer to {{input}} as well.
+            inject_input(settings, task_key, input)
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
