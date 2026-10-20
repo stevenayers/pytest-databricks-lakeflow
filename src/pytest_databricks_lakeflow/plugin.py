@@ -121,6 +121,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         dest="lakeflow_live",
         help="Print each task state change to the terminal while a run waits.",
     )
+    group.addoption(
+        "--lakeflow-max-concurrent-runs",
+        dest="lakeflow_max_concurrent_runs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Start a run only while fewer than N runs started by this process are active, waiting for one to end "
+        "otherwise. The cap is per xdist worker. Overrides Lakeflow(max_concurrent_runs=...).",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -150,9 +159,17 @@ def pytest_configure(config: pytest.Config) -> None:
         report_dir=report_dir,
         debug_notebook=config.getoption("lakeflow_debug_notebook"),
         live=config.getoption("lakeflow_live"),
+        max_concurrent_runs=_max_concurrent_runs(config),
     )
     config.stash[STATE] = state
     activate(state)
+
+
+def _max_concurrent_runs(config: pytest.Config) -> int | None:
+    value = config.getoption("lakeflow_max_concurrent_runs")
+    if value is not None and value < 1:
+        raise pytest.UsageError(f"--lakeflow-max-concurrent-runs must be 1 or more, got {value}")
+    return value
 
 
 def parse_duration(value: str) -> timedelta:

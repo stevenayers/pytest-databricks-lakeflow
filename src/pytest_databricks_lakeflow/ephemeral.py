@@ -163,6 +163,8 @@ class EphemeralJob:
         self._ran = False
         self._run_urls: dict[int, str] = {}
         self._active: dict[int, pytest.Item] = {}
+        # The cap whose slots this job's runs hold, under --lakeflow-max-concurrent-runs or max_concurrent_runs.
+        self._slots: session.RunSlots | None = None
         self._entered = False
         self._closed = False
         self._timeout_raised = False
@@ -365,7 +367,9 @@ class EphemeralJob:
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
                 is set and the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`.
                 Also if `replay` is passed without `only` or to a job that has been created, is a run of another job, or
-                lacks the captured values of a task it would stub. Each is raised before the run starts.
+                lacks the captured values of a task it would stub. Each is raised before the run starts. Also if
+                no run ends within `timeout` while the process has as many runs active as `max_concurrent_runs`
+                allows, as for `start()`.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -412,6 +416,10 @@ class EphemeralJob:
         with `--lakeflow-report-dir` the cancelled run is listed in report.json. The job allows one run at a time,
         so start runs of different jobs to run them side by side.
 
+        Under `--lakeflow-max-concurrent-runs` or `Lakeflow`'s `max_concurrent_runs`, when the process already has
+        that many runs active, it waits for one of them to end before starting the run, for at most `timeout`. While
+        it waits it polls those runs, so a run that has ended frees its slot even if nobody has waited for it.
+
         Args:
             params: Job parameters for this run only, as for `run()`.
             only: Task keys to run, as for `run()`.
@@ -435,7 +443,8 @@ class EphemeralJob:
                 task or a task that is disabled in the copy or downstream of a disabled task, which the platform
                 would run, a selected task refers to the task values or the output of a task that `only` leaves out
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, or a
-                selection is set and the installed databricks-sdk cannot send it.
+                selection is set and the installed databricks-sdk cannot send it. Also if no run ends within `timeout`
+                while the process has as many runs active as `max_concurrent_runs` allows.
             ValueError: If `performance_target` is not a known performance target.
         """
         return self._start(
@@ -488,7 +497,13 @@ class EphemeralJob:
         if timeout is not None:
             self._raise_timeout(timeout)
         run_id, first = self._start_run(
-            item, merged, selected, performance_target=target, queue=queue_settings, pipeline_params=refresh
+            item,
+            merged,
+            selected,
+            performance_target=target,
+            queue=queue_settings,
+            pipeline_params=refresh,
+            timeout=timeout,
         )
         return RunHandle(self, run_id, item, first, timeout, stream=stream)
 
@@ -521,22 +536,37 @@ class EphemeralJob:
         performance_target: jobs.PerformanceTarget | None = None,
         queue: jobs.QueueSettings | None = None,
         pipeline_params: jobs.PipelineParams | None = None,
+        timeout: timedelta | None = None,
     ) -> tuple[int, jobs.Run]:
-        """Start a run with a fresh idempotency token, track it until it ends, and return its id and first poll."""
+        """Start a run with a fresh idempotency token, track it until it ends, and return its id and first poll.
+
+        Under a cap on active runs, a slot is taken first, waiting up to `timeout`, by default `Lakeflow`'s.
+        """
         assert self.job_id is not None
         ws = self.lakeflow.ws
+        if timeout is None:
+            timeout = self.lakeflow.timeout
+        slots = self._take_slot(timeout)
         token = uuid.uuid4().hex
-        waiter = ws.jobs.run_now(
-            job_id=self.job_id,
-            idempotency_token=token,
-            job_parameters=dict(params) or None,
-            only=only,
-            performance_target=performance_target,
-            queue=queue,
-            pipeline_params=pipeline_params,
-        )
+        try:
+            waiter = ws.jobs.run_now(
+                job_id=self.job_id,
+                idempotency_token=token,
+                job_parameters=dict(params) or None,
+                only=only,
+                performance_target=performance_target,
+                queue=queue,
+                pipeline_params=pipeline_params,
+            )
+        except BaseException:
+            if slots is not None:
+                slots.semaphore.release()
+            raise
         run_id = cast(jobs.RunNowResponse, waiter.response).run_id
         assert run_id is not None
+        if slots is not None:
+            slots.hold(run_id, self)
+            self._slots = slots
         self._active[run_id] = item
         self.lakeflow.active_runs.add(run_id)
         self._ran = True
@@ -545,6 +575,41 @@ class EphemeralJob:
         first = ws.jobs.get_run(run_id)
         self._record_url(run_id, first, item)
         return run_id, first
+
+    def _take_slot(self, timeout: timedelta) -> session.RunSlots | None:
+        """Take a slot under the cap on this process's active runs, waiting up to `timeout`. `None` without a cap.
+
+        While every slot is held, the runs holding them are polled every poll interval and the slot of each run that
+        has ended is given back, so that runs started one after another in one thread do not wait for a `wait()`.
+
+        Raises:
+            LakeflowError: If no slot frees within `timeout`.
+        """
+        slots = session.current().run_slots(self.lakeflow.max_concurrent_runs)
+        if slots is None:
+            return None
+        if slots.semaphore.acquire(blocking=False):
+            return slots
+        log.info(
+            "Waiting to start a run of job %s until one of the active runs %s ends, under max_concurrent_runs=%s",
+            self.job_id,
+            sorted(slots.holders),
+            slots.cap,
+        )
+        deadline = time.monotonic() + timeout.total_seconds()
+        interval = _poll_seconds(self.lakeflow)
+        while True:
+            _release_ended(slots)
+            if slots.semaphore.acquire(timeout=min(interval, max(deadline - time.monotonic(), 0.0))):
+                return slots
+            if time.monotonic() >= deadline:
+                break
+        runs = "run" if slots.cap == 1 else "runs"
+        raise LakeflowError(
+            f"No run slot freed within {timeout} to start a run of {self.job_key!r}: this process may have "
+            f"{slots.cap} {runs} active at once (--lakeflow-max-concurrent-runs or max_concurrent_runs), and runs "
+            f"{sorted(slots.holders)} are still active. Wait for or cancel one of them first, or pass a longer timeout."
+        )
 
     def _replay(self, run: JobRun, only: Sequence[str] | None) -> None:
         """Stub the tasks that `only` leaves out and a selected task depends on, with their values in `run`."""
@@ -1004,6 +1069,8 @@ class EphemeralJob:
     def _forget(self, run_id: int) -> None:
         self._active.pop(run_id, None)
         self.lakeflow.active_runs.discard(run_id)
+        if self._slots is not None:
+            self._slots.release(run_id)
 
 
 class RunHandle:
@@ -1319,6 +1386,18 @@ def _poll_seconds(lakeflow: Lakeflow) -> float:
     if lakeflow.poll_interval is not None:
         return lakeflow.poll_interval.total_seconds()
     return POLL_SECONDS
+
+
+def _release_ended(slots: session.RunSlots) -> None:
+    """Give back the slot of each run holding one that has ended, though nobody has waited for it yet."""
+    for run_id, job in list(slots.holders.items()):
+        try:
+            run = job.lakeflow.ws.jobs.get_run(run_id)
+        except DatabricksError as e:
+            log.debug("Could not poll run %s while waiting for a run slot: %s", run_id, e)
+            continue
+        if terminated(run):
+            slots.release(run_id)
 
 
 def stop_update(ws: WorkspaceClient, pipeline_id: str) -> None:

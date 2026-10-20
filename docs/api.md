@@ -27,6 +27,7 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 | `--lakeflow-debug-notebook` | When a test fails, write a notebook for each notebook task that failed in the last run of each of its jobs, which replays the task's resolved parameters. See [Reproduce a failed notebook task](job-tests.md#reproduce-a-failed-notebook-task). |
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](configuration.md#report-directory). |
 | `--lakeflow-live` | Print each task state change to the terminal while a run waits, as `run(stream=True)` does for one run. Under xdist the lines are only logged. See [logging and reports](configuration.md#logging-and-reports). |
+| `--lakeflow-max-concurrent-runs=N` | Start a run only while fewer than `N` runs started by this process are active, and otherwise wait for one to end. Overrides `Lakeflow(max_concurrent_runs=...)`. The cap is per xdist worker. |
 
 ## `Lakeflow`
 
