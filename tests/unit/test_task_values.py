@@ -28,7 +28,7 @@ from pytest_databricks_lakeflow.settings import (
 )
 
 from .conftest import FakeCli, configure_lakeflow
-from .fakes import FakeWorkspaceClient, example_settings, for_each_settings, make_run, recorded
+from .fakes import FakeWorkspaceClient, dbt_settings, example_settings, for_each_settings, make_run, recorded
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
@@ -601,6 +601,33 @@ class TestEndToEnd:
         [created] = fake_ws.jobs.created
         assert [t.task_key for t in created["tasks"]] == ["loop"]
         assert created["tasks"][0].for_each_task.inputs == '["a"]'
+
+    def test_dbt_commands_on_a_task_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["analytics"] = fake_ws.jobs.add(dbt_settings())
+        fake_ws.jobs.queue(make_run(81, {"dbt_build": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_task(lakeflow):
+                commands = ["dbt build --select tag:ci"]
+                with lakeflow.task("analytics.dbt_build", task_params={"dbt_build": commands}) as task:
+                    assert task.run().succeeded
+
+            def test_no_commands(lakeflow):
+                with pytest.raises(LakeflowError, match="dbt commands must not be empty"):
+                    lakeflow.task("analytics.dbt_build", task_params={"dbt_build": []})
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=2)
+        [created] = fake_ws.jobs.created
+        [dbt_build] = created["tasks"]
+        assert dbt_build.dbt_task.commands == ["dbt build --select tag:ci"]
+        assert dbt_build.dbt_task.warehouse_id == "w1"
 
     def test_job_capture_task_values_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(*recorded("probe_failure"))

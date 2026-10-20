@@ -215,6 +215,34 @@ def test_refresh_into_a_temporary_schema(lakeflow: Lakeflow) -> None:
 
 The copy is deleted with the tables it publishes when the task job closes, so check them inside the `with` block. See [Pipelines](job-tests.md#pipelines) for what the copy keeps and drops.
 
+## dbt tasks
+
+A dbt task's `commands` are a list, so [`task_params`](job-tests.md#make-a-job) replaces them in the copy, here to build only the models tagged `ci`. The list replaces every command, so keep `dbt deps` when the project has packages. The task's `warehouse_id`, `catalog`, `schema` and `project_directory` stay as deployed. An empty list raises `LakeflowError` before the job is created.
+
+The platform hands out the artefacts dbt wrote as `run.task(...).dbt_output.artifacts_link`, a pre-signed URL to a tarball that it signs for 30 minutes, fetched with the headers in `artifacts_headers`. The plugin does not download them, so do it in the test, straight after the run:
+
+```python
+import tarfile
+import urllib.request
+from pathlib import Path
+
+
+def test_ci_models(lakeflow: Lakeflow, tmp_path: Path) -> None:
+    commands = ["dbt deps", "dbt build --select tag:ci"]
+    with lakeflow.task("analytics.dbt_build", task_params={"dbt_build": commands}) as task:
+        run = task.run()
+    assert run.succeeded, run
+    dbt = run.task("dbt_build").dbt_output
+    assert dbt is not None and dbt.artifacts_link
+    request = urllib.request.Request(dbt.artifacts_link, headers=dbt.artifacts_headers or {})
+    with urllib.request.urlopen(request) as response:
+        (tmp_path / "artifacts.tar.gz").write_bytes(response.read())
+    with tarfile.open(tmp_path / "artifacts.tar.gz") as archive:
+        archive.extractall(tmp_path / "artifacts", filter="data")
+```
+
+`dbt_output` is `None` when the platform reported no output for the task. `--lakeflow-report-dir` keeps the link in report.json and leaves out the headers, which can carry its signature.
+
 ## Running a subset of a task job
 
 `only` works on task jobs too. The plugin adds the stubs that the selected tasks depend on, the probes on them and the setup and teardown tasks, so `run(only=["transform"])` still runs the stubs first and the probe afterwards.

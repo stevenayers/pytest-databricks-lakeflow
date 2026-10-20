@@ -706,7 +706,9 @@ class TaskRun:
             none.
         alert_output: The output of an alert task, with its `alert_state`. `None` for any other task or when the
             platform reported none.
-        dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`.
+        dbt_output: The output of a dbt task, with `artifacts_link` and `artifacts_headers`, or `None`. The link is a
+            pre-signed URL to a tarball of the dbt artefacts that the platform signs for 30 minutes; fetch it with
+            the headers before then. report.json keeps the link and leaves out the headers.
         run_job_output: The output of a run-job task, with the triggered run's `run_id`, or `None`.
         child_run_id: The id of the job run that a run-job task triggered, from `run_job_output.run_id`. The run is
             of the deployed child job, not a copy, so the plugin does not cancel or delete it. `None` for any other
@@ -1123,8 +1125,8 @@ def serialise(run: JobRun) -> dict[str, Any]:
     `execution_seconds` and `cleanup_seconds`; `error` is a dict of `type`, `message`, `trace`, `root_cause` and
     `code`, or `None`; `task_values` is a plain dict and `missing_task_value_reasons` holds the reason for each of
     `missing_task_values`; the outputs of SQL, alert, dbt, run-job, dashboard and clean room tasks are the dicts of
-    the Jobs API; `pipeline_update` is a dict of `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or
-    `None`. The run also gets `succeeded`.
+    the Jobs API, except that a dbt output leaves out `artifacts_headers`; `pipeline_update` is a dict of
+    `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or `None`. The run also gets `succeeded`.
 
     `logs` and the exported `notebook` are left out, because logs can reach 5 MB per task. Instead `logs_file` and
     `notebook_file` name where `--lakeflow-report-dir` saves them, relative to the test's report directory:
@@ -1228,7 +1230,7 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
         "condition_outcome": task.condition_outcome,
         "sql_output": _as_dict(task.sql_output),
         "alert_output": _as_dict(task.alert_output),
-        "dbt_output": _as_dict(task.dbt_output),
+        "dbt_output": _serialise_dbt_output(task.dbt_output),
         "run_job_output": _as_dict(task.run_job_output),
         "child_run_id": task.child_run_id,
         "child_run": child_run,
@@ -1259,6 +1261,15 @@ def _serialise_timing(timing: Timing) -> dict[str, float]:
         "execution_seconds": timing.execution.total_seconds(),
         "cleanup_seconds": timing.cleanup.total_seconds(),
     }
+
+
+def _serialise_dbt_output(output: jobs.DbtOutput | None) -> dict[str, Any] | None:
+    # The artifacts headers can carry a signature for the pre-signed link, valid for 30 minutes, so report.json keeps
+    # only the link.
+    data = _as_dict(output)
+    if data is not None:
+        data.pop("artifacts_headers", None)
+    return data
 
 
 def _as_dict(output: Any) -> dict[str, Any] | None:

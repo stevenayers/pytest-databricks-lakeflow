@@ -54,6 +54,7 @@ from pytest_databricks_lakeflow.settings import (
 from .conftest import NEEDS_REFRESH_SELECTION
 from .fakes import (
     branching_settings,
+    dbt_settings,
     example_settings,
     for_each_settings,
     parent_settings,
@@ -747,6 +748,21 @@ class TestTaskParams:
         with pytest.raises(LakeflowError, match=match):
             apply_task_params("my_job", settings, {"transform": {"limit": "10"}, "extract": value})
         assert settings == before
+
+    def test_apply_task_params_replaces_dbt_commands_and_refuses_none(self) -> None:
+        settings = apply_task_params("analytics", dbt_settings(), {"dbt_build": ["dbt build --select tag:ci"]})
+        dbt = task(settings, "dbt_build").dbt_task
+        assert dbt is not None
+        assert dbt.commands == ["dbt build --select tag:ci"]
+        assert (dbt.warehouse_id, dbt.catalog, dbt.schema) == ("w1", "prod_catalog", "analytics")
+        settings = dbt_settings()
+        before = copy.deepcopy(settings)
+        with pytest.raises(LakeflowError, match=r"task_params\['dbt_build'\]: dbt commands must not be empty"):
+            apply_task_params("analytics", settings, {"dbt_build": []})
+        assert settings == before
+        script = with_tasks({"task_key": "code", "spark_python_task": {"python_file": "/x.py", "parameters": ["-v"]}})
+        python = task(apply_task_params("my_job", script, {"code": []}), "code").spark_python_task
+        assert python is not None and python.parameters == []
 
     def test_apply_task_params_rejects_unknown_and_reserved_keys(self) -> None:
         settings = inject_probes(example_settings(), {"transform": ["k"]}, HELPERS)
