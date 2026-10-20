@@ -5,12 +5,12 @@ description: Write pytest tests for Lakeflow Jobs defined in a Databricks Asset 
 
 # Testing Lakeflow Jobs with pytest-databricks-lakeflow
 
-The plugin deploys a bundle target once per session, then gives each test a throwaway copy of a job or of one task, runs it with chosen parameters, and deletes it. Full docs: https://stevenayers.github.io/pytest-databricks-lakeflow/ (machine-readable index: https://stevenayers.github.io/pytest-databricks-lakeflow/llms.txt).
+The plugin deploys a bundle target once per session, then gives each test a throwaway copy of a job or of one task, runs it with chosen parameters, and deletes it. Full docs: https://stevenayers.github.io/pytest-databricks-lakeflow/ (machine-readable index: https://stevenayers.github.io/pytest-databricks-lakeflow/llms.txt). The Recipes section of the docs has an "I want to..." index with a checked snippet for every option listed below.
 
 ## Before writing a test
 
 1. Read the job in the bundle (`resources/*.yml` or wherever `include:` points). Note the resource key, the task keys, the declared `parameters`, and which tasks set or read task values.
-2. Check `databricks.yml` has the target the tests use (default `test`). Recommend `mode: development` and a separate `workspace.root_path`. If several branches or people share the workspace, recommend the per-branch recipe from the docs ("Isolating test deployments"): a `lakeflow_suffix` variable in `root_path`, `experimental.skip_artifact_cleanup: true`, the sanitised branch name passed as `Lakeflow(variables={"lakeflow_suffix": ...})` from the `lakeflow` fixture in `conftest.py`, and `pytest --lakeflow-destroy` at the end of the pipeline.
+2. Check `databricks.yml` has the target the tests use (default `test`). Recommend `mode: development` and a separate `workspace.root_path`. If several branches or people share the workspace, recommend the per-branch recipe from the docs ("Give each branch and identity its own deployment" under Recipes, Bundle deployments): a `lakeflow_suffix` variable in `root_path`, `experimental.skip_artifact_cleanup: true`, the sanitised branch name passed as `Lakeflow(variables={"lakeflow_suffix": ...})` from the `lakeflow` fixture in `conftest.py`, and `pytest --lakeflow-destroy` at the end of the pipeline.
 3. Check the job code reads catalog and schema from job parameters, not bundle variables. If it does not, say so; per-test schemas cannot work otherwise.
 4. Look for an existing `lakeflow` fixture override in `conftest.py`. Reuse it. Create one only if configuration is needed (another target, a `catalog`, a `profile`, a longer `timeout`).
 
