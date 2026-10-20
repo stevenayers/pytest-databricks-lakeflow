@@ -3,6 +3,30 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.8.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.7.0...v0.8.0) (2026-10-20)
+
+
+### Features
+
+* check permissions and run_as before deploying or creating a copy ([#163](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/163)) ([cd5fd42](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/cd5fd4229aac6341829bf02196faafce0b568697))
+* expose the pipeline update of a pipeline task and cover a full refresh end to end ([#161](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/161)) ([a60402d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/a60402dfcbb9077fd05ddf0f1fb2aa779f6c638f))
+* stub {{tasks.&lt;key&gt;.output.*}} references with Stub(values=, outputs=) ([#162](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/162)) ([e76111e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/e76111e01a4fb51c757f37267f5b805a5f2cc326))
+* warn when extra_dependencies cannot reach notebook tasks ([#167](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/167)) ([ba5b580](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/ba5b5801838c162fbef3a87c012507dada403ec9))
+* write a debug notebook that replays a failed notebook task's resolved parameters ([#164](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/164)) ([36cc166](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/36cc166b12aa5862ea1e488d7c0118b192c5474b))
+
+
+### Bug Fixes
+
+* file tasks downstream of a disabled task under disabled_tasks and report an all-disabled run honestly ([#165](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/165)) ([2e5e011](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/2e5e0118faba5c84bfa5f0c24788278a00a9e1ce))
+* land the wave 4 and wave 5 review notes and run the integration suite at -n 8 ([#170](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/170)) ([6e75576](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6e755767cf92f892b39986582f639e57f0bd6d2e))
+* settle the wave 5 bugs in pipeline, alert and debug notebook reporting and check the host before deploying ([#171](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/171)) ([174d65e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/174d65e6f3d691a6fdf77b1474ada50b2c129c81))
+* spread the workspace client retries of xdist workers that race on the CLI token refresh ([#166](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/166)) ([dd2a14e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/dd2a14e7efde9d19da3df1b611fe1c16837a467d))
+
+
+### Documentation
+
+* record that a successful saved query task reports no rows ([#169](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/169)) ([80cb6f3](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/80cb6f3bec8fb58839a664cc7702d288b4e87c1c))
+
 ## [0.7.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.6.0...v0.7.0) (2026-10-19)
 
 
