@@ -26,6 +26,7 @@ from .fakes import (
     FakeWorkspaceClient,
     branching_settings,
     example_settings,
+    for_each_settings,
     make_run,
     parent_settings,
     pipeline_settings,
@@ -1340,6 +1341,42 @@ class TestForcedConditions:
         )
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*Task 'check_input' in force_conditions has no condition_task*"])
+        assert fake_ws.jobs.created == []
+
+
+class TestForEachInputs:
+    """Replacing the input list of the copy's for-each tasks."""
+
+    @pytest.mark.parametrize(
+        ("arguments", "inputs"),
+        [
+            pytest.param(', for_each_inputs={"loop": ["a", "b"]}', '["a", "b"]', id="override"),
+            pytest.param("", '["a", "b", "c"]', id="as-deployed"),
+        ],
+    )
+    def test_for_each_inputs_reach_the_created_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, arguments: str, inputs: str
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(for_each_settings())
+        fake_ws.jobs.queue(make_run(81, {"loop": "SUCCESS", "after": "SUCCESS"}))
+        source = f'def test_job(lakeflow):\n    with lakeflow.job("fanout"{arguments}) as job:\n        job.run()\n'
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        [created] = fake_ws.jobs.created
+        tasks = {t.task_key: t for t in created["tasks"]}
+        template = {t.task_key: t for t in for_each_settings().tasks or []}
+        assert tasks["loop"].for_each_task.inputs == inputs
+        assert tasks["loop"].for_each_task.task.task_key == "each"
+        assert tasks["after"].depends_on == [jobs.TaskDependency(task_key="loop")]
+        assert tasks["after"].notebook_task == template["after"].notebook_task
+
+    def test_for_each_inputs_for_an_unknown_task_fail_before_creation(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(for_each_settings())
+        source = 'def test_job(lakeflow):\n    lakeflow.job("fanout", for_each_inputs={"nope": []})\n'
+        result = run_tests(pytester, source)
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines(["*Unknown task 'nope' in for_each_inputs. For-each tasks: ?'loop'?*"])
         assert fake_ws.jobs.created == []
 
 
