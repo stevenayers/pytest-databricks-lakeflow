@@ -1023,7 +1023,9 @@ class EphemeralJob:
         The job is deleted even when the polling is interrupted. The pipeline copies go after the job, with the same
         keep rules, so a kept job never points at a deleted pipeline, and they go even when deleting the job fails.
         When the job was never created, no job points at them, so `keep_failed` does not keep them. The SQL files of
-        `query_files` go with the job, or stay with it, the same way; a failure to delete one only logs a warning.
+        `query_files` stay with a kept job and are deleted otherwise. Unlike the pipeline copies, they are deleted when
+        the job was never created even when `keep` or `--lakeflow-keep` is on. A failure to delete one only logs a
+        warning.
 
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.

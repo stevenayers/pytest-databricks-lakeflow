@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import http.client
 import itertools
 import json
@@ -383,6 +384,7 @@ class FakeWorkspace:
         self.upload_errors: dict[str, Exception] = {}
         self.list_calls: list[str] = []
         self.list_errors: dict[str, Exception] = {}
+        self.delete_errors: dict[str, Exception] = {}
         self._ids = itertools.count(5000)
 
     def mkdirs(self, path: str) -> None:
@@ -437,6 +439,10 @@ class FakeWorkspace:
         return iter(inside)
 
     def delete(self, path: str, **kwargs: Any) -> None:
+        """Delete `path`, unless it matches a glob in `delete_errors`, which raises that glob's error."""
+        for pattern, error in self.delete_errors.items():
+            if fnmatch.fnmatch(path, pattern):
+                raise error
         self.deleted.append(path)
         self.objects.discard(path)
 

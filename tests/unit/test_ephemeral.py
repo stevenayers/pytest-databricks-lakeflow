@@ -2442,26 +2442,46 @@ class TestSavedQueries:
         assert fake_ws.jobs.created == []
         assert query_files(fake_ws) == {}
 
-    @pytest.mark.parametrize(
-        ("source", "kept"),
-        [
-            pytest.param("    assert False\n", True, id="kept_with_the_failed_job"),
-            pytest.param("    raise LakeflowError('before')\n", False, id="job_never_created"),
-        ],
-    )
-    def test_files_go_and_stay_with_their_job(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str, kept: bool
-    ) -> None:
-        create = "    job.create()\n" if kept else ""
+    def test_files_stay_with_a_kept_job(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(
             pytester,
-            "from pytest_databricks_lakeflow import LakeflowError\n\n\ndef test_job(lakeflow):\n"
-            f'    job = lakeflow.job("reports", saved_queries="inline")\n{create}{source}',
+            'def test_job(lakeflow):\n    lakeflow.job("reports", saved_queries="inline").create()\n    assert False\n',
         )
         result.assert_outcomes(failed=1)
-        assert len(query_files(fake_ws)) == (2 if kept else 0)
+        assert len(query_files(fake_ws)) == 2
         assert fake_ws.workspace.deleted == []
         assert fake_ws.jobs.deleted == []
+
+    def test_files_go_when_the_job_is_never_created(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
+        result = run_tests(
+            pytester, 'def test_job(lakeflow):\n    lakeflow.job("reports", saved_queries="inline").create()\n'
+        )
+        result.assert_outcomes(failed=1)
+        result.stdout.fnmatch_lines([f"*PermissionDenied: {DENIED}"])
+        # No job points at the files, so keep_failed, which keeps a failed test's job, does not keep them.
+        uploads = query_files(fake_ws)
+        assert len(uploads) == 2
+        assert sorted(fake_ws.workspace.deleted) == sorted(uploads)
+
+    def test_a_failed_delete_only_warns(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.workspace.delete_errors["*/query_*_totals_*.sql"] = PermissionDenied("No permission to delete.")
+        result = run_tests(
+            pytester,
+            'def test_job(lakeflow):\n    lakeflow.job("reports", saved_queries="inline").create()\n',
+            "-o",
+            "log_cli=true",
+            "--log-cli-level=WARNING",
+        )
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines(
+            ["*Could not delete */query_*_totals_*.sql, which --lakeflow-sweep-notebooks deletes later: No permission*"]
+        )
+        [each] = [path for path in query_files(fake_ws) if "_each_" in path]
+        assert fake_ws.workspace.deleted == [each]
+        assert len(fake_ws.jobs.deleted) == 1
 
     def test_a_bad_value_raises_value_error(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         result = run_tests(
