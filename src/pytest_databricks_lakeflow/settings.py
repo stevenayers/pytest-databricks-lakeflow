@@ -12,7 +12,7 @@ from dataclasses import dataclass, fields
 from datetime import timedelta
 from typing import Any, Literal, get_args
 
-from databricks.sdk.service import compute, jobs
+from databricks.sdk.service import compute, jobs, pipelines
 
 from pytest_databricks_lakeflow.bundle import split_extras
 from pytest_databricks_lakeflow.errors import LakeflowError
@@ -35,11 +35,18 @@ STRIPPED = (
 )
 TASK_STRIPPED = ("email_notifications", "webhook_notifications", "notification_settings")
 CREATE_PARAMETERS = frozenset(inspect.signature(jobs.JobsAPI.create).parameters) - {"self"}
+PIPELINE_CREATE_PARAMETERS = frozenset(inspect.signature(pipelines.PipelinesAPI.create).parameters) - {"self"}
+# What would make a pipeline copy run on its own, notify people or count as bundle-managed, and its event log, which
+# would write the copy's events into the deployed pipeline's event log table.
+PIPELINE_STRIPPED = ("id", "deployment", "continuous", "trigger", "notifications", "event_log")
 NAME_PREFIX = "[pytest] "
 RunAs = Literal["keep"] | str | jobs.JobRunAs | None
 SideEffects = Literal["neutralise", "keep"]
 SIDE_EFFECTS: tuple[str, ...] = get_args(SideEffects)
 MAX_NAME_BYTES = 4096
+# pipelines/create refuses a longer name with "Name cannot be longer than 255 characters.", counting characters, not
+# bytes: 255 characters of 479 bytes are accepted.
+MAX_PIPELINE_NAME_CHARS = 255
 MAX_TAG_BYTES = 256
 MAX_TAGS = 25
 MAX_DESCRIPTION_BYTES = 27700
@@ -206,7 +213,7 @@ def sanitise(
     if description is not None:
         parts = [description, settings.description] if settings.description else [description]
         settings.description = _trim("\n\n".join(parts), MAX_DESCRIPTION_BYTES)
-    _add_tags(settings, tags)
+    settings.tags = _merged_tags(settings.tags, tags, "job")
     return settings
 
 
@@ -288,24 +295,90 @@ def _mirror_timeout(settings: jobs.JobSettings, timeout: timedelta) -> None:
         settings.timeout_seconds = mirrored
 
 
-def _add_tags(settings: jobs.JobSettings, tags: Mapping[str, str]) -> None:
+def _merged_tags(current: Mapping[str, str] | None, tags: Mapping[str, str], what: str) -> dict[str, str]:
+    """Add `tags` to the tags a job or pipeline has, the attribution tags only while there is room for them."""
     required = {key: tag_value(value) for key, value in tags.items() if key not in ATTRIBUTION_TAGS}
-    settings.tags = {**(settings.tags or {}), **required}
-    if len(settings.tags) > MAX_TAGS:
+    merged = {**(current or {}), **required}
+    if len(merged) > MAX_TAGS:
         raise LakeflowError(
-            f"The job would have {len(settings.tags)} tags, more than the {MAX_TAGS} allowed. "
-            f"Remove {len(settings.tags) - MAX_TAGS} from the template: {sorted(settings.tags)}"
+            f"The {what} would have {len(merged)} tags, more than the {MAX_TAGS} allowed. "
+            f"Remove {len(merged) - MAX_TAGS} from the template: {sorted(merged)}"
         )
     dropped = []
     for key in ATTRIBUTION_TAGS:
         if key not in tags:
             continue
-        if key in settings.tags or len(settings.tags) < MAX_TAGS:
-            settings.tags[key] = tag_value(tags[key])
+        if key in merged or len(merged) < MAX_TAGS:
+            merged[key] = tag_value(tags[key])
         else:
             dropped.append(key)
     if dropped:
-        log.debug("Left out the tags %s, because the job already has %d tags", dropped, MAX_TAGS)
+        log.debug("Left out the tags %s, because the %s already has %d tags", dropped, what, MAX_TAGS)
+    return merged
+
+
+def sanitise_pipeline(
+    spec: pipelines.PipelineSpec,
+    name: str,
+    tags: Mapping[str, str],
+    *,
+    schema: str,
+    configuration: Mapping[str, str] | None = None,
+    budget_policy_id: str | None = None,
+) -> dict[str, Any]:
+    """Turn the spec of a deployed pipeline into the arguments of `pipelines.create` for a throwaway copy.
+
+    The copy keeps the spec's code, compute and channel, so it runs the files that the last `bundle deploy` uploaded.
+    It drops the fields in `PIPELINE_STRIPPED`, publishes to `schema` in the publishing mode the spec uses (`target`
+    for the legacy mode, `schema` otherwise), runs in development mode, and is named and tagged as an ephemeral job
+    is. `run_as` is not part of a spec, so the copy runs as its creator.
+
+    Args:
+        spec: The deployed pipeline's spec. It is not changed.
+        name: The pipeline name, without the `[pytest] ` prefix. With the prefix it is cut to 255 characters.
+        tags: Tags to add, as for `sanitise`.
+        schema: The full name of the schema to publish to, `catalog.schema`, as `Lakeflow.schema()` yields it.
+        configuration: Keys to set in the copy's configuration, over the spec's.
+        budget_policy_id: The budget policy of the copy. Defaults to the spec's.
+
+    Returns:
+        The keyword arguments for `pipelines.create`.
+
+    Raises:
+        LakeflowError: If `schema` is not a full name, the spec publishes to the Hive metastore, or the copy would
+            have more than 25 tags without the attribution tags.
+    """
+    catalog, _, schema_name = schema.partition(".")
+    if not schema_name:
+        raise LakeflowError(f"schema must be a full name, catalog.schema, as lakeflow.schema() yields: {schema!r}")
+    if spec.catalog is None:
+        raise LakeflowError(
+            f"Pipeline {spec.name or name!r} publishes to the Hive metastore (no catalog), so it cannot be copied into "
+            "a Unity Catalog schema"
+        )
+    kwargs: dict[str, Any] = {}
+    for field in fields(spec):
+        if field.name not in PIPELINE_CREATE_PARAMETERS or field.name in PIPELINE_STRIPPED:
+            continue
+        value = getattr(spec, field.name)
+        if value is None or value == []:
+            continue
+        kwargs[field.name] = value
+    kwargs["catalog"] = catalog
+    if spec.target:
+        kwargs["target"] = schema_name
+    else:
+        kwargs["schema"] = schema_name
+    kwargs["name"] = (NAME_PREFIX + NEWLINES.sub(" ", name))[:MAX_PIPELINE_NAME_CHARS]
+    kwargs["development"] = True
+    kwargs["allow_duplicate_names"] = True
+    merged = {**(spec.configuration or {}), **(configuration or {})}
+    if merged:
+        kwargs["configuration"] = merged
+    if budget_policy_id is not None:
+        kwargs["budget_policy_id"] = budget_policy_id
+    kwargs["tags"] = _merged_tags(spec.tags, tags, "pipeline")
+    return kwargs
 
 
 def tag_value(value: str) -> str:
@@ -706,9 +779,7 @@ def pipeline_params(
     }
     if full_refresh is None and all(value is None for value in selections.values()):
         return None
-    for key, value in selections.items():
-        if isinstance(value, str):
-            raise LakeflowError(f"{key} must be a list of names, not a string: {value!r}")
+    check_selections(selections)
     unsupported = sorted(k for k, v in selections.items() if v is not None and k not in PIPELINE_PARAMS_FIELDS)
     if unsupported:
         raise LakeflowError(
@@ -723,6 +794,54 @@ def pipeline_params(
         )
     chosen = {key: list(value) for key, value in selections.items() if value is not None}
     return jobs.PipelineParams(full_refresh=full_refresh, **chosen)
+
+
+def check_selections(selections: Mapping[str, Sequence[str] | None]) -> None:
+    """Fail on a table or flow selection given as a string, which would be sent as a list of its characters.
+
+    Raises:
+        LakeflowError: If a selection is a string.
+    """
+    for key, value in selections.items():
+        if isinstance(value, str):
+            raise LakeflowError(f"{key} must be a list of names, not a string: {value!r}")
+
+
+def pipeline_task_ids(settings: jobs.JobSettings) -> list[str]:
+    """Get the pipelines that the enabled pipeline tasks update, tasks nested in a `for_each_task` included.
+
+    A disabled task, a task downstream of one and a task nested in a disabled `for_each_task` does not run, so its
+    pipeline is left out, as `run_job_tasks` leaves such tasks out.
+
+    Args:
+        settings: The job's settings.
+
+    Returns:
+        Each pipeline id once, in the order of `settings.tasks`, nested tasks last.
+    """
+    ids: list[str] = []
+    for task in _enabled_tasks(settings, skip=disabled_task_keys(settings)):
+        if task.pipeline_task is None or not task.pipeline_task.pipeline_id:
+            continue
+        if task.pipeline_task.pipeline_id not in ids:
+            ids.append(task.pipeline_task.pipeline_id)
+    return ids
+
+
+def rewire_pipelines(settings: jobs.JobSettings, copies: Mapping[str, str]) -> jobs.JobSettings:
+    """Point every pipeline task at the copy of its pipeline, tasks nested in a `for_each_task` included.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        copies: The id of each copy, by the id of the pipeline it copies. A task on another pipeline is left alone.
+
+    Returns:
+        `settings`.
+    """
+    for task in _with_nested(settings.tasks):
+        if task.pipeline_task is not None and task.pipeline_task.pipeline_id in copies:
+            task.pipeline_task.pipeline_id = copies[task.pipeline_task.pipeline_id]
+    return settings
 
 
 def _with_nested(tasks: Sequence[jobs.Task] | None) -> list[jobs.Task]:

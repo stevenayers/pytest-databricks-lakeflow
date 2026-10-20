@@ -713,6 +713,24 @@ class TestPipelineUpdate:
         pipeline_update(ws).events()
         assert ws.pipelines.read_events == ["next", "failed", "progress", "started", "created"]
 
+    def test_from_info_pages_events_from_a_minute_before_the_update(self) -> None:
+        ws = fake_with_events()
+        # Created at 2026-10-19T19:00:28.194Z, 7 ms after its "started" event was logged.
+        info = pipelines.UpdateInfo(
+            pipeline_id="abc",
+            update_id="mine",
+            state=pipelines.UpdateInfoState.FAILED,
+            cause=pipelines.UpdateInfoCause.API_CALL,
+            full_refresh=True,
+            creation_time=1_792_436_428_194,
+        )
+        update = PipelineUpdate.from_info(cast(WorkspaceClient, ws), info)
+        assert repr(update) == (
+            "PipelineUpdate(pipeline_id='abc', update_id='mine', state='FAILED', cause='API_CALL', full_refresh=True)"
+        )
+        assert [e.id for e in update.events()] == ["failed", "progress", "started"]
+        assert ws.pipelines.read_events == ["next", "failed", "progress", "started", "created"]
+
     def test_workspace_client_stays_out_of_the_repr_and_equality(self) -> None:
         first = pipeline_update(FakeWorkspaceClient())
         assert first == pipeline_update(FakeWorkspaceClient())

@@ -24,6 +24,7 @@ with lakeflow.task(
 - `environments` changes the job's serverless environments as for job tests, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created).
 - `task_params` overrides the task's parameters as for [job tests](job-tests.md#make-a-job), such as `task_params={"transform": {"limit": "10"}}`. It is applied before the stubs are added, so only the task under test can be named, and a value that refers to `{{tasks.<key>.values.<name>}}` needs a stub for `<key>` like the task's own settings do.
 - `task_overrides` sets the task's timeout and retry fields as for job tests, see [Retries and timeouts](job-tests.md#retries-and-timeouts). It can name only the task under test, as `{"<task_key>": {...}}`; any other key raises `LakeflowError`.
+- `pipelines` and `schema` copy the pipeline that a pipeline task updates, as for job tests: with `pipelines="copy"` and `schema=` set to a name from `lakeflow.schema()`, the task updates a copy of its pipeline that publishes to that schema, see [Pipelines](job-tests.md#pipelines). A task that is not a pipeline task raises `LakeflowError` (`has no pipeline task to copy`).
 
 `setup=` and `teardown=` work as for [job tests](job-tests.md#set-up-and-tear-down-data) and take the same three forms: a function, a list of SQL statements or a `Path` to a `.py` file. The setup task runs before the stubs, so a stub's values can never be read before the data exists, and the teardown task runs after the task and its probe:
 
@@ -198,6 +199,19 @@ def test_single_task(lakeflow: Lakeflow, greeting: str, expected: str) -> None:
             assert run.task("transform").task_values["rows_written"] == 42
         assert lakeflow.ws.tables.exists(f"{schema}.example_rows").table_exists
 ```
+
+A pipeline task writes to the schema its pipeline publishes to, which a job parameter cannot change. `pipelines="copy"` runs the task against a copy of the pipeline that publishes to the temporary schema instead, here the `pipelines` integration bundle's `refresh` task:
+
+```python
+def test_refresh_into_a_temporary_schema(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        with lakeflow.task("pipeline_job.refresh", pipelines="copy", schema=schema) as task:
+            run = task.run(full_refresh=True)
+            assert run.succeeded, run
+            assert lakeflow.ws.tables.exists(f"{schema}.numbers").table_exists
+```
+
+The copy is deleted with the tables it publishes when the task job closes, so check them inside the `with` block. See [Pipelines](job-tests.md#pipelines) for what the copy keeps and drops.
 
 ## Running a subset of a task job
 
