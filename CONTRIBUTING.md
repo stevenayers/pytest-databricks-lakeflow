@@ -25,7 +25,32 @@ uv run coverage run -m pytest -m "not lakeflow" && uv run coverage report   # wi
 uv run --group docs mkdocs build --strict   # docs
 ```
 
-The unit tests use pytest's `pytester` and an in-memory fake of the parts of `WorkspaceClient` the plugin uses, in `tests/unit/fakes.py`. They never touch the network. CI runs them on every supported Python version and once more on the oldest supported versions of the dependencies: Python 3.11, pytest 8, databricks-sdk 0.100 and filelock 3.
+The unit tests use pytest's `pytester` and an in-memory fake of the parts of `WorkspaceClient` the plugin uses, in `tests/unit/fakes/`. They never touch the network. CI runs them on every supported Python version and once more on the oldest supported versions of the dependencies: Python 3.11, pytest 8, databricks-sdk 0.100 and filelock 3.
+
+## Code map
+
+`src/pytest_databricks_lakeflow/` is laid out along the path a test takes, from the pytest hooks down to the Jobs API:
+
+| Module | What it holds |
+| --- | --- |
+| `plugin.py` | The pytest hooks and flags, the `lakeflow` fixture and the terminal summary. |
+| `collection.py` | The `--lakeflow-check` collector, one item per bundle job. |
+| `client.py` | `Lakeflow`, the object tests call. |
+| `session.py` | What one pytest session shares: the run id, the attribution tags, the state xdist workers exchange, the run cap. |
+| `deployment.py` | Setting a bundle target up: deploy or validate, the host and `run_as` checks, the job templates, the helper notebooks. |
+| `bundle.py` | The Databricks CLI wrapper and what the plugin reads from `validate` and `summary` output. |
+| `workspace_api.py` | The workspace client, and the lookups, cancellations and deletes that several modules share. |
+| `settings/` | Turning a deployed job's settings into a copy's: `template`, `compute`, `tasks`, `params`, `for_each`, `stubs`, `lifecycle`, `selection`, `saved_queries`, `references` and `lint`. |
+| `ephemeral/` | The copies a test makes: `job` (`EphemeralJob` and `RunHandle`), `pipeline`, `polling` and `outcome`, with `base` for what the copies share. |
+| `results/` | What a run reports back: `models` (the dataclasses), `build` (filled from the Jobs API), `notebook` (exported notebooks) and `serialise` (`report.json`). |
+| `helpers.py` | The notebooks the plugin uploads: set and get task values, setup and teardown steps, debug notebooks, inlined queries. |
+| `sweep.py` | Sweeping what earlier sessions left behind. |
+| `report.py` | Writing `--lakeflow-report-dir`. |
+| `dbt.py` | Downloading and reading dbt artefacts. |
+| `naming.py`, `limits.py` | Every name the plugin writes into a workspace, and every limit the platform enforces, each with how it was measured. |
+| `errors.py` | The exception classes. |
+
+Two rules hold across the public API. A wrong argument raises `ValueError`; anything about the bundle, the job or the workspace raises `LakeflowError`, or `LakeflowBundleError` for the CLI. Names mirror the platform's spelling where they stand for a platform field (`performance_optimized`, `disable_auto_optimization`) and use UK English where they are the plugin's own (`side_effects="neutralise"`, `TaskRun.cancelled`).
 
 ## Integration tests
 
@@ -136,7 +161,7 @@ In CI, the `Integration tests` job runs on pushes to `main` once these settings 
 ## Making a change
 
 - Start with a test. Add or change a unit test, watch it fail, then change the code.
-- Follow the conventions in the code: `from __future__ import annotations`, frozen dataclasses for results, docstrings on the public API only, UK English in prose, and no em-dashes anywhere.
+- Follow the conventions in the code: `from __future__ import annotations`, frozen dataclasses for results, docstrings on the public API only, UK English in prose, f-strings for every formatted string (logging calls included), and no em-dashes anywhere.
 - Update `README.md` and `docs/` when behaviour changes. Every snippet must use the real public API; the README is included in the docs site verbatim.
 - Run the checks above before opening a pull request.
 
@@ -149,10 +174,11 @@ In CI, the `Integration tests` job runs on pushes to `main` once these settings 
 
 ### Tests
 
-- Unit tests are grouped in `class Test<Behaviour>:` suites with a one-line docstring saying what the group covers, for example `class TestKeepRules:` with the docstring "Which jobs survive the test that made them." Methods are `test_<behaviour>(self, <fixtures>)`. Shared helpers, constants and fixtures stay at module level or in `tests/unit/conftest.py` and `tests/unit/fakes.py`; extend the fakes rather than mocking around them.
+- Unit tests are grouped in `class Test<Behaviour>:` suites with a one-line docstring saying what the group covers, for example `class TestKeepRules:` with the docstring "Which jobs survive the test that made them." Methods are `test_<behaviour>(self, <fixtures>)`. Shared helpers, constants and fixtures stay at module level or in `tests/unit/conftest.py` and `tests/unit/fakes/`; extend the fakes rather than mocking around them.
+- Each unit test module covers one feature or one layer and is named after it: `test_job.py`, `test_runs.py`, `test_stubs.py`, `test_for_each.py`, `test_sweep.py`, `test_template.py` and so on. A module holds the tests of its functions first, then the tests that drive the plugin end to end through pytester and the fake workspace, marked `@pytest.mark.usefixtures("fake_cli", "bundle_dir")`. The fakes are a package: `workspace` for the client, `runs` for job runs and recorded data, `templates` for deployed bundle resources, `dbt` for artefact tarballs and `notebooks` for running generated notebooks.
 - Prefer one parametrised test to near-duplicates, and fewer sharp tests to many shallow ones. Do not add a test to raise coverage or to pin a trivial default; coverage is reported, not enforced.
 - Keep every test that guards a regression or a finding against the real API, and every test an issue names under "Tests to write first". When a pull request removes or merges a test, it lists each one with the test that still covers the behaviour.
-- The unit suite runs in about ten seconds with pytester and the fakes and never touches the network. Integration tests are plain functions, one module per bundle, as described above.
+- The unit suite runs in about half a minute with pytester and the fakes and never touches the network. Integration tests are plain functions, one module per bundle, as described above.
 
 ## Commit messages
 

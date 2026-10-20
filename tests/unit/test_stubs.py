@@ -1,72 +1,34 @@
+"""Stub and probe tasks: stubbing upstream tasks, capturing task values and replaying a run."""
+
 from __future__ import annotations
 
 import copy
 import json
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from datetime import timedelta
 from typing import Any
 
 import pytest
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow.errors import LakeflowError
-from pytest_databricks_lakeflow.results import JobRun, TaskRun, TaskValues
-from pytest_databricks_lakeflow.settings import (
-    ENV_KEY,
-    Helpers,
-    Stub,
-    add_dependencies,
-    check_input_size,
+from pytest_databricks_lakeflow import JobRun, LakeflowError, Stub, TaskRun, TaskValues, helpers
+from pytest_databricks_lakeflow.naming import ENV_KEY
+from pytest_databricks_lakeflow.settings.lifecycle import inject_lifecycle
+from pytest_databricks_lakeflow.settings.references import escape
+from pytest_databricks_lakeflow.settings.stubs import (
     check_values,
-    escape,
-    inject_input,
-    inject_lifecycle,
     inject_probes,
-    lift_nested_task,
-    merge_environments,
     recover_injected,
     stub_upstream,
     upstream_values_from,
     wrap_task,
 )
 
-from .conftest import FakeCli, configure_lakeflow
-from .fakes import (
-    FakeWorkspaceClient,
-    dbt_settings,
-    example_settings,
-    fanout_objects_settings,
-    for_each_settings,
-    make_run,
-    recorded,
-)
-
-HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
-UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
-
-
-def keys(settings: jobs.JobSettings) -> list[str]:
-    return [t.task_key for t in settings.tasks or []]
-
-
-def environment_keys(settings: jobs.JobSettings) -> list[str]:
-    return [e.environment_key for e in settings.environments or []]
-
-
-def with_environment_count(count: int) -> jobs.JobSettings:
-    settings = example_settings()
-    extra = [jobs.JobEnvironment.from_dict({"environment_key": f"env{i}"}) for i in range(1, count)]
-    settings.environments = [*(settings.environments or []), *extra]
-    return settings
-
-
-def probe_transform(settings: jobs.JobSettings) -> jobs.JobSettings:
-    return inject_probes(settings, {"transform": ["x"]}, HELPERS)
-
-
-def wrap_transform(settings: jobs.JobSettings) -> jobs.JobSettings:
-    return wrap_task(settings, "transform", UPSTREAM, [], HELPERS)
+from .conftest import HELPERS, UPSTREAM, environment_keys, keys
+from .fakes.runs import make_run, recorded
+from .fakes.templates import example_settings, for_each_settings
+from .fakes.workspace import FakeWorkspaceClient
 
 
 def task_run(key: str, values: Mapping[str, object]) -> TaskRun:
@@ -171,20 +133,29 @@ class TestWrapTask:
         assert ENV_KEY not in environment_keys(settings)
 
     @pytest.mark.parametrize(
-        ("task_key", "upstream", "message"),
+        ("task_key", "upstream", "error", "message"),
         [
             pytest.param(
                 "transform",
                 {},
+                LakeflowError,
                 r"refers to task values of \['extract'\].*Pass them in upstream_task_values",
                 id="missing_stubs",
             ),
-            pytest.param("transfrom", {}, r"No task 'transfrom' in the job. Available: \['classic'", id="unknown_task"),
-            pytest.param("load", {"load": {}}, "cannot stub 'load', the task under test", id="self_stub"),
+            pytest.param(
+                "transfrom",
+                {},
+                LakeflowError,
+                r"No task 'transfrom' in the job. Available: \['classic'",
+                id="unknown_task",
+            ),
+            pytest.param("load", {"load": {}}, ValueError, "cannot stub 'load', the task under test", id="self_stub"),
         ],
     )
-    def test_rejects(self, task_key: str, upstream: dict[str, dict[str, object]], message: str) -> None:
-        with pytest.raises(LakeflowError, match=message):
+    def test_rejects(
+        self, task_key: str, upstream: dict[str, dict[str, object]], error: type[Exception], message: str
+    ) -> None:
+        with pytest.raises(error, match=message):
             wrap_task(example_settings(), task_key, upstream, [], HELPERS)
 
     def test_rejects_any_reference_to_a_task_left_out(self) -> None:
@@ -292,9 +263,9 @@ class TestStubOutputs:
     )
     def test_rejects_references_in_outputs(self, value: object, message: str) -> None:
         settings = transform_reading({"n": FIRST_ROW})
-        with pytest.raises(LakeflowError, match=message):
+        with pytest.raises(ValueError, match=message):
             wrap_task(settings, "transform", {"extract": Stub(outputs={"first_row.n": value})}, [], HELPERS)
-        with pytest.raises(LakeflowError, match=message):
+        with pytest.raises(ValueError, match=message):
             stub_upstream(example_settings(), {"extract": Stub(outputs={"first_row.n": value})}, HELPERS)
 
     def test_values_and_outputs_together(self) -> None:
@@ -360,23 +331,27 @@ class TestStubUpstream:
         assert stub.depends_on == [jobs.TaskDependency(task_key="__pytest_setup")]
 
     @pytest.mark.parametrize(
-        ("upstream", "message"),
+        ("upstream", "error", "message"),
         [
             pytest.param(
                 {"extrct": {"row_count": 1}},
+                LakeflowError,
                 r"Unknown task 'extrct' in upstream_task_values. Available: \['classic', 'extract', 'load'",
                 id="unknown_task",
             ),
             pytest.param(
                 {"extract": {"row_count": "x" * 49_153}},
+                ValueError,
                 "'row_count' for task 'extract' is 49155 characters as JSON",
                 id="value_too_large",
             ),
         ],
     )
-    def test_stub_upstream_rejects_unknown_tasks(self, upstream: dict[str, dict[str, object]], message: str) -> None:
+    def test_stub_upstream_rejects_unknown_tasks(
+        self, upstream: dict[str, dict[str, object]], error: type[Exception], message: str
+    ) -> None:
         settings = example_settings()
-        with pytest.raises(LakeflowError, match=message):
+        with pytest.raises(error, match=message):
             stub_upstream(settings, {"load": {"rows": 1}, **upstream}, HELPERS)
         assert settings == example_settings(), "nothing is changed when an entry is rejected"
 
@@ -447,48 +422,6 @@ class TestRecoverInjected:
         assert recover_injected(example_settings()) == (frozenset(), {})
 
 
-class TestHelperCompute:
-    """Stub and probe tasks run on the helper environment or on the `helpers_compute` job cluster."""
-
-    def test_helpers_on_a_job_cluster(self) -> None:
-        helpers = Helpers(set_values="/s", get_values="/g", job_cluster_key="classic")
-        settings = wrap_task(example_settings(), "transform", UPSTREAM, ["k"], helpers)
-        assert all(t.job_cluster_key == "classic" for t in settings.tasks or [] if t.task_key != "transform")
-        assert ENV_KEY not in environment_keys(settings)
-        with pytest.raises(LakeflowError, match=r"^helpers_compute is 'gpu'.*Available: \['classic'\]"):
-            wrap_task(example_settings(), "transform", UPSTREAM, [], Helpers("/s", "/g", job_cluster_key="gpu"))
-
-    @pytest.mark.parametrize(
-        "inject", [pytest.param(probe_transform, id="inject_probes"), pytest.param(wrap_transform, id="wrap_task")]
-    )
-    def test_extra_dependencies_do_not_reach_the_helper_environment(
-        self, inject: Callable[[jobs.JobSettings], jobs.JobSettings]
-    ) -> None:
-        settings = inject(add_dependencies(example_settings(), ["pytest>=8"]))
-        specs = {e.environment_key: e.spec for e in settings.environments or []}
-        default, helper = specs["default"], specs[ENV_KEY]
-        assert default is not None and default.dependencies == ["pytest>=8"]
-        assert helper is not None and helper.dependencies is None
-
-    def test_helper_environment_version(self) -> None:
-        settings = inject_probes(example_settings(), {"load": ["k"]}, Helpers("/s", "/g", environment_version="6"))
-        env = next(e for e in settings.environments or [] if e.environment_key == ENV_KEY)
-        assert env.spec is not None and env.spec.environment_version == "6"
-
-    @pytest.mark.parametrize(
-        "inject", [pytest.param(probe_transform, id="inject_probes"), pytest.param(wrap_transform, id="wrap_task")]
-    )
-    def test_helpers_refuse_an_eleventh_environment(
-        self, inject: Callable[[jobs.JobSettings], jobs.JobSettings]
-    ) -> None:
-        with pytest.raises(LakeflowError, match=r"10 environments.*'default', 'env1'.*'env9'.*make room") as e:
-            inject(with_environment_count(10))
-        assert ENV_KEY in str(e.value)
-        settings = inject(with_environment_count(9))
-        assert len(settings.environments or []) == 10
-        assert environment_keys(settings)[-1] == ENV_KEY
-
-
 class TestTaskValues:
     """Stubbed task values are escaped against reference substitution and checked against the platform limits."""
 
@@ -500,202 +433,14 @@ class TestTaskValues:
 
     def test_check_values(self) -> None:
         check_values("extract", {"ok": "x" * 49_000, "n": None})
-        with pytest.raises(LakeflowError, match="'big' for task 'extract' is 49155 characters as JSON"):
+        with pytest.raises(ValueError, match="'big' for task 'extract' is 49155 characters as JSON"):
             check_values("extract", {"big": "x" * 49_153})
-        with pytest.raises(LakeflowError, match="not JSON-serialisable"):
+        with pytest.raises(ValueError, match="not JSON-serialisable"):
             check_values("extract", {"bad": object()})
-        with pytest.raises(LakeflowError, match="longer than 512"):
+        with pytest.raises(ValueError, match="longer than 512"):
             check_values("extract", {"k" * 513: 1})
-        with pytest.raises(LakeflowError, match="longer than 512"):
+        with pytest.raises(ValueError, match="longer than 512"):
             inject_probes(example_settings(), {"load": ["k" * 513]}, HELPERS)
-
-
-def lifted_each(**parameters: str) -> jobs.JobSettings:
-    """Lift `each` out of `for_each_settings()`, giving it `parameters` as its base parameters when any are given."""
-    settings = for_each_settings()
-    each = lift_nested_task(settings, "loop", "each")
-    if parameters:
-        assert each.notebook_task is not None
-        each.notebook_task.base_parameters = parameters
-    return settings
-
-
-def base_parameters(settings: jobs.JobSettings, key: str) -> dict[str, str] | None:
-    task = next(t for t in settings.tasks or [] if t.task_key == key)
-    return task.notebook_task.base_parameters if task.notebook_task else None
-
-
-class TestInjectInput:
-    """inject_input points the lifted body's {{input}} references at job parameters that hold the chosen input."""
-
-    def test_scalar_and_object(self) -> None:
-        settings = inject_input(lifted_each(), "each", "a")
-        assert base_parameters(settings, "each") == {"item": "{{job.parameters.__pytest_input}}"}
-        assert settings.parameters == [jobs.JobParameterDefinition(name="__pytest_input", default="a")]
-
-        settings = fanout_objects_settings()
-        lift_nested_task(settings, "loop", "inner")
-        inject_input(settings, "inner", {"id": 7, "path": "/x"})
-        assert base_parameters(settings, "inner") == {
-            "item": "{{job.parameters.__pytest_input}}",
-            "item_id": "{{job.parameters.__pytest_input_id}}",
-            "rows": "{{tasks.extract.values.rows}}",
-        }
-        # A for-each iteration over [{"id": 7, "path": "/x"}] gives these two texts, the id as a double.
-        assert settings.parameters == [
-            jobs.JobParameterDefinition(name="__pytest_input", default='{"id":7.0,"path":"/x"}'),
-            jobs.JobParameterDefinition(name="__pytest_input_id", default="7.0"),
-        ]
-
-    # What for-each iterations gave {{input}} and {{input.<key>}} in the workspace, items of primitives and of objects.
-    @pytest.mark.parametrize(
-        ("reference", "value", "expected"),
-        [
-            pytest.param("{{input}}", "t {x}", "t {x}", id="string"),
-            pytest.param("{{input}}", 1, "1", id="integer"),
-            pytest.param("{{input}}", 12345678901234567890, "12345678901234567890", id="big-integer"),
-            pytest.param("{{input}}", 2.5, "2.5", id="float"),
-            pytest.param("{{input}}", 1e20, "1.0E20", id="large-float"),
-            pytest.param("{{input}}", -0.0, "-0.0", id="negative-zero"),
-            pytest.param("{{input}}", True, "true", id="boolean"),
-            pytest.param(
-                "{{input}}",
-                {"e": {"f": 1, "g": "x"}, "u": "é", "neg": -3, "c": None, "d": [1, 2]},
-                '{"e":{"f":1.0,"g":"x"},"u":"é","neg":-3.0,"c":null,"d":[1.0,2.0]}',
-                id="object",
-            ),
-            pytest.param("{{ input.k }}", {"k": "é"}, "é", id="key-string"),
-            pytest.param("{{input.k}}", {"k": 10}, "10.0", id="key-integer"),
-            pytest.param("{{input.k}}", {"k": 0.1}, "0.1", id="key-float"),
-            pytest.param("{{input.k}}", {"k": 12345678901234567890}, "1.2345678901234567E19", id="key-big-integer"),
-            pytest.param("{{input.k}}", {"k": 12345678}, "1.2345678E7", id="key-seven-digits"),
-            pytest.param("{{input.k}}", {"k": 0.00001}, "1.0E-5", id="key-small-float"),
-            pytest.param("{{input.k}}", {"k": False}, "false", id="key-boolean"),
-            pytest.param("{{input.k}}", {"k": None}, "null", id="key-null"),
-            pytest.param("{{input.k}}", {"k": []}, "[]", id="key-list"),
-            pytest.param("{{input.k}}", {"k": {"g": "y", "f": 2}}, '{"g":"y","f":2.0}', id="key-object"),
-        ],
-    )
-    def test_values_render_as_an_iteration_gives_them(self, reference: str, value: object, expected: str) -> None:
-        settings = inject_input(lifted_each(item=reference), "each", value)
-        [definition] = settings.parameters or []
-        assert base_parameters(settings, "each") == {"item": f"{{{{job.parameters.{definition.name}}}}}"}
-        assert definition.default == expected
-
-    def test_a_template_definition_is_replaced(self) -> None:
-        settings = lifted_each(a="{{input.a}}", c="on_{{input.c}}_{{input}}")
-        settings.parameters = [
-            jobs.JobParameterDefinition(name="__pytest_input_c", default="old"),
-            jobs.JobParameterDefinition(name="day", default=""),
-        ]
-        inject_input(settings, "each", {"a": "x", "c": "y"})
-        assert base_parameters(settings, "each") == {
-            "a": "{{job.parameters.__pytest_input_a}}",
-            "c": "on_{{job.parameters.__pytest_input_c}}_{{job.parameters.__pytest_input}}",
-        }
-        assert settings.parameters == [
-            jobs.JobParameterDefinition(name="day", default=""),
-            jobs.JobParameterDefinition(name="__pytest_input", default='{"a":"x","c":"y"}'),
-            jobs.JobParameterDefinition(name="__pytest_input_a", default="x"),
-            jobs.JobParameterDefinition(name="__pytest_input_c", default="y"),
-        ]
-
-    @pytest.mark.parametrize(
-        ("parameters", "value", "match"),
-        [
-            pytest.param(
-                {"item": "{{input}}", "item_id": "{{input.id}}"},
-                None,
-                r"Task 'each' refers to \{\{input\}\} and \{\{input.id\}\} in its settings. Pass input= to "
-                r"lakeflow.task\(\)",
-                id="required",
-            ),
-            pytest.param(
-                {"other": "x"},
-                "a",
-                r"Task 'each' does not refer to \{\{input\}\}, so input= has no effect",
-                id="no-references",
-            ),
-            pytest.param(
-                {"item": "{{input}}"},
-                [1, 2],
-                r"input for task 'each' is \[1, 2\]. A for-each item is a string, number, boolean or object.",
-                id="list",
-            ),
-            pytest.param(
-                {"item_id": "{{input.id}}"},
-                {"path": "/x"},
-                r"\{\{input.id\}\} in task 'each' needs key 'id', but input has \['path'\]",
-                id="missing-key",
-            ),
-            pytest.param(
-                {"item_id": "{{input.id}}"},
-                "a",
-                r"\{\{input.id\}\} in task 'each' needs an object as input, got 'a'",
-                id="not-an-object",
-            ),
-            pytest.param(
-                {"item": "{{input}}"},
-                {"k": "{{job.id}}"},
-                r"input for task 'each' contains '\{\{', which the platform would substitute",
-                id="braces",
-            ),
-            pytest.param(
-                {"item": "{{input}}"},
-                {"k": object()},
-                r"input for task 'each' is not JSON-serialisable: Object of type object",
-                id="not-serialisable",
-            ),
-            pytest.param(
-                {"item": "{{input}}"},
-                float("nan"),
-                r"input for task 'each' is not JSON-serialisable: Out of range float values",
-                id="nan",
-            ),
-        ],
-    )
-    def test_rejects(self, parameters: dict[str, str], value: object, match: str) -> None:
-        settings = lifted_each(**parameters)
-        before = copy.deepcopy(settings)
-        with pytest.raises(LakeflowError, match=match):
-            inject_input(settings, "each", value)
-        assert settings == before
-
-    @pytest.mark.parametrize(
-        ("template", "length", "message"),
-        [
-            pytest.param([], 9_955, None, id="fits"),
-            pytest.param(
-                [],
-                9_956,
-                r"input for task 'each' makes the job parameters 10001 characters as JSON. jobs/create allows 10000.",
-                id="too-long",
-            ),
-            # A template parameter counts too, with its default JSON-escaped.
-            pytest.param(
-                [jobs.JobParameterDefinition(name="day", default='"')],
-                9_955,
-                "makes the job parameters 10035 characters as JSON",
-                id="with-template-parameter",
-            ),
-        ],
-    )
-    def test_the_job_parameters_fit_jobs_create(
-        self, template: list[jobs.JobParameterDefinition], length: int, message: str | None
-    ) -> None:
-        settings = lifted_each(item="{{input}}")
-        settings.parameters = template
-        inject_input(settings, "each", "x" * length)
-        if message is None:
-            check_input_size(settings, "each")
-            return
-        with pytest.raises(LakeflowError, match=message):
-            check_input_size(settings, "each")
-
-    def test_no_change_without_references_or_input(self) -> None:
-        settings = lifted_each(other="x")
-        before = copy.deepcopy(settings)
-        assert inject_input(settings, "each", None) == before
 
 
 class TestUpstreamFrom:
@@ -730,19 +475,30 @@ class TestUpstreamFrom:
 
     def test_upstream_from_rejects_another_job(self) -> None:
         run = previous_run({"extract": {"row_count": 42}}, job_key="other")
-        with pytest.raises(LakeflowError, match=r"upstream_from is a run of job 'other', not of 'my_job'"):
+        with pytest.raises(ValueError, match=r"upstream_from is a run of job 'other', not of 'my_job'"):
             upstream_values_from("my_job", example_settings(), "transform", run)
 
     def test_replayed_values_go_through_check_values(self) -> None:
         run = previous_run({"extract": {"row_count": "x" * 49_153}})
         upstream = upstream_values_from("my_job", example_settings(), "transform", run)
-        with pytest.raises(LakeflowError, match="'row_count' for task 'extract' is 49155 characters as JSON"):
+        with pytest.raises(ValueError, match="'row_count' for task 'extract' is 49155 characters as JSON"):
             wrap_task(example_settings(), "transform", upstream, [], HELPERS)
 
 
+class TestHelperNotebooks:
+    """The helper notebooks that setup uploads read the plugin's prefixed widgets."""
+
+    def test_helper_sources_use_prefixed_widgets(self) -> None:
+        assert f'dbutils.widgets.get("{helpers.VALUES_WIDGET}")' in helpers.SET_VALUES
+        assert f'dbutils.widgets.get("{helpers.TASK_KEY_WIDGET}")' in helpers.GET_VALUES
+        assert f'dbutils.widgets.get("{helpers.KEYS_WIDGET}")' in helpers.GET_VALUES
+        for source in helpers.NOTEBOOKS.values():
+            compile(source, "notebook", "exec")
+
+
 @pytest.mark.usefixtures("fake_cli", "bundle_dir")
-class TestEndToEnd:
-    """`Lakeflow.task()` and `Lakeflow.job()` wire the stubs, probes and helper compute into the created job."""
+class TestStubsEndToEnd:
+    """Stubs, probes and replayed runs reach the created job and come back on the run."""
 
     def test_single_task_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(*recorded("probe_success"))
@@ -802,227 +558,6 @@ class TestEndToEnd:
         }
         assert stub_values(created, "extract") == escape({"row_count": 42})
 
-    def test_for_each_inputs_on_a_task_job(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_cli.deployed["fanout"] = fake_ws.jobs.add(for_each_settings())
-        fake_ws.jobs.queue(make_run(80, {"loop": "SUCCESS"}))
-        pytester.makepyfile(
-            """
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
-            def test_task(lakeflow):
-                with lakeflow.task("fanout.loop", for_each_inputs=["a"]) as task:
-                    assert task.run().succeeded
-
-            def test_not_for_each(lakeflow):
-                match = r"Task 'transform' in for_each_inputs has no for_each_task. For-each tasks: \\[\\]"
-                with pytest.raises(LakeflowError, match=match):
-                    lakeflow.task("my_job.transform", upstream_task_values=UPSTREAM, for_each_inputs=["a"])
-
-            UPSTREAM = {"extract": {"row_count": 1}}
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=2)
-        [created] = fake_ws.jobs.created
-        assert [t.task_key for t in created["tasks"]] == ["loop"]
-        assert created["tasks"][0].for_each_task.inputs == '["a"]'
-
-    def test_nested_task_end_to_end(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
-        fake_cli.deployed["strings"] = fake_ws.jobs.add(for_each_settings())
-        fake_ws.jobs.queue(make_run(82, {"extract": "SUCCESS", "inner": "SUCCESS"}))
-        pytester.makepyfile(
-            """
-            def test_body(lakeflow):
-                with lakeflow.task(
-                    "fanout.loop.inner",
-                    input={"id": 7, "path": "/x"},
-                    upstream_task_values={"extract": {"rows": 3}},
-                    task_params={"inner": {"limit": "10"}},
-                ) as task:
-                    run = task.run()
-                assert run.succeeded
-                assert run.executed_tasks == ["inner"]
-
-            def test_string_body(lakeflow):
-                with lakeflow.task("strings.loop.each", input="a"):
-                    pass
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=2)
-        body, strings = fake_ws.jobs.created
-        assert [t.task_key for t in body["tasks"]] == ["extract", "inner"]
-        assert "for_each_task" not in json.dumps(jobs.JobSettings(tasks=body["tasks"]).as_dict())
-        inner = body["tasks"][1]
-        assert inner.depends_on == [jobs.TaskDependency(task_key="extract")]
-        assert inner.timeout_seconds == 600
-        assert inner.notebook_task.base_parameters == {
-            "item": "{{job.parameters.__pytest_input}}",
-            "item_id": "{{job.parameters.__pytest_input_id}}",
-            "rows": "{{tasks.extract.values.rows}}",
-            "limit": "10",
-        }
-        assert body["parameters"] == [
-            jobs.JobParameterDefinition(name="__pytest_input", default='{"id":7.0,"path":"/x"}'),
-            jobs.JobParameterDefinition(name="__pytest_input_id", default="7.0"),
-        ]
-        assert [t.task_key for t in strings["tasks"]] == ["each"]
-        assert strings["tasks"][0].notebook_task.notebook_path.endswith("/each")
-        assert strings["parameters"][-1] == jobs.JobParameterDefinition(name="__pytest_input", default="a")
-
-    def test_nested_task_rejects(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
-        pytester.makepyfile(
-            """
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
-            UPSTREAM = {"extract": {"rows": 3}}
-
-            @pytest.mark.parametrize(
-                ("ref", "kwargs", "match"),
-                [
-                    ("fanout.loop.nope", {"input": "a"}, r"for_each_task 'loop' nests 'inner', not 'nope'"),
-                    ("fanout.extract.x", {"input": "a"}, r"Task 'extract' has no for_each_task"),
-                    ("fanout.loop", {"input": "a"}, r"input= gives the iteration input of a for_each_task body, so "
-                        r"ref must be 'job_key.loop_key.nested_key', got 'fanout.loop'"),
-                    ("a.b.c.d", {}, r"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key', got 'a.b.c.d'"),
-                    ("fanout..inner", {}, r"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key'"),
-                    ("fanout.loop.inner", {}, r"Task 'inner' refers to \\{\\{input\\}\\} and \\{\\{input.id\\}\\}"),
-                    ("fanout.loop.inner", {"input": {"path": "/x"}}, r"needs key 'id', but input has \\['path'\\]"),
-                    ("fanout.loop.inner", {"input": "a", "task_params": {"loop": {"k": "v"}}},
-                        r"Unknown task 'loop' in task_params of job 'fanout'. Available: \\['inner'\\]"),
-                ],
-            )
-            def test_rejects(lakeflow, ref, kwargs, match):
-                with pytest.raises(LakeflowError, match=match):
-                    lakeflow.task(ref, upstream_task_values=UPSTREAM, **kwargs)
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=8)
-        assert fake_ws.jobs.created == []
-
-    def test_for_each_loops_end_to_end(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_cli.deployed["fanout"] = fake_ws.jobs.add(fanout_objects_settings())
-        fake_ws.jobs.queue(make_run(83, {"extract": "SUCCESS", "loop": "SUCCESS", "after": "SUCCESS"}))
-        pytester.makepyfile(
-            """
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
-            def test_task_params_reach_the_body(lakeflow):
-                with lakeflow.job("fanout", task_params={"inner": {"limit": "10"}}) as job:
-                    assert job.run().succeeded
-
-            @pytest.mark.parametrize("ref", ["job", "task"])
-            def test_capturing_a_loop_is_refused(lakeflow, ref):
-                with pytest.raises(LakeflowError, match=r"the for-each task 'loop', whose iterations cannot set"):
-                    if ref == "job":
-                        lakeflow.job("fanout", capture_task_values={"loop": ["seen"]})
-                    else:
-                        lakeflow.task("fanout.loop", capture_task_values=["seen"], upstream_task_values=UPSTREAM)
-
-            def test_capturing_a_lifted_body_warns(lakeflow):
-                match = (
-                    r"capture_task_values on 'fanout.loop.inner': 'inner' cannot set task values when it runs in "
-                    r"its loop 'loop'"
-                )
-                with pytest.warns(UserWarning, match=match):
-                    lakeflow.task("fanout.loop.inner", input={"id": 1}, upstream_task_values=UPSTREAM,
-                                  capture_task_values=["rows"])
-
-            UPSTREAM = {"extract": {"rows": 3}}
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=4)
-        [created] = fake_ws.jobs.created
-        loop = next(t for t in created["tasks"] if t.task_key == "loop")
-        assert loop.for_each_task.task.notebook_task.base_parameters == {
-            "item": "{{input}}",
-            "item_id": "{{input.id}}",
-            "rows": "{{tasks.extract.values.rows}}",
-            "limit": "10",
-        }
-
-    @pytest.mark.parametrize(
-        ("arguments", "kwargs", "size"),
-        [
-            # 59 more: a comma, 29 for the definition, the name __pytest_trigger_type and the default one_time.
-            pytest.param(
-                "",
-                'task_params={"each": {"t": "{{job.trigger.type}}"}}, trigger={"type": "one_time"}',
-                10_059,
-                id="trigger",
-            ),
-            # 101 more: a comma, 29 for the definition, the name __pytest_test_id and the 55-character node id.
-            pytest.param("test_marker=True", "", 10_101, id="test_marker"),
-        ],
-    )
-    def test_input_size_counts_every_job_parameter(
-        self,
-        pytester: pytest.Pytester,
-        fake_ws: FakeWorkspaceClient,
-        fake_cli: FakeCli,
-        arguments: str,
-        kwargs: str,
-        size: int,
-    ) -> None:
-        """The input alone fits the 10,000 characters; the parameters added after it do not."""
-        fake_cli.deployed["strings"] = fake_ws.jobs.add(for_each_settings())
-        configure_lakeflow(pytester, arguments)
-        pytester.makepyfile(
-            f"""
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
-            def test_job(lakeflow):
-                match = "input for task 'each' makes the job parameters {size} characters as JSON"
-                with pytest.raises(LakeflowError, match=match):
-                    lakeflow.task("strings.loop.each", input="x" * 9_955, {kwargs})
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=1)
-        assert fake_ws.jobs.created == []
-
-    def test_dbt_commands_on_a_task_job(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_cli.deployed["analytics"] = fake_ws.jobs.add(dbt_settings())
-        fake_ws.jobs.queue(make_run(81, {"dbt_build": "SUCCESS"}))
-        pytester.makepyfile(
-            """
-            import pytest
-
-            from pytest_databricks_lakeflow import LakeflowError
-
-            def test_task(lakeflow):
-                commands = ["dbt build --select tag:ci"]
-                with lakeflow.task("analytics.dbt_build", task_params={"dbt_build": commands}) as task:
-                    assert task.run().succeeded
-
-            def test_no_commands(lakeflow):
-                with pytest.raises(LakeflowError, match="dbt commands must not be empty"):
-                    lakeflow.task("analytics.dbt_build", task_params={"dbt_build": []})
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=2)
-        [created] = fake_ws.jobs.created
-        [dbt_build] = created["tasks"]
-        assert dbt_build.dbt_task.commands == ["dbt build --select tag:ci"]
-        assert dbt_build.dbt_task.warehouse_id == "w1"
-
     def test_job_capture_task_values_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(*recorded("probe_failure"))
         pytester.makepyfile(
@@ -1039,57 +574,6 @@ class TestEndToEnd:
         pytester.runpytest().assert_outcomes(passed=1)
         [created] = fake_ws.jobs.created
         assert [t.task_key for t in created["tasks"]][-1] == "__pytest_probe__transform"
-
-    def test_test_marker_on_a_task_job(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        pytester.makepyfile(
-            """
-            def test_job(lakeflow):
-                upstream = {"extract": {"row_count": 42}}
-                with lakeflow.task("my_job.transform", upstream_task_values=upstream, capture_task_values=["stage"]):
-                    pass
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=1)
-        configure_lakeflow(pytester, "test_marker=True")
-        pytester.runpytest().assert_outcomes(passed=1)
-        plain, marked = fake_ws.jobs.created
-        assert marked["parameters"] == [
-            *plain["parameters"],
-            jobs.JobParameterDefinition(name="__pytest_test_id", default="test_test_marker_on_a_task_job.py::test_job"),
-        ]
-        assert marked["tasks"] == plain["tasks"]
-        assert [t.task_key for t in marked["tasks"]] == ["extract", "transform", "__pytest_probe__transform"]
-
-    def test_helper_settings_from_lakeflow(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        configure_lakeflow(pytester, 'helpers_path="/Shared/helpers", helpers_compute="classic"')
-        pytester.makepyfile(
-            """
-            def test_job(lakeflow):
-                with lakeflow.job("my_job", capture_task_values={"load": ["k"]}):
-                    pass
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=1)
-        [created] = fake_ws.jobs.created
-        probe = created["tasks"][-1]
-        assert probe.job_cluster_key == "classic"
-        assert probe.notebook_task.notebook_path == "/Shared/helpers/get_values"
-
-    def test_helpers_on_existing_cluster(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        configure_lakeflow(pytester, 'helpers_compute="classic", existing_cluster_id="0123-456789-abcdef"')
-        pytester.makepyfile(
-            """
-            def test_task(lakeflow):
-                with lakeflow.task("my_job.transform", upstream_task_values={"extract": {"row_count": 1}}):
-                    pass
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=1)
-        [created] = fake_ws.jobs.created
-        stub = created["tasks"][0]
-        assert stub.task_key == "extract"
-        assert (stub.existing_cluster_id, stub.job_cluster_key) == ("0123-456789-abcdef", None)
-        assert "job_clusters" not in created
 
     def test_replay_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         queue_capturing_run(fake_ws, {"row_count": 42})
@@ -1127,7 +611,7 @@ class TestEndToEnd:
                 with lakeflow.task("my_job.transform", upstream_from=first, upstream_task_values=explicit):
                     pass
                 other = dataclasses.replace(first, job_key="other_job")
-                with pytest.raises(LakeflowError, match="run of job 'other_job', not of 'my_job'"):
+                with pytest.raises(ValueError, match="run of job 'other_job', not of 'my_job'"):
                     lakeflow.task("my_job.transform", upstream_from=other)
             """
         )
@@ -1239,37 +723,23 @@ class TestEndToEnd:
 
             from pytest_databricks_lakeflow import LakeflowError
 
-            def rejects(message):
-                return pytest.raises(LakeflowError, match=message)
-
             def test_replay(lakeflow):
                 first = lakeflow.job("my_job", capture_task_values={"extract": ["row_count"]}).run()
                 with lakeflow.job("my_job") as job:
-                    with rejects(r"replay.*before the job is created.*job \\d+ of 'my_job' already exists"):
+                    created = r"replay.*before the job is created.*job \\d+ of 'my_job' already exists"
+                    with pytest.raises(LakeflowError, match=created):
                         job.run(only=["transform"], replay=first)
                 job = lakeflow.job("my_job")
-                with rejects("replay stubs the tasks that only leaves out, so it needs only"):
+                with pytest.raises(ValueError, match="replay stubs the tasks that only leaves out, so it needs only"):
                     job.run(replay=first)
                 other = dataclasses.replace(first, job_key="other_job")
-                with rejects("replay is a run of job 'other_job', not of 'my_job'"):
+                with pytest.raises(ValueError, match="replay is a run of job 'other_job', not of 'my_job'"):
                     job.run(only=["transform"], replay=other)
-                with rejects("replay has no task values for 'transform', upstream of 'load': it has no captured"):
+                missing = "replay has no task values for 'transform', upstream of 'load': it has no captured"
+                with pytest.raises(LakeflowError, match=missing):
                     job.run(only=["load"], replay=first)
             """
         )
         pytester.runpytest().assert_outcomes(passed=1)
         assert len(fake_ws.jobs.created) == 2, "a rejected replay creates nothing"
         assert len(fake_ws.jobs.run_now_calls) == 1
-
-
-class TestEnvironmentCap:
-    """Per-job environments count towards the cap of ten together with the helper environment."""
-
-    def test_merge_environments_respects_the_cap(self) -> None:
-        settings = inject_probes(with_environment_count(9), {"load": ["k"]}, HELPERS)
-        with pytest.raises(LakeflowError, match="10") as e:
-            merge_environments(settings, {"extra": {"environment_version": "4"}})
-        assert "'default', 'env1'" in str(e.value) and f"'{ENV_KEY}', 'extra'" in str(e.value)
-        settings = inject_probes(with_environment_count(8), {"load": ["k"]}, HELPERS)
-        merged = merge_environments(settings, {"extra": {"environment_version": "4"}})
-        assert environment_keys(merged)[-2:] == [ENV_KEY, "extra"]

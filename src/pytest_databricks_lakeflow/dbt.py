@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from databricks.sdk.service import jobs
 
 log = logging.getLogger("pytest_databricks_lakeflow")
-
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 FAILED_STATUSES = frozenset({"error", "fail"})
 TIMEOUT_SECONDS = 60
@@ -111,7 +110,7 @@ def read_artifacts(
     except Exception as e:
         # Anything that goes wrong here, from a body cut off mid-read (http.client.IncompleteRead) to a truncated
         # gzip stream (EOFError), leaves the task's dbt None with a warning rather than failing the whole run.
-        log.warning("Could not read the dbt artefacts of task %r: %s", task_key, _reason(e, output.artifacts_link))
+        log.warning(f"Could not read the dbt artefacts of task {task_key!r}: {_reason(e, output.artifacts_link)}")
         return None
 
 

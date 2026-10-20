@@ -1,3 +1,5 @@
+"""Building a `JobRun` from a terminated run, with the runs recorded against a workspace."""
+
 from __future__ import annotations
 
 import json
@@ -12,58 +14,32 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs, pipelines
 
-from pytest_databricks_lakeflow import dbt
-from pytest_databricks_lakeflow.results import (
-    ForEachError,
-    ForEachStats,
-    JobRun,
-    TaskRun,
-    Timing,
-    build_job_run,
-    error_line,
-    serialise,
-    serialise_with_files,
-)
+from pytest_databricks_lakeflow import ForEachError, ForEachStats, JobRun, TaskRun, Timing, dbt
+from pytest_databricks_lakeflow.results.build import build_job_run, error_line
+from pytest_databricks_lakeflow.results.serialise import serialise_with_files
 
-from .fakes import (
+from .conftest import FAILED_EXPORT
+from .fakes.dbt import DBT_LINK, FakeDbtLinks, dbt_tarball
+from .fakes.runs import (
     ALERT_FAILED,
     ALL_DISABLED,
     DATA,
-    DBT_LINK,
     HOST,
     ITERATION_FAILED,
     PIPELINE_LOGS,
-    FakeDbtLinks,
-    FakeWorkspaceClient,
+    QUERY_FILE,
+    SQL_FILE_OUTPUT,
     RunWithIterations,
-    dbt_tarball,
     failed_alert_output,
     failed_alert_run,
     make_run,
     recorded,
     skipped_run,
 )
+from .fakes.workspace import FakeWorkspaceClient
 
 CAPTURE = {"transform": ["stage", "rows_written"]}
 RECORDED_RUNS = sorted(path.stem for path in (DATA / "runs").glob("*.json"))
-QUERY_FILE = "/Workspace/Users/someone@example.com/.bundle/lakeflow_sql/test/files/src/queries/count.sql"
-# The raw `runs/get-output` of the `sql` bundle's file task, as the workspace returned it. databricks-sdk does not
-# model `sql_output.file_output`, so `jobs.RunOutput.from_dict` drops it.
-SQL_FILE_OUTPUT = {
-    "sql_output": {
-        "file_output": {
-            "query_result": {
-                "columns": [{"name": "n", "type": "int"}],
-                "rows": [{"values": [{"string_value": "1"}]}],
-                "truncated": False,
-            },
-            "query_text": "SELECT 1 AS n\n",
-            "sql_statements": [{"lookup_key": "CiQwMWYx"}],
-            "warehouse_id": "0123456789abcdef",
-        }
-    }
-}
-FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
 JOB_TASK = pipelines.UpdateInfoCause.JOB_TASK
 
 
@@ -793,7 +769,7 @@ class TestDbtArtifacts:
         assert "Could not read the dbt artefacts of task 'expired'" in caplog.text
         assert run.task("check").dbt is None
         assert repr(run.task("dbt_build")) == repr(replace(run.task("dbt_build"), dbt=None))
-        assert serialise(run)["tasks"]["dbt_build"]["dbt"] == {
+        assert run.as_dict()["tasks"]["dbt_build"]["dbt"] == {
             "artifacts_dir": str(built.artifacts_dir),
             "results": {
                 "model.proj.orders": {
@@ -905,7 +881,7 @@ class TestPipelineUpdates:
         assert (update.cause, update.full_refresh) == ("JOB_TASK", True)
         assert run.task("check").pipeline_update is None
         assert ws.pipelines.calls == [{"method": "list_updates", "pipeline_id": "abc"}]
-        assert serialise(run)["tasks"]["refresh"]["pipeline_update"] == {
+        assert run.as_dict()["tasks"]["refresh"]["pipeline_update"] == {
             "pipeline_id": "abc",
             "update_id": "mine",
             "state": "COMPLETED",
@@ -1342,11 +1318,11 @@ def every_key(data: object) -> set[str]:
 
 
 class TestSerialise:
-    """serialise turns a JobRun into plain JSON and names its logs and exported notebooks as side files."""
+    """`JobRun.as_dict` turns a run into plain JSON and names its logs and exported notebooks as side files."""
 
     def test_serialise_recorded_run(self) -> None:
         run, _ = build("probe_failure", capture_task_values=CAPTURE)
-        data = json.loads(json.dumps(serialise(run)))
+        data = json.loads(json.dumps(run.as_dict()))
         run_fields = {f.name for f in fields(JobRun)} - {"duration"}
         assert set(data) == run_fields | {"duration_seconds", "succeeded"}
         assert (data["run_id"], data["succeeded"], data["duration_seconds"]) == (run.run_id, False, 60.355)
@@ -1397,7 +1373,7 @@ class TestSerialise:
             if task.logs:
                 expected.add(f"{run.run_id}/{task.task_key}.log")
         assert set(files) == expected
-        assert serialise(run) == data
+        assert run.as_dict() == data
 
     def test_serialise_leaves_dbt_artifacts_headers_out(self) -> None:
         ws = FakeWorkspaceClient()
@@ -1405,7 +1381,7 @@ class TestSerialise:
         dbt = jobs.DbtOutput(artifacts_link="https://x/y.tgz", artifacts_headers={"x-ms-signature": "secret"})
         ws.jobs.outputs[run_id_of(raw, "dbt_build")] = jobs.RunOutput(dbt_output=dbt)
         run = build_from(ws, raw)
-        assert serialise(run)["tasks"]["dbt_build"]["dbt_output"] == {"artifacts_link": "https://x/y.tgz"}
+        assert run.as_dict()["tasks"]["dbt_build"]["dbt_output"] == {"artifacts_link": "https://x/y.tgz"}
         assert run.task("dbt_build").dbt_output == dbt
 
     def test_serialise_names_the_exported_notebook(self) -> None:

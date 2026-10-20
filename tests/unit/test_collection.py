@@ -1,3 +1,5 @@
+"""`--lakeflow-check`: one check per bundle job, collected from each `databricks.yml` pytest sees."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +8,8 @@ import pytest
 from databricks.sdk.service import jobs
 
 from .conftest import LAKEFLOW_CONFTEST, FakeCli, configure_lakeflow
-from .fakes import FakeWorkspaceClient, example_settings
+from .fakes.templates import example_settings
+from .fakes.workspace import FakeWorkspaceClient
 
 UNDECLARED = "Task 'transform': {{job.parameters.nope}} is not declared. Declared: ['param1', 'schema']"
 
@@ -27,7 +30,6 @@ def miswired_settings() -> jobs.JobSettings:
 
 
 BUNDLE = "bundle:\n  name: example\n"
-
 DERIVED_CONFTEST = """
 import dataclasses
 

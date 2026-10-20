@@ -1,3 +1,5 @@
+"""Sweeping the jobs, pipeline copies, schemas and notebooks that earlier sessions left behind."""
+
 from __future__ import annotations
 
 import json
@@ -9,97 +11,30 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import catalog, jobs, pipelines, workspace
 
-from pytest_databricks_lakeflow import Lakeflow, SweepReport, session
-from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError, SweepReport, session, sweep, workspace_api
 from pytest_databricks_lakeflow.plugin import parse_duration
 
-from .conftest import FakeCli, configure_lakeflow, set_ci
-from .fakes import HOST, HOUR_MS, FakeWorkspaceClient, listed_job, make_run, queue_failed_run, sweep_candidates
-from .test_session import STAGING_FIXTURE, SWEEP_LOGGING, make_xdist_conftest
+from .conftest import (
+    FOLDER,
+    SWEEP_LOGGING,
+    USES_SCHEMA,
+    as_client,
+    configure_lakeflow,
+    make_xdist_conftest,
+    set_ci,
+    uses_lakeflow,
+)
+from .fakes.runs import HOST, HOUR_MS, listed_job, sweep_candidates
+from .fakes.workspace import FakeWorkspaceClient
 
-pytestmark = pytest.mark.usefixtures("fake_cli", "bundle_dir")
-
-DESTROY = ["bundle", "destroy", "-t", "test", "--auto-approve"]
-DESTROY_STAGING = ["bundle", "destroy", "-t", "staging", "--auto-approve"]
-DEPLOY_WITH_VARIABLES = ["bundle", "deploy", "-t", "test", "--auto-approve", "--var", "catalog=dev"]
-FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow"
 COLLEAGUE_FOLDER = "/Users/colleague@example.com/.pytest-databricks-lakeflow"
 DEBUG_FOLDER = f"{FOLDER}/debug"
 OLD = {"pytest": "", "pytest_run_id": "old-run"}
 SETUP_NOTEBOOK = f"{FOLDER}/setup_0123456789ab"
-USES_LAKEFLOW = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
-USES_SCHEMA = "def test_schema(lakeflow):\n    with lakeflow.schema():\n        pass\n"
-FAILING_JOB = "def test_{0}(lakeflow):\n    lakeflow.job('my_job').create()\n    assert False\n"
 CREATES_JOBS = "def test_{0}(lakeflow):\n    with lakeflow.job('my_job'):\n        pass\n"
-FAILED_RUN = (
-    "def test_{0}(lakeflow):\n    with lakeflow.job('my_job') as job:\n        job.run()\n        assert False\n"
-)
-SWEEP_HINT = "hint: pytest --lakeflow-sweep removes kept jobs older than sweep_hours"
-VARIABLES_FIXTURE = """
-
-@pytest.fixture(scope="session")
-def lakeflow():
-    return Lakeflow(variables={"catalog": "dev"})
-"""
-XDIST_WORKER_IDS = """
-
-import os
-
-
-def make_client(profile):
-    ws = FakeWorkspaceClient()
-    ws.jobs.add(example_settings())
-    ws.jobs.start_ids_at(1000 * (2 + int(os.environ["PYTEST_XDIST_WORKER"][2:])))
-    return ws
-"""
-# `my_job` is a job with one pipeline task, on pipeline `abc`, in every xdist worker.
-XDIST_PIPELINE_JOB = """
-
-from fakes import pipeline_settings, pipeline_spec
-
-
-def make_client(profile):
-    ws = FakeWorkspaceClient()
-    ws.jobs.add(pipeline_settings())
-    ws.pipelines.specs["abc"] = pipeline_spec()
-    return ws
-"""
-FAILING_COPY = (
-    "def test_{0}(lakeflow):\n    lakeflow.job('my_job', pipelines='copy', schema='c.s').create()\n    assert False\n"
-)
-XDIST_FAILED_TRANSFORM = """
-
-from databricks.sdk.service import jobs
-
-from fakes import make_run
-
-
-def make_client(profile):
-    ws = FakeWorkspaceClient()
-    ws.jobs.add(example_settings())
-    parameters = jobs.ResolvedNotebookTaskValues(base_parameters={"row_count": "7"})
-    ws.jobs.resolved[7700] = jobs.ResolvedValues(notebook_task=parameters)
-    # Terminated at the first poll, because the workers poll at the plugin's real interval.
-    for _ in range(2):
-        ws.jobs.queue_polls([make_run(77, {"transform": "FAILED"}, "FAILED")])
-    return ws
-"""
-
-
-def uses_lakeflow(*names: str) -> str:
-    return "\n".join(USES_LAKEFLOW.format(name) for name in names)
-
-
-def leaves_runs_active(runs: str) -> str:
-    return USES_LAKEFLOW.format("leak") + f"    lakeflow.active_runs.update({runs})\n"
-
-
-def as_client(ws: FakeWorkspaceClient) -> WorkspaceClient:
-    return cast(WorkspaceClient, ws)
 
 
 def ago(hours: float) -> int:
@@ -178,74 +113,21 @@ def sweep_workspace(ws: FakeWorkspaceClient | None = None) -> FakeWorkspaceClien
     return ws
 
 
-class TestSchemas:
-    """`Lakeflow.schema()` creates a temporary schema and drops it unless the keep rules say otherwise."""
-
-    def test_schema_is_created_and_dropped(
-        self,
-        pytester: pytest.Pytester,
-        fake_ws: FakeWorkspaceClient,
-        fake_cli: FakeCli,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("LAKEFLOW_RUN_ID", "CI-42")
-        configure_lakeflow(pytester, 'catalog="dev_sandbox"')
-        pytester.makepyfile(
-            """
-            import re
-
-            def test_schema(lakeflow):
-                with lakeflow.schema() as schema:
-                    assert re.fullmatch(r"dev_sandbox\\.pytest_ci_42_[0-9a-f]{8}", schema), schema
-
-            def test_failing(lakeflow):
-                with lakeflow.schema():
-                    assert False
-
-            def test_other_catalog(lakeflow):
-                with lakeflow.schema(catalog="other") as schema:
-                    assert schema.startswith("other.pytest_ci_42_")
-            """
-        )
-        pytester.runpytest().assert_outcomes(passed=2, failed=1)
-        assert len(set(fake_ws.schemas.created)) == 3
-        assert fake_ws.schemas.deleted == fake_ws.schemas.created
-        assert fake_cli.calls == []
-
-    @pytest.mark.parametrize(
-        ("arguments", "flags"), [('catalog="c", keep=True', []), ('catalog="c"', ["--lakeflow-keep"])]
-    )
-    def test_schema_is_kept_with_keep(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, arguments: str, flags: list[str]
-    ) -> None:
-        configure_lakeflow(pytester, arguments)
-        pytester.makepyfile(USES_SCHEMA)
-        pytester.runpytest(*flags).assert_outcomes(passed=1)
-        assert len(fake_ws.schemas.created) == 1
-        assert fake_ws.schemas.deleted == []
-
-    def test_schema_needs_a_catalog(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        pytester.makepyfile(USES_SCHEMA)
-        result = pytester.runpytest()
-        result.assert_outcomes(failed=1)
-        result.stdout.fnmatch_lines(["*Lakeflow.schema() needs a catalog*"])
-        assert fake_ws.schemas.created == []
-
-
+@pytest.mark.usefixtures("fake_cli", "bundle_dir")
 class TestSweep:
     """`--lakeflow-sweep` deletes this user's old `pytest` jobs from other runs, once, when the bundle is set up."""
 
     def test_sweep_deletes_old_jobs_of_other_runs(self) -> None:
         ws = FakeWorkspaceClient()
         ws.jobs.listed = sweep_candidates()
-        assert session.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (1, 7)
+        assert sweep.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (1, 7)
         assert ws.jobs.deleted == [1, 7]
 
     def test_sweep_carries_on_after_a_failed_delete(self, caplog: pytest.LogCaptureFixture) -> None:
         ws = FakeWorkspaceClient()
         ws.jobs.listed = sweep_candidates()
         ws.jobs.delete_errors[1] = PermissionDenied("not yours")
-        report = session.sweep(as_client(ws), "this-run", 0.5, FOLDER)
+        report = sweep.sweep(as_client(ws), "this-run", 0.5, FOLDER)
         assert report.jobs == (3, 7)
         assert report.errors == ("Could not delete job 1: not yours",)
         assert "Could not delete job 1: not yours" in caplog.text
@@ -297,8 +179,8 @@ class TestSweep:
     def test_sweep_scope_all_ignores_the_creator(self) -> None:
         ws = FakeWorkspaceClient()
         ws.jobs.listed = sweep_candidates()
-        options = session.SweepOptions(scope="all")
-        assert session.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1, 4, 7)
+        options = sweep.SweepOptions(scope="all")
+        assert sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1, 4, 7)
         assert ws.jobs.deleted == [1, 4, 7]
 
     def test_sweep_branch_filter(self) -> None:
@@ -309,14 +191,14 @@ class TestSweep:
             listed_job(3, 25, OLD),
             listed_job(4, 1, {**OLD, "pytest_git_branch": "main"}),
         ]
-        options = session.SweepOptions(branch="main")
-        assert session.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1,)
+        options = sweep.SweepOptions(branch="main")
+        assert sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options).jobs == (1,)
         assert ws.jobs.deleted == [1]
 
     def test_sweep_deletes_old_pipelines_of_other_runs(self) -> None:
         ws = FakeWorkspaceClient()
         sweep_pipelines(ws)
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER)
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER)
         assert report.pipelines == ("p-old", "p-expired")
         assert [each["pipeline_id"] for each in ws.pipelines.deleted] == ["p-old", "p-expired"]
         assert ws.pipelines.list_filters == ["name LIKE '[pytest] %'"]
@@ -324,22 +206,22 @@ class TestSweep:
     @pytest.mark.parametrize(
         ("options", "swept"),
         [
-            pytest.param(session.SweepOptions(scope="all"), ("p-old", "p-colleague", "p-expired"), id="scope_all"),
-            pytest.param(session.SweepOptions(branch="main"), ("p-old",), id="branch"),
+            pytest.param(sweep.SweepOptions(scope="all"), ("p-old", "p-colleague", "p-expired"), id="scope_all"),
+            pytest.param(sweep.SweepOptions(branch="main"), ("p-old",), id="branch"),
         ],
     )
     def test_sweep_applies_the_job_rules_to_pipelines(
-        self, options: session.SweepOptions, swept: tuple[str, ...]
+        self, options: sweep.SweepOptions, swept: tuple[str, ...]
     ) -> None:
         ws = FakeWorkspaceClient()
         sweep_pipelines(ws)
-        assert session.sweep(as_client(ws), "this-run", 24, FOLDER, options).pipelines == swept
+        assert sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options).pipelines == swept
 
     def test_sweep_records_a_pipeline_it_cannot_delete(self) -> None:
         ws = FakeWorkspaceClient()
         sweep_pipelines(ws)
         ws.pipelines.delete_errors["p-old"] = PermissionDenied("not yours")
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER)
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER)
         assert report.pipelines == ("p-expired",)
         assert report.errors == ("Could not delete pipeline p-old: not yours",)
 
@@ -360,9 +242,10 @@ class TestSweep:
             listed_job(4, 1, {**OLD, "pytest_expires": "next week"}),
             listed_job(5, 1, {"pytest": "", "pytest_run_id": "this-run", "pytest_expires": expires(-24)}),
         ]
-        assert session.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (2, 3)
+        assert sweep.sweep(as_client(ws), "this-run", 24, FOLDER).jobs == (2, 3)
 
 
+@pytest.mark.usefixtures("fake_cli", "bundle_dir")
 class TestSweepSchemasAndNotebooks:
     """`--lakeflow-sweep-schemas` and `--lakeflow-sweep-notebooks` drop only what the plugin made, once it is old."""
 
@@ -379,8 +262,8 @@ class TestSweepSchemasAndNotebooks:
     )
     def test_sweep_schemas_drops_stale_pytest_schemas(self, scope: str, dropped: tuple[str, ...]) -> None:
         ws = sweep_workspace()
-        options = session.SweepOptions(scope=cast(Any, scope), schemas_catalog="dev_sandbox")
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        options = sweep.SweepOptions(scope=cast(Any, scope), schemas_catalog="dev_sandbox")
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options)
         assert report.schemas == dropped
         assert tuple(ws.schemas.deleted) == dropped
         assert ws.workspace.deleted == []
@@ -388,7 +271,7 @@ class TestSweepSchemasAndNotebooks:
     @pytest.mark.parametrize("role", ["setup", "teardown"])
     def test_sweep_notebooks_keeps_the_helpers(self, role: str) -> None:
         ws = sweep_workspace()
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         assert f"{FOLDER}/{role}_0123456789ab" in report.notebooks
         assert f"{FOLDER}/{role}_ba9876543210" not in report.notebooks
         assert f"{FOLDER}/{role}_tables" not in report.notebooks
@@ -399,8 +282,8 @@ class TestSweepSchemasAndNotebooks:
     def test_sweep_records_a_listing_it_cannot_read(self) -> None:
         ws = sweep_workspace()
         ws.schemas.list_errors["dev_sandbox"] = PermissionDenied("no USE CATALOG")
-        options = session.SweepOptions(schemas_catalog="dev_sandbox", notebooks=True)
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        options = sweep.SweepOptions(schemas_catalog="dev_sandbox", notebooks=True)
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options)
         assert report.errors == ("Could not list the schemas in dev_sandbox: no USE CATALOG",)
         assert report.jobs == (1, 7)
         assert len(report.notebooks) == 2
@@ -420,7 +303,7 @@ class TestSweepSchemasAndNotebooks:
         used = f"{FOLDER}/setup_0123456789ab"
         fake_ws.jobs.listed = [listed_job(1, age_hours, tags, notebooks=[used])]
         fake_ws.workspace.listed = [notebook("setup_0123456789ab", 30)]
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         assert report.jobs == ((1,) if swept else ())
         assert report.notebooks == ((used,) if swept else ())
         assert fake_ws.jobs.list_kwargs == [{"limit": 100, "expand_tasks": True}]
@@ -440,7 +323,7 @@ class TestSweepSchemasAndNotebooks:
             notebook("my_job__transform__15", 30, folder=DEBUG_FOLDER),
             notebook("notes", 30, folder=DEBUG_FOLDER),
         ]
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         # Run 11 is of a job the expiry keeps, run 12 of a job this sweep deletes, run 13 no longer exists, and run 15
         # is of a job that is no longer listed.
         assert report.notebooks == (
@@ -477,7 +360,7 @@ class TestSweepSchemasAndNotebooks:
             fake_ws.jobs.list_error = PermissionDenied("no access")
         else:
             fake_ws.jobs.run_errors[12] = PermissionDenied("no access")
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         assert report.notebooks == swept
         assert fake_ws.workspace.deleted == list(swept)
         assert report.errors == (error,)
@@ -512,7 +395,7 @@ class TestSweepSchemasAndNotebooks:
     def test_sweep_notebooks_spares_every_kind_of_use(self, fake_ws: FakeWorkspaceClient, task: jobs.Task) -> None:
         fake_ws.jobs.listed = [listed_job(1, 30, {**OLD, "pytest_expires": expires(24)}, tasks=[task])]
         fake_ws.workspace.listed = [notebook("setup_0123456789ab", 30), notebook("teardown_0123456789ab", 30)]
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         assert report.notebooks == (f"{FOLDER}/teardown_0123456789ab",)
 
     def test_sweep_notebooks_reaches_inlined_query_files(self, fake_ws: FakeWorkspaceClient) -> None:
@@ -528,7 +411,7 @@ class TestSweepSchemasAndNotebooks:
             notebook("query_totals.sql", 30, workspace.ObjectType.FILE),
             notebook("query_old-run_each_76543210.sql", 30),
         ]
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, sweep.SweepOptions(notebooks=True))
         # The first is used by a job the expiry keeps, the third is young, and the last two are not named as the
         # plugin names a query file.
         assert report.notebooks == (f"{FOLDER}/query_old-run_each_89abcdef.sql",)
@@ -546,8 +429,8 @@ class TestSweepSchemasAndNotebooks:
             notebook("teardown_0123456789ab", 1, folder=COLLEAGUE_FOLDER),
         ]
         fake_ws.workspace.list_errors[locked] = PermissionDenied("not yours")
-        options = session.SweepOptions(scope="all", notebooks=True)
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, options)
+        options = sweep.SweepOptions(scope="all", notebooks=True)
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, options)
         assert report.notebooks == (f"{FOLDER}/setup_0123456789ab", f"{COLLEAGUE_FOLDER}/setup_0123456789ab")
         assert report.errors == (f"Could not list the notebooks in {locked}: not yours",)
         assert "/Users/nobody@example.com/.pytest-databricks-lakeflow" in fake_ws.workspace.list_calls
@@ -586,20 +469,21 @@ class TestSweepSchemasAndNotebooks:
         }
         for i, (age_hours, properties) in enumerate(names.values()):
             fake_ws.schemas.listed.append(schema(f"pytest_old_run_0000000{i}", age_hours, properties=properties))
-        options = session.SweepOptions(schemas_catalog="dev_sandbox", branch=branch)
-        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, options)
+        options = sweep.SweepOptions(schemas_catalog="dev_sandbox", branch=branch)
+        report = sweep.sweep(as_client(fake_ws), "this-run", 24, FOLDER, options)
         expected = tuple(f"dev_sandbox.pytest_old_run_0000000{list(names).index(name)}" for name in dropped)
         assert report.schemas == expected
 
 
+@pytest.mark.usefixtures("fake_cli", "bundle_dir")
 class TestSweepReport:
     """`--lakeflow-sweep-dry-run` deletes nothing, and `--lakeflow-sweep-report` writes what was or would be swept."""
 
     def test_sweep_dry_run_deletes_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.INFO, logger="pytest_databricks_lakeflow")
         ws = sweep_workspace()
-        options = session.SweepOptions(dry_run=True, schemas_catalog="dev_sandbox", notebooks=True)
-        report = session.sweep(as_client(ws), "this-run", 24, FOLDER, options)
+        options = sweep.SweepOptions(dry_run=True, schemas_catalog="dev_sandbox", notebooks=True)
+        report = sweep.sweep(as_client(ws), "this-run", 24, FOLDER, options)
         assert (ws.jobs.deleted, ws.schemas.deleted, ws.workspace.deleted) == ([], [], [])
         assert report.dry_run
         assert report.jobs == (1, 7)
@@ -709,6 +593,7 @@ class TestSweepReport:
         assert fake_ws.jobs.list_calls == 0
 
 
+@pytest.mark.usefixtures("fake_cli", "bundle_dir")
 class TestKeepTtl:
     """`--lakeflow-keep-ttl` tags every job with an expiry, which the sweep honours."""
 
@@ -795,235 +680,8 @@ class TestDeletePipeline:
     def test_delete_pipeline_passes_what_the_sdk_takes(
         self, monkeypatch: pytest.MonkeyPatch, parameters: set[str], flags: dict[str, bool | None]
     ) -> None:
-        monkeypatch.setattr(session, "PIPELINE_DELETE_PARAMETERS", frozenset(parameters))
+        monkeypatch.setattr(workspace_api, "PIPELINE_DELETE_PARAMETERS", frozenset(parameters))
         ws = FakeWorkspaceClient()
         ws.pipelines.specs["p-1"] = pipelines.PipelineSpec(id="p-1")
-        session.delete_pipeline(as_client(ws), "p-1")
+        workspace_api.delete_pipeline(as_client(ws), "p-1")
         assert ws.pipelines.deleted == [{"pipeline_id": "p-1", **flags}]
-
-
-class TestDestroy:
-    """`--lakeflow-destroy` runs `bundle destroy` once per deployed target at session end, after cleanup."""
-
-    def test_destroy_at_session_end(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        pytester.makepyfile(uses_lakeflow("a", "b"))
-        pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=2)
-        assert fake_cli.calls[-1] == DESTROY
-        assert fake_cli.calls.count(DESTROY) == 1
-
-    def test_destroy_each_deployed_target(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        configure_lakeflow(pytester, 'profile="dev"', STAGING_FIXTURE)
-        pytester.makepyfile("def test_a(lakeflow, staging):\n    lakeflow.template('my_job')\n    staging.templates\n")
-        pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=1)
-        destroys = [(args, profile) for args, _, profile in fake_cli.invocations if args[:2] == ["bundle", "destroy"]]
-        assert destroys == [(DESTROY, "dev"), (DESTROY_STAGING, None)]
-
-    def test_destroy_uses_the_deploy_variables(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        configure_lakeflow(pytester, 'variables={"catalog": "dev"}')
-        pytester.makepyfile(uses_lakeflow("a"))
-        pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=1)
-        assert fake_cli.calls[-1] == [*DESTROY, "--var", "catalog=dev"]
-        assert DEPLOY_WITH_VARIABLES in fake_cli.calls
-
-    def test_xdist_destroy_uses_the_deploy_variables(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        pytest.importorskip("xdist")
-        log = make_xdist_conftest(pytester, VARIABLES_FIXTURE)
-        pytester.makepyfile(uses_lakeflow(*map(str, range(4))))
-        pytester.runpytest("-n", "2", "--lakeflow-destroy").assert_outcomes(passed=4)
-        assert log.read_text().splitlines().count(" ".join(DEPLOY_WITH_VARIABLES)) == 1
-        assert fake_cli.calls == [[*DESTROY, "--var", "catalog=dev"]]
-
-    def test_xdist_controller_destroys_once(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        pytest.importorskip("xdist")
-        log = make_xdist_conftest(pytester)
-        pytester.makepyfile(uses_lakeflow(*map(str, range(4))))
-        pytester.runpytest("-n", "2", "--lakeflow-destroy").assert_outcomes(passed=4)
-        assert " ".join(DESTROY) not in log.read_text().splitlines()
-        assert fake_cli.calls == [DESTROY]
-
-    def test_no_destroy_without_the_flag(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        pytester.makepyfile(uses_lakeflow("a"))
-        pytester.runpytest().assert_outcomes(passed=1)
-        assert DESTROY not in fake_cli.calls
-
-    @pytest.mark.parametrize(
-        ("source", "flags", "outcomes"),
-        [
-            pytest.param("def test_a(lakeflow):\n    pass\n", [], {"passed": 1}, id="fixture_unused"),
-            pytest.param(
-                uses_lakeflow("a") + "\ndef test_b():\n    pass\n",
-                ["-m", "not lakeflow"],
-                {"passed": 1, "deselected": 1},
-                id="lakeflow_tests_deselected",
-            ),
-        ],
-    )
-    def test_no_destroy_when_nothing_was_set_up(
-        self, pytester: pytest.Pytester, fake_cli: FakeCli, source: str, flags: list[str], outcomes: dict[str, int]
-    ) -> None:
-        pytester.makepyfile(source)
-        pytester.runpytest("--lakeflow-destroy", *flags).assert_outcomes(**outcomes)
-        assert fake_cli.calls == []
-
-    def test_no_destroy_with_sync(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        configure_lakeflow(pytester, 'sync="sync"')
-        pytester.makepyfile("def test_a(lakeflow):\n    lakeflow.templates\n")
-        pytester.runpytest("--lakeflow-destroy").assert_outcomes(passed=1)
-        assert ["bundle", "sync", "-t", "test"] in fake_cli.calls
-        assert DESTROY not in fake_cli.calls
-
-    def test_setup_failure_skips_destroy(self, pytester: pytest.Pytester, fake_cli: FakeCli) -> None:
-        fake_cli.errors["deploy"] = LakeflowBundleError("deploy broke")
-        pytester.makepyfile(uses_lakeflow("a"))
-        pytester.runpytest("--lakeflow-destroy").assert_outcomes(failed=1)
-        assert DESTROY not in fake_cli.calls
-
-    @pytest.mark.parametrize(
-        ("extra_source", "lines"),
-        [
-            pytest.param("", ["*1 passed*"], id="passing_session"),
-            pytest.param(
-                "\ndef test_b(lakeflow):\n    assert False\n",
-                ["FAILED test_destroy_failure_fails_the_session.py::test_b*", "*1 failed, 1 passed*"],
-                id="failing_session",
-            ),
-        ],
-    )
-    def test_destroy_failure_fails_the_session(
-        self, pytester: pytest.Pytester, fake_cli: FakeCli, extra_source: str, lines: list[str]
-    ) -> None:
-        fake_cli.errors["destroy"] = LakeflowBundleError(
-            "`databricks bundle destroy` failed with exit code 1:\nError: x"
-        )
-        pytester.makepyfile(uses_lakeflow("a") + extra_source)
-        result = pytester.runpytest("--lakeflow-destroy")
-        assert result.ret == pytest.ExitCode.TESTS_FAILED
-        result.stdout.fnmatch_lines(["*lakeflow*destroy failed*", "*Error: x*"])
-        result.stdout.fnmatch_lines(lines)
-
-    def test_destroy_runs_after_interrupted_tests_are_cleaned_up(
-        self,
-        pytester: pytest.Pytester,
-        fake_ws: FakeWorkspaceClient,
-        fake_cli: FakeCli,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        order: list[str] = []
-
-        def record(args: list[str]) -> None:
-            if len(args) > 1:
-                order.append(f"cli {args[1]} deleted={fake_ws.jobs.deleted}")
-
-        def interrupted(run_id: int, **kwargs: Any) -> jobs.Run:
-            raise KeyboardInterrupt
-
-        fake_cli.before = record
-        fake_ws.jobs.queue(make_run(77, {"t": "SUCCESS"}))
-        monkeypatch.setattr(fake_ws.jobs, "get_run", interrupted)
-        pytester.makepyfile('def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
-        pytester.runpytest("--lakeflow-destroy", no_reraise_ctrlc=True)
-        assert fake_ws.jobs.cancelled == [77]
-        assert order[-1] == "cli destroy deleted=[1001]"
-
-
-class TestSessionEnd:
-    """Session end cancels the runs that tests left active and copes with xdist workers that report nothing."""
-
-    @pytest.mark.parametrize(("runs", "cancelled", "line"), [("{1}", [1], "1 run"), ("{3, 1}", [1, 3], "2 runs")])
-    def test_runs_left_active_are_cancelled_and_counted(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, runs: str, cancelled: list[int], line: str
-    ) -> None:
-        pytester.makepyfile(leaves_runs_active(runs))
-        result = pytester.runpytest()
-        result.assert_outcomes(passed=1)
-        assert fake_ws.jobs.cancelled == cancelled
-        result.stdout.fnmatch_lines(["*= lakeflow =*", f"lakeflow: {line} cancelled at session end"])
-        result.stdout.no_fnmatch_line("*kept*")
-
-    def test_updates_left_active_are_stopped(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        pytester.makepyfile(USES_LAKEFLOW.format("leak") + '    lakeflow.active_updates["p-1"] = "u-1"\n')
-        pytester.runpytest().assert_outcomes(passed=1)
-        assert fake_ws.pipelines.stopped == ["p-1"]
-
-    def test_crashed_xdist_worker_is_reported_normally(self, pytester: pytest.Pytester) -> None:
-        pytest.importorskip("xdist")
-        pytester.makepyfile(
-            "import os\n\ndef test_crash():\n    os._exit(3)\n\ndef test_a():\n    pass\n\ndef test_b():\n    pass\n"
-        )
-        result = pytester.runpytest("-n", "2")
-        assert "INTERNALERROR" not in result.stdout.str() + result.stderr.str()
-        result.stdout.fnmatch_lines(["*crashed while running*test_crash*", "*1 failed, 2 passed*"])
-
-
-class TestTerminalSummary:
-    """The `lakeflow` terminal section lists kept jobs and schemas from every xdist worker, only when there are any."""
-
-    def test_lists_kept_jobs(self, pytester: pytest.Pytester) -> None:
-        pytester.makepyfile(FAILING_JOB.format("kept") + "\n" + USES_LAKEFLOW.format("other"))
-        result = pytester.runpytest()
-        result.assert_outcomes(failed=1, passed=1)
-        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 job kept", f"  {HOST}/jobs/1001", SWEEP_HINT])
-        result.stdout.no_fnmatch_line("*schema* kept*")
-        result.stdout.no_fnmatch_line("*cancelled at session end*")
-
-    def test_lists_kept_schemas(self, pytester: pytest.Pytester) -> None:
-        configure_lakeflow(pytester, 'catalog="c"')
-        pytester.makepyfile(USES_SCHEMA)
-        result = pytester.runpytest("--lakeflow-keep")
-        result.assert_outcomes(passed=1)
-        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 1 schema kept", "  c.pytest_*"])
-        result.stdout.no_fnmatch_line(SWEEP_HINT)
-
-    def test_no_summary_when_nothing_was_kept(self, pytester: pytest.Pytester) -> None:
-        pytester.makepyfile("def test_job(lakeflow):\n    lakeflow.job('my_job').run()\n")
-        result = pytester.runpytest()
-        result.assert_outcomes(passed=1)
-        result.stdout.no_fnmatch_line("*= lakeflow =*")
-        result.stdout.no_fnmatch_line("lakeflow:*")
-
-    def test_xdist_controller_summarises_kept_jobs(self, pytester: pytest.Pytester) -> None:
-        pytest.importorskip("xdist")
-        make_xdist_conftest(pytester, XDIST_WORKER_IDS)
-        pytester.makepyfile(FAILING_JOB.format("a") + "\n" + FAILING_JOB.format("b"))
-        result = pytester.runpytest("-n", "2")
-        result.assert_outcomes(failed=2)
-        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 2 jobs kept", f"  {HOST}/jobs/*", f"  {HOST}/jobs/*"])
-        urls = [line for line in result.stdout.lines if line.startswith(f"  {HOST}/jobs/")]
-        assert len(urls) == 2
-        assert len(set(urls)) == 2
-
-    def test_xdist_controller_summarises_kept_pipelines(self, pytester: pytest.Pytester) -> None:
-        pytest.importorskip("xdist")
-        make_xdist_conftest(pytester, XDIST_PIPELINE_JOB)
-        pytester.makepyfile(FAILING_COPY.format("a") + "\n" + FAILING_COPY.format("b"))
-        result = pytester.runpytest("-n", "2")
-        result.assert_outcomes(failed=2)
-        pipeline = f"  {HOST}/pipelines/p-1000"
-        result.stdout.fnmatch_lines(
-            ["*= lakeflow =*", "lakeflow: 2 jobs kept", "lakeflow: 2 pipelines kept", pipeline, pipeline]
-        )
-
-    def test_lists_debug_notebooks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        queue_failed_run(fake_ws)
-        pytester.makepyfile(FAILED_RUN.format("failed"))
-        result = pytester.runpytest("--lakeflow-debug-notebook")
-        result.assert_outcomes(failed=1)
-        path = f"{FOLDER}/debug/my_job__transform__77"
-        url = f"{HOST}/#notebook/{fake_ws.workspace.object_ids[path]}"
-        result.stdout.fnmatch_lines(
-            [
-                "*= lakeflow =*",
-                "lakeflow: 1 job kept",
-                "*",
-                "lakeflow: 1 debug notebook written",
-                f"  {url} (test_lists_debug_notebooks.py::test_failed, task 'transform')",
-            ]
-        )
-
-    def test_xdist_controller_summarises_debug_notebooks(self, pytester: pytest.Pytester) -> None:
-        pytest.importorskip("xdist")
-        make_xdist_conftest(pytester, XDIST_FAILED_TRANSFORM)
-        pytester.makepyfile(FAILED_RUN.format("a") + "\n" + FAILED_RUN.format("b"))
-        result = pytester.runpytest("-n", "2", "--lakeflow-debug-notebook")
-        result.assert_outcomes(failed=2)
-        result.stdout.fnmatch_lines(["*= lakeflow =*", "lakeflow: 2 debug notebooks written", f"  {HOST}/#notebook/*"])

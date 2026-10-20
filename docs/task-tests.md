@@ -24,7 +24,7 @@ with lakeflow.task(
 - `environments` changes the job's serverless environments as for job tests, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created).
 - `run_as`, `children`, `extra_dependencies`, `environments`, `setup` and `teardown` take their default from the `Lakeflow` argument of the same name, as for job tests, and a call that passes one replaces the default. See [Defaults for per-call arguments](configuration.md#defaults-for-per-call-arguments).
 - `task_params` overrides the task's parameters as for [job tests](job-tests.md#make-a-job), such as `task_params={"transform": {"limit": "10"}}`. It is applied before the stubs are added, so only the task under test can be named, and a value that refers to `{{tasks.<key>.values.<name>}}` needs a stub for `<key>` like the task's own settings do.
-- `task_overrides` sets the task's timeout and retry fields as for job tests, see [Retries and timeouts](job-tests.md#retries-and-timeouts). It can name only the task under test, as `{"<task_key>": {...}}`; any other key raises `LakeflowError`.
+- `task_overrides` sets the task's timeout and retry fields as for job tests, see [Retries and timeouts](job-tests.md#retries-and-timeouts). It can name only the task under test, as `{"<task_key>": {...}}`; any other key raises `ValueError`.
 - `pipelines` and `schema` copy the pipeline that a pipeline task updates, as for job tests: with `pipelines="copy"` and `schema=` set to a name from `lakeflow.schema()`, the task updates a copy of its pipeline that publishes to that schema, see [Pipelines](job-tests.md#pipelines). A task that is not a pipeline task raises `LakeflowError` (`has no pipeline task to copy`).
 - `for_each_inputs` gives a for-each task under test the list it iterates over, such as `lakeflow.task("fanout.loop", for_each_inputs=["a"])`, in place of the deployed `inputs`, as `for_each_inputs` does for [job tests](job-tests.md#for-each-tasks). The job holds the for-each task, which runs its nested task once per item. When the task under test has no `for_each_task`, it raises `LakeflowError`.
 - `trigger` gives the task's `{{job.trigger.<path>}}` references the values a trigger would, such as `lakeflow.task("file_job.read_trigger", trigger={"type": "file_arrival", "file_arrival.location": "/Volumes/main/landing/orders/"})`, as for [job tests](job-tests.md#simulate-a-trigger). A path that the task's settings do not use raises `LakeflowError`.
@@ -67,7 +67,7 @@ The body's `{{input}}` and `{{input.<key>}}` references become `{{job.parameters
 - The body keeps all of its own settings, and takes the for-each task's `depends_on`, so `upstream_task_values` and `upstream_from` stub the for-each task's upstream tasks. The for-each task's `inputs` and `concurrency` are dropped.
 - `task_params` and `task_overrides` name the body by its own key, such as `task_params={"inner": {"limit": "10"}}`. A value in `task_params` may refer to `{{input}}` too.
 - `input` is a string, number, boolean or mapping, as a for-each item is. `None` means not given, and the platform refuses `null` as an item anyway.
-- `lakeflow.task()` raises `LakeflowError` before anything is created when the for-each task has no task with that key, when the body refers to `{{input}}` and `input` is missing, when `input` is given and the body does not refer to it or lacks a key the body reads, when it contains `{{`, or when it makes the job parameters, the `trigger` parameters and the test marker included, longer than the 10,000 characters as JSON that `jobs/create` accepts. `input=` with a two-part `ref` raises too.
+- `lakeflow.task()` raises `LakeflowError` before anything is created when the for-each task has no task with that key, when the body refers to `{{input}}` and `input` is missing, when `input` is given and the body does not refer to it or lacks a key the body reads, or when it makes the job parameters, the `trigger` parameters and the test marker included, longer than the 10,000 characters as JSON that `jobs/create` accepts. It raises `ValueError` when `input` contains `{{`, is not a string, number, boolean or mapping, or comes with a two-part `ref`.
 - A body that sets task values fails in its loop, because an iteration cannot set them ("setting task values is not supported for iterations"), but succeeds once lifted. `capture_task_values` on a body only shows what it would set outside a loop, so it emits a `UserWarning` saying the body cannot set task values when it runs in its loop.
 
 ## How stubs resolve
@@ -107,7 +107,7 @@ The plugin replaces each such reference in the task's settings with the literal 
 
 ## Rules for stub values
 
-The plugin checks these before creating the job and raises `LakeflowError` otherwise:
+The plugin checks these before creating the job and raises `ValueError` otherwise:
 
 - Each value must be JSON-serialisable.
 - Each value must be at most 49,152 characters as JSON, which is the platform's limit for a task value.
@@ -152,7 +152,7 @@ def test_replay_transform_from_a_full_run(lakeflow: Lakeflow) -> None:
         assert run.task("transform").output == "hello world"
 ```
 
-The Jobs API does not return task values, so the first run must capture them: pass `capture_task_values` with every upstream task and every key the task reads. `lakeflow.task()` raises `LakeflowError` before anything is created when `upstream_from` is a run of another job, or when an upstream task was not part of that run (left out by `only` or disabled) or has no captured values. An upstream task that sets no task values, such as one that only writes a table, has none to capture, so `upstream_from` raises for it too; stub it by passing it explicitly, such as `upstream_task_values={"write_table": {}}`. Only runs made by the plugin qualify; a production run had no probes, so its task values cannot be recovered.
+The Jobs API does not return task values, so the first run must capture them: pass `capture_task_values` with every upstream task and every key the task reads. `lakeflow.task()` raises `ValueError` before anything is created when `upstream_from` is a run of another job, and `LakeflowError` when an upstream task was not part of that run (left out by `only` or disabled) or has no captured values. An upstream task that sets no task values, such as one that only writes a table, has none to capture, so `upstream_from` raises for it too; stub it by passing it explicitly, such as `upstream_task_values={"write_table": {}}`. Only runs made by the plugin qualify; a production run had no probes, so its task values cannot be recovered.
 
 `upstream_task_values` still works alongside it. An entry replaces the values `upstream_from` holds for that task, and the stubs it names are added to those from the run, so a what-if test changes one value and keeps the rest:
 

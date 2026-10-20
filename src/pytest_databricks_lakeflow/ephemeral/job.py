@@ -1,6 +1,7 @@
+"""A throwaway copy of a bundle job, and the handle of a run it started."""
+
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import tempfile
@@ -8,89 +9,68 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import jobs, pipelines
+from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import helpers, session
-from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
-from pytest_databricks_lakeflow.results import (
-    PREFIX,
-    TEARDOWN_KEY,
-    DebugNotebook,
-    JobRun,
-    PipelineUpdate,
-    build_job_run,
-    describe_failing,
-    describe_notebooks,
-    duration,
-    error_line,
-    failing_parameters,
-    fetch_outputs,
-    format_parameters,
-    has_output,
-    task_outcome,
+from pytest_databricks_lakeflow import deployment, helpers, session, workspace_api
+from pytest_databricks_lakeflow.ephemeral.base import EphemeralResource
+from pytest_databricks_lakeflow.ephemeral.outcome import (
+    DEBUG_NOTEBOOKS,
+    PROGRESS,
+    RUNS,
+    emit,
+    record_outcome,
 )
-from pytest_databricks_lakeflow.settings import (
-    TIMEOUT_GRACE_SECONDS,
-    check_compute,
+from pytest_databricks_lakeflow.ephemeral.pipeline import EphemeralPipeline, close_all
+from pytest_databricks_lakeflow.ephemeral.polling import (
+    LoggedStates,
+    poll_seconds,
+    task_state,
+    task_states,
+    terminated,
+    transition,
+)
+from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
+from pytest_databricks_lakeflow.limits import TIMEOUT_GRACE_SECONDS, WIDGET_LIMIT_BYTES
+from pytest_databricks_lakeflow.naming import DEBUG_FOLDER, PREFIX, TEARDOWN_KEY
+from pytest_databricks_lakeflow.results.build import build_job_run, fetch_outputs, has_output
+from pytest_databricks_lakeflow.results.models import DebugNotebook, JobRun, task_outcome
+from pytest_databricks_lakeflow.settings.compute import check_compute, unreached_notebook_tasks
+from pytest_databricks_lakeflow.settings.lifecycle import name_lifecycle_params, rewire_teardown
+from pytest_databricks_lakeflow.settings.params import check_params, pipeline_params
+from pytest_databricks_lakeflow.settings.selection import (
     check_disabled,
     check_output_references,
-    check_params,
     check_references,
-    check_selections,
     check_trigger_references,
-    create_kwargs,
+    select,
+    selected_tasks,
+)
+from pytest_databricks_lakeflow.settings.stubs import stub_upstream, upstream_values_from
+from pytest_databricks_lakeflow.settings.tasks import (
     disabled_task_keys,
-    job_timeout_seconds,
-    name_lifecycle_params,
-    pipeline_params,
     pipeline_task_ids,
     require_task,
     rewire_pipelines,
-    rewire_teardown,
-    select,
-    selected_tasks,
-    stub_upstream,
-    unreached_notebook_tasks,
-    upstream_values_from,
 )
+from pytest_databricks_lakeflow.settings.template import create_kwargs, job_timeout_seconds
+from pytest_databricks_lakeflow.workspace_api import GRANT_ROLE, cancel_run
 
 if TYPE_CHECKING:
-    from databricks.sdk import WorkspaceClient
-
     from pytest_databricks_lakeflow.client import Lakeflow
 
 log = logging.getLogger("pytest_databricks_lakeflow")
-
-POLL_SECONDS = 2.0
-ROLE_FIX = f"{session.GRANT_ROLE}, or leave run_as out to run the copy as yourself."
-REPORTS = pytest.StashKey[dict[str, pytest.TestReport]]()
-PROGRESS = pytest.StashKey[list[str]]()
-NOTEBOOKS = pytest.StashKey[list[str]]()
-RUNS = pytest.StashKey[list[tuple["EphemeralJob", JobRun]]]()
-DEBUG_NOTEBOOKS = pytest.StashKey[list[DebugNotebook]]()
-TERMINATED = jobs.RunLifecycleStateV2State.TERMINATED
-TERMINAL_LIFE_CYCLE = (
-    jobs.RunLifeCycleState.TERMINATED,
-    jobs.RunLifeCycleState.SKIPPED,
-    jobs.RunLifeCycleState.INTERNAL_ERROR,
-)
-TERMINAL_UPDATE_STATES = frozenset({"COMPLETED", "FAILED", "CANCELED"})
+ROLE_FIX = f"{GRANT_ROLE}, or leave run_as out to run the copy as yourself."
 TeardownAt = Literal["run", "close"]
 TEARDOWN_AT: tuple[str, ...] = get_args(TeardownAt)
-
-# The last state logged for each task attempt, keyed by task key and attempt number, and whether it had terminated.
-LoggedStates = dict[tuple[str, int], tuple[str, bool]]
 
 
 @dataclass
@@ -108,7 +88,7 @@ class _Polling:
     cancelled: bool = False
 
 
-class EphemeralJob:
+class EphemeralJob(EphemeralResource):
     """A throwaway copy of a bundle job.
 
     The job is created on entering the `with` block, or by the first `run()` or `start()` when used without `with`.
@@ -125,9 +105,9 @@ class EphemeralJob:
         stubs: Keys of the stub tasks.
         extra_dependencies: The test-only dependencies passed to `job()` or `task()`, local wheels resolved to their
             uploaded copies.
-        pipelines: The pipeline copies that `pipelines="copy"` made, created just before the job and closed just after
-            it. They are chosen again when the job is created, after `modify_settings`, so a pipeline task that it
-            repoints or adds gets a copy too.
+        pipeline_copies: The pipeline copies that `pipelines="copy"` made, created just before the job and closed
+            just after it. They are chosen again when the job is created, after `modify_settings`, so a pipeline
+            task that it repoints or adds gets a copy too.
         teardown_at: When the teardown task runs. `"run"` runs it at the end of every run. `"close"` leaves it out
             of every run and runs it alone when the job closes, so the test's assertions still see what it removes.
         job_id: The job's id, once created.
@@ -149,18 +129,18 @@ class EphemeralJob:
         stubs: Collection[str] = (),
         *,
         extra_dependencies: Sequence[str] = (),
-        pipelines: Sequence[EphemeralPipeline] = (),
+        pipeline_copies: Sequence[EphemeralPipeline] = (),
         teardown_at: TeardownAt = "run",
         query_files: Mapping[str, str] | None = None,
     ) -> None:
-        self.lakeflow = lakeflow
+        super().__init__(lakeflow)
         self.job_key = job_key
         self.settings = settings
         self.params = dict(params or {})
         self.capture_task_values = {key: list(keys) for key, keys in (capture_task_values or {}).items()}
         self.stubs = frozenset(stubs)
         self.extra_dependencies = list(extra_dependencies)
-        self.pipelines = list(pipelines)
+        self.pipeline_copies = list(pipeline_copies)
         self.teardown_at = teardown_at
         self.query_files = dict(query_files or {})
         self._query_files_uploaded = False
@@ -169,13 +149,11 @@ class EphemeralJob:
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
         self.teardown_run: JobRun | None = None
-        self._ran = False
+        self.ran = False
         self._run_urls: dict[int, str] = {}
         self._active: dict[int, pytest.Item] = {}
         # The cap whose slots this job's runs hold, under --lakeflow-max-concurrent-runs or max_concurrent_runs.
         self._slots: session.RunSlots | None = None
-        self._entered = False
-        self._closed = False
         self._timeout_raised = False
 
     @property
@@ -184,17 +162,6 @@ class EphemeralJob:
         if self.job_id is None:
             return None
         return f"{self.lakeflow.ws.config.host}/jobs/{self.job_id}"
-
-    def __enter__(self) -> EphemeralJob:
-        self.create()
-        self._entered = True
-        return self
-
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
-    ) -> None:
-        failed = exc_type is not None and not issubclass(exc_type, (pytest.skip.Exception, pytest.xfail.Exception))
-        self.close(failed=failed)
 
     def create(self) -> None:
         """Create the job if it does not exist yet, after the pipeline copies its pipeline tasks point at.
@@ -228,7 +195,7 @@ class EphemeralJob:
         self._create_pipelines()
         self._upload_query_files()
         self.job_id = self._create_job()
-        log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
+        log.info(f"Created job {self.job_id} from {self.job_key}: {self.url}")
         item.user_properties.append(("lakeflow_job_url", self.url))
         item.user_properties.append(("lakeflow_job_id", self.job_id))
 
@@ -247,11 +214,11 @@ class EphemeralJob:
     def _create_pipelines(self) -> None:
         """Create the pipeline copies and point the job's pipeline tasks at them."""
         if self._copy_pipeline is not None:
-            self.pipelines = self._chosen_pipelines(self._copy_pipeline)
+            self.pipeline_copies = self._chosen_pipelines(self._copy_pipeline)
             # Chosen once: a second create() after a failed one finds the tasks on the copies already.
             self._copy_pipeline = None
         copies: dict[str, str] = {}
-        for copy in self.pipelines:
+        for copy in self.pipeline_copies:
             copy.create()
             assert copy.pipeline_id is not None
             copies[copy.source_id] = copy.pipeline_id
@@ -262,7 +229,7 @@ class EphemeralJob:
 
         A copy that `job()` made for a pipeline that no task updates any more is dropped, unless it has been created.
         """
-        made = {copy.source_id: copy for copy in self.pipelines}
+        made = {copy.source_id: copy for copy in self.pipeline_copies}
         chosen: list[EphemeralPipeline] = []
         for pipeline_id in pipeline_task_ids(self.settings):
             if pipeline_id in made:
@@ -306,12 +273,12 @@ class EphemeralJob:
             ) from e
 
     def _has_sp_user_role(self, application_id: str) -> bool | None:
-        """`session.check_sp_user_role` for the creator, read once per session for each service principal."""
+        """`workspace_api.check_sp_user_role` for the creator, read once per session for each service principal."""
         ws = self.lakeflow.ws
         roles = session.current().sp_user_roles
         key = (str(ws.config.host), self._creator(), application_id)
         if key not in roles:
-            roles[key] = session.check_sp_user_role(ws, application_id)
+            roles[key] = workspace_api.check_sp_user_role(ws, application_id)
         return roles[key]
 
     def _creator(self) -> str:
@@ -321,8 +288,8 @@ class EphemeralJob:
         self,
         params: Mapping[str, str] | None = None,
         only: Sequence[str] | None = None,
-        timeout: timedelta | None = None,
         *,
+        timeout: timedelta | None = None,
         stop_after: timedelta | None = None,
         performance_target: jobs.PerformanceTarget | str | None = None,
         queue: bool | None = None,
@@ -386,17 +353,18 @@ class EphemeralJob:
             The run's outcome.
 
         Raises:
+            ValueError: If `performance_target` is not a known performance target, `stop_after` is longer than
+                `timeout`, `dbt_commands` is empty or a string, or `replay` is passed without `only` or is a run of
+                another job.
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
                 task or a task that is disabled in the copy or downstream of a disabled task, which the platform
                 would run, a selected task refers to the task values or the output of a task that `only` leaves out
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
-                is set and the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`.
-                Also if `replay` is passed without `only` or to a job that has been created, is a run of another job, or
-                lacks the captured values of a task it would stub, and if `dbt_commands` is empty, a string, or passed
-                to a job with job parameters. Each is raised before the run starts. Also if no run ends within
-                `timeout` while the process has as many runs active as `max_concurrent_runs` allows, as for `start()`.
+                is set and the installed databricks-sdk cannot send it, `replay` is passed to a job that has been
+                created or lacks the captured values of a task it would stub, or `dbt_commands` is passed to a job
+                with job parameters. Each is raised before the run starts. Also if no run ends within `timeout`
+                while the process has as many runs active as `max_concurrent_runs` allows, as for `start()`.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
-            ValueError: If `performance_target` is not a known performance target.
         """
         if stop_after is not None:
             limit = timeout
@@ -467,15 +435,15 @@ class EphemeralJob:
             A handle to wait for the run or cancel it.
 
         Raises:
+            ValueError: If `performance_target` is not a known performance target, or `dbt_commands` is empty or a
+                string.
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
                 task or a task that is disabled in the copy or downstream of a disabled task, which the platform
                 would run, a selected task refers to the task values or the output of a task that `only` leaves out
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
-                is set and the installed databricks-sdk cannot send it, or `dbt_commands` is empty, a string, or
-                passed to a job with job parameters. Also
-                if no run ends within `timeout` while the process has as many runs active as `max_concurrent_runs`
-                allows.
-            ValueError: If `performance_target` is not a known performance target.
+                is set and the installed databricks-sdk cannot send it, or `dbt_commands` is passed to a job with
+                job parameters. Also if no run ends within `timeout` while the process has as many runs active as
+                `max_concurrent_runs` allows.
         """
         return self._start(
             params,
@@ -621,9 +589,9 @@ class EphemeralJob:
             self._slots = slots
         self._active[run_id] = item
         self.lakeflow.active_runs.add(run_id)
-        self._ran = True
-        log.info("Started run %s of job %s", run_id, self.job_id)
-        log.debug("Run %s was started with idempotency token %s", run_id, token)
+        self.ran = True
+        log.info(f"Started run {run_id} of job {self.job_id}")
+        log.debug(f"Run {run_id} was started with idempotency token {token}")
         first = ws.jobs.get_run(run_id)
         self._record_url(run_id, first, item)
         return run_id, first
@@ -643,13 +611,11 @@ class EphemeralJob:
         if slots.semaphore.acquire(blocking=False):
             return slots
         log.info(
-            "Waiting to start a run of job %s until one of the active runs %s ends, under max_concurrent_runs=%s",
-            self.job_id,
-            sorted(slots.holders),
-            slots.cap,
+            f"Waiting to start a run of job {self.job_id} until one of the active runs {sorted(slots.holders)} ends, "
+            f"under max_concurrent_runs={slots.cap}"
         )
         deadline = time.monotonic() + timeout.total_seconds()
-        interval = _poll_seconds(self.lakeflow)
+        interval = poll_seconds(self.lakeflow)
         while True:
             _release_ended(slots)
             if slots.semaphore.acquire(timeout=min(interval, max(deadline - time.monotonic(), 0.0))):
@@ -672,7 +638,7 @@ class EphemeralJob:
                 "lakeflow.job(...)."
             )
         if not only:
-            raise LakeflowError("replay stubs the tasks that only leaves out, so it needs only")
+            raise ValueError("replay stubs the tasks that only leaves out, so it needs only")
         selected = selected_tasks(self.settings, only, self.stubs)
         explicit = selected | self.stubs
         for task in self.settings.tasks or []:
@@ -724,12 +690,8 @@ class EphemeralJob:
             source = ", which the template or modify_settings set,"
         log.log(
             level,
-            "Raised timeout_seconds of job %s from %s%s to %s for a run timeout of %s",
-            self.job_id,
-            limit,
-            source,
-            needed,
-            timeout,
+            f"Raised timeout_seconds of job {self.job_id} from {limit}{source} to {needed} for a run timeout of "
+            f"{timeout}",
         )
         self.settings.timeout_seconds = needed
         self._timeout_raised = True
@@ -767,7 +729,7 @@ class EphemeralJob:
             stop_at = first_at + stop_after.total_seconds()
         # A snapshot older than one poll interval is polled again at once, without a sleep or the deadline check, so
         # a wait() long after start() neither sleeps on it nor times out a run that has finished since.
-        stale = first is not None and time.monotonic() - first_at >= _poll_seconds(self.lakeflow)
+        stale = first is not None and time.monotonic() - first_at >= poll_seconds(self.lakeflow)
         polling = _Polling(run_id, item, stream)
         run = self._poll(polling, deadline, first, stale, stop_at)
         if terminated(run):
@@ -777,7 +739,7 @@ class EphemeralJob:
         self._forget(run_id)
         message = (
             f"Run {run_id} of {self.job_key!r} did not finish within {timeout} and was cancelled: "
-            f"{run.run_page_url}\nTasks when cancelled: {_task_states(run)}"
+            f"{run.run_page_url}\nTasks when cancelled: {task_states(run)}"
         )
         self._report_cancelled(polling)
         raise LakeflowTimeout(message)
@@ -796,7 +758,7 @@ class EphemeralJob:
         checked only after a fresh poll, so a `stale` snapshot is polled again first.
         """
         ws = self.lakeflow.ws
-        interval = _poll_seconds(self.lakeflow)
+        interval = poll_seconds(self.lakeflow)
         progress = polling.item.stash.setdefault(PROGRESS, [])
         run = first
         if run is None:
@@ -829,7 +791,7 @@ class EphemeralJob:
             result = self._read_cancelled(polling)
         # The report never stops the job from being deleted, nor hides the LakeflowTimeout about to be raised.
         except Exception as e:
-            log.warning("Could not read cancelled run %s of %r for the report: %s", polling.run_id, self.job_key, e)
+            log.warning(f"Could not read cancelled run {polling.run_id} of {self.job_key!r} for the report: {e}")
             return
         if result is not None:
             polling.item.stash.setdefault(RUNS, []).append((self, result))
@@ -840,11 +802,8 @@ class EphemeralJob:
         if terminated(run):
             return self._job_run(run, polling.outputs)
         log.warning(
-            "Run %s of %r had not ended %s seconds after it was cancelled, so report.json does not list it: %s",
-            polling.run_id,
-            self.job_key,
-            TIMEOUT_GRACE_SECONDS,
-            run.run_page_url,
+            f"Run {polling.run_id} of {self.job_key!r} had not ended {TIMEOUT_GRACE_SECONDS} seconds after it was "
+            f"cancelled, so report.json does not list it: {run.run_page_url}"
         )
         return None
 
@@ -884,7 +843,7 @@ class EphemeralJob:
             directory.rmdir()
             return
         if session.current().keeps(self.lakeflow.keep, keep_failed=False, failed=False):
-            log.warning("Keeping the dbt artefacts of run %s in %s", run_id, directory)
+            log.warning(f"Keeping the dbt artefacts of run {run_id} in {directory}")
             return
         session.current_item().config.add_cleanup(partial(shutil.rmtree, directory, ignore_errors=True))
 
@@ -905,7 +864,7 @@ class EphemeralJob:
         states: list[tuple[jobs.RunTask, str | None, bool]] = []
         finished: list[jobs.RunTask] = []
         for task in run.tasks or []:
-            state, done = _task_state(task)
+            state, done = task_state(task)
             states.append((task, state, done))
             if done and task.run_id is not None and task.run_id not in outputs and has_output(task):
                 finished.append(task)
@@ -915,9 +874,9 @@ class EphemeralJob:
             previous, was_done = logged.get(key, (None, False))
             if state is None or was_done or previous == state:
                 continue
-            line = _transition(task, previous, state, outputs.get(task.run_id or 0), done)
+            line = transition(task, previous, state, outputs.get(task.run_id or 0), done)
             logged[key] = (state, done)
-            log.info("%s", line)
+            log.info(line)
             if polling.stream:
                 emit(polling.item, line)
             progress.append(line)
@@ -967,10 +926,10 @@ class EphemeralJob:
             "platform resolved them"
         )
         source = helpers.debug_notebook_source(notebook.notebook_path, parameters, heading=heading)
-        folder = session.folder_of_helpers(self.lakeflow._state())
-        path = f"{folder}/{helpers.DEBUG_FOLDER}/{self.job_key}__{task_key}__{run.run_id}"
+        folder = deployment.folder_of_helpers(self.lakeflow._state())
+        path = f"{folder}/{DEBUG_FOLDER}/{self.job_key}__{task_key}__{run.run_id}"
         url = helpers.upload_notebook(self.lakeflow.ws, path, source)
-        log.info("Wrote a debug notebook for task %r of run %s: %s", task_key, run.run_id, url)
+        log.info(f"Wrote a debug notebook for task {task_key!r} of run {run.run_id}: {url}")
         written = DebugNotebook(task_key=task_key, run_id=run.run_id, path=path, url=url)
         state = session.current()
         state.debug_notebooks.append(_summary_line(written, state.item, helpers.cut_parameters(parameters)))
@@ -1053,17 +1012,17 @@ class EphemeralJob:
 
     def _run_teardown_alone(self) -> None:
         """Run the teardown task alone for `teardown_at="close"`, setting `teardown_run`. Errors are only logged."""
-        if self.teardown_at != "close" or self.job_id is None or not self._ran:
+        if self.teardown_at != "close" or self.job_id is None or not self.ran:
             return
         # As for Lakeflow.schema(), only keep skips the clean-up: a job kept because its test failed is still cleaned.
         if session.current().keeps(self.lakeflow.keep, keep_failed=False, failed=False):
-            log.warning("Not running the teardown task of job %s, which is kept with what its runs wrote", self.job_id)
+            log.warning(f"Not running the teardown task of job {self.job_id}, which is kept with what its runs wrote")
             return
         try:
             result = self._wait_for_teardown()
         # The teardown run never stops the job from being deleted, nor fails the test that made it.
         except Exception as e:
-            log.warning("The teardown run of job %s from %r did not finish: %s", self.job_id, self.job_key, e)
+            log.warning(f"The teardown run of job {self.job_id} from {self.job_key!r} did not finish: {e}")
             return
         self.teardown_run = result
         teardown = result.teardown
@@ -1072,7 +1031,7 @@ class EphemeralJob:
         outcome = f"ended {result.result_state} without running the teardown task"
         if teardown is not None:
             outcome = f"failed: {task_outcome(teardown)}"
-        log.warning("The teardown run %s of job %s %s: %s", result.run_id, self.job_id, outcome, result.run_url)
+        log.warning(f"The teardown run {result.run_id} of job {self.job_id} {outcome}: {result.run_url}")
 
     def _wait_for_teardown(self) -> JobRun:
         item = session.current_item()
@@ -1083,14 +1042,14 @@ class EphemeralJob:
         run, outputs = self._wait(run_id, self.lakeflow.timeout, item, first, time.monotonic())
         self._forget(run_id)
         result = self._job_run(run, outputs)
-        log.info("Teardown run %s of job %s finished %s: %s", run_id, self.job_id, result.result_state, result.run_url)
+        log.info(f"Teardown run {run_id} of job {self.job_id} finished {result.result_state}: {result.run_url}")
         return result
 
     def _close_pipelines(self, failed: bool) -> None:
         if self.job_id is None:
             self._warn_copies_not_kept(failed)
             failed = False
-        _close_all(self.pipelines, failed)
+        close_all(self.pipeline_copies, failed)
 
     def _warn_copies_not_kept(self, failed: bool) -> None:
         """Warn when `keep_failed` alone would have kept the copies of a job that was never created."""
@@ -1099,13 +1058,11 @@ class EphemeralJob:
         kept_if_failed = state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed)
         if kept_anyway or not kept_if_failed:
             return
-        made = [copy.pipeline_id for copy in self.pipelines if copy.pipeline_id is not None]
+        made = [copy.pipeline_id for copy in self.pipeline_copies if copy.pipeline_id is not None]
         if made:
             log.warning(
-                "The job copying %r was not created, so no job points at its pipeline copies %s, and they are "
-                "deleted whatever keep_failed says",
-                self.job_key,
-                made,
+                f"The job copying {self.job_key!r} was not created, so no job points at its pipeline copies "
+                f"{made}, and they are deleted whatever keep_failed says"
             )
 
     def _write_debug_notebooks(self) -> None:
@@ -1122,20 +1079,20 @@ class EphemeralJob:
                     continue
                 self.debug_notebook(key, run)
             except (LakeflowError, DatabricksError) as e:
-                log.warning("Could not write a debug notebook for task %r of run %s: %s", key, run.run_id, e)
+                log.warning(f"Could not write a debug notebook for task {key!r} of run {run.run_id}: {e}")
 
     def _delete_unless_kept(self, failed: bool) -> None:
         if self.job_id is None:
             return
         state = session.current()
         if state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
-            log.warning("Keeping job %s from %s: %s", self.job_id, self.job_key, self.url)
+            log.warning(f"Keeping job {self.job_id} from {self.job_key}: {self.url}")
             state.kept_jobs.append(str(self.url))
             for url in self._run_urls.values():
-                log.warning("Kept run: %s", url)
+                log.warning(f"Kept run: {url}")
             return
         self.lakeflow.ws.jobs.delete(self.job_id)
-        log.info("Deleted job %s", self.job_id)
+        log.info(f"Deleted job {self.job_id}")
 
     def _delete_query_files(self, failed: bool) -> None:
         if not self._query_files_uploaded:
@@ -1146,12 +1103,7 @@ class EphemeralJob:
             try:
                 self.lakeflow.ws.workspace.delete(path)
             except DatabricksError as e:
-                log.warning("Could not delete %s, which --lakeflow-sweep-notebooks deletes later: %s", path, e)
-
-    def _teardown(self, item: pytest.Item) -> None:
-        """Close the job at the end of the test that made it, unless a `with` block closes it."""
-        if not self._entered:
-            self.close(failed=item_failed(item.stash))
+                log.warning(f"Could not delete {path}, which --lakeflow-sweep-notebooks deletes later: {e}")
 
     def _cancel(self, run_id: int) -> None:
         cancel_run(self.lakeflow.ws, run_id)
@@ -1218,9 +1170,9 @@ class RunHandle:
             The run's outcome, which is also appended to the job's `runs`.
 
         Raises:
-            LakeflowError: If the job closed before the run finished, which cancelled the run, `timeout` is longer
-                than the job's `timeout_seconds`, or `stop_after` is longer than `timeout`. In the last two cases the
-                run goes on.
+            ValueError: If `stop_after` is longer than `timeout`. The run goes on.
+            LakeflowError: If the job closed before the run finished, which cancelled the run, or `timeout` is longer
+                than the job's `timeout_seconds`, in which case the run goes on.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
         """
         if self._result is not None:
@@ -1253,7 +1205,7 @@ class RunHandle:
             self._item.stash.setdefault(RUNS, []).append((job, result))
         record_outcome(self._item, result)
         finished = f"Run {self.run_id} finished {result.result_state} in {result.duration}: {result.run_url}"
-        log.info("%s", finished)
+        log.info(finished)
         if stream:
             emit(self._item, finished)
         _warn_on_failed_teardown(result)
@@ -1288,259 +1240,16 @@ class RunHandle:
         self.job._cancel(self.run_id)
 
 
-class EphemeralPipeline:
-    """A throwaway copy of a deployed pipeline, publishing to a schema that the test chose.
-
-    The copy is created on entering the `with` block, or by the first `run()` when used without `with`. It is
-    deleted with its tables on leaving the block, or at the end of the test that made it, unless `keep` is set or the
-    test failed and `keep_failed` is on. An update that is still running then is stopped first. The copies that
-    `pipelines="copy"` makes for a job are created and closed by that job instead.
-
-    Attributes:
-        lakeflow: The `Lakeflow` that made the copy.
-        pipeline_key: The bundle resource key of the pipeline it copies, or that pipeline's id when the bundle does
-            not define it.
-        source_id: The id of the pipeline it copies.
-        create_kwargs: The arguments the copy is created with, as `pipelines.create` takes them.
-        schema: The full name of the schema the copy publishes to.
-        pipeline_id: The copy's id, once created.
-        updates: The outcome of each update that `run()` waited for, in order.
-    """
-
-    def __init__(
-        self,
-        lakeflow: Lakeflow,
-        pipeline_key: str,
-        source_id: str,
-        create_kwargs: Mapping[str, Any],
-        schema: str,
-    ) -> None:
-        self.lakeflow = lakeflow
-        self.pipeline_key = pipeline_key
-        self.source_id = source_id
-        self.create_kwargs = dict(create_kwargs)
-        self.schema = schema
-        self.pipeline_id: str | None = None
-        self.updates: list[PipelineUpdate] = []
-        self._active_update: str | None = None
-        self._entered = False
-        self._closed = False
-
-    @property
-    def url(self) -> str | None:
-        """The copy's page in the workspace, or `None` before it is created."""
-        if self.pipeline_id is None:
-            return None
-        return f"{self.lakeflow.ws.config.host}/pipelines/{self.pipeline_id}"
-
-    def __enter__(self) -> EphemeralPipeline:
-        self.create()
-        self._entered = True
-        return self
-
-    def __exit__(
-        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
-    ) -> None:
-        failed = exc_type is not None and not issubclass(exc_type, (pytest.skip.Exception, pytest.xfail.Exception))
-        self.close(failed=failed)
-
-    def create(self) -> None:
-        """Create the copy if it does not exist yet.
-
-        Raises:
-            LakeflowError: If the copy has been closed. Errors from `pipelines.create` are raised unchanged.
-        """
-        if self._closed:
-            raise LakeflowError(f"The ephemeral pipeline for {self.pipeline_key!r} has already been closed")
-        if self.pipeline_id is not None:
-            return
-        item = session.current_item()
-        self.pipeline_id = self.lakeflow.ws.pipelines.create(**self.create_kwargs).pipeline_id
-        log.info("Created pipeline %s from %s: %s", self.pipeline_id, self.pipeline_key, self.url)
-        item.user_properties.append(("lakeflow_pipeline_url", self.url))
-        item.user_properties.append(("lakeflow_pipeline_id", self.pipeline_id))
-
-    def run(
-        self,
-        *,
-        full_refresh: bool | None = None,
-        full_refresh_selection: Sequence[str] | None = None,
-        refresh_selection: Sequence[str] | None = None,
-        timeout: timedelta | None = None,
-    ) -> PipelineUpdate:
-        """Run an update of the copy and wait for it to end, creating the copy first if needed.
-
-        A failed update is returned, not raised: check its `state`, and read what went wrong with
-        `events(level="ERROR")`. Each change of the update's state is logged and shown in the `lakeflow` report
-        section of the test.
-
-        Args:
-            full_refresh: Whether the update refreshes every table from scratch.
-            full_refresh_selection: Tables that the update refreshes from scratch.
-            refresh_selection: Tables that the update refreshes.
-            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`.
-
-        Returns:
-            The update, which is also appended to `updates`.
-
-        Raises:
-            LakeflowError: If the copy has been closed, or a selection is a string rather than a list of names.
-            LakeflowTimeout: If the update did not end in time. It is stopped first.
-        """
-        check_selections({"full_refresh_selection": full_refresh_selection, "refresh_selection": refresh_selection})
-        self.create()
-        assert self.pipeline_id is not None
-        ws = self.lakeflow.ws
-        response = ws.pipelines.start_update(
-            self.pipeline_id,
-            full_refresh=full_refresh,
-            full_refresh_selection=_as_list(full_refresh_selection),
-            refresh_selection=_as_list(refresh_selection),
-        )
-        update_id = response.update_id
-        assert update_id is not None
-        self._active_update = update_id
-        self.lakeflow.active_updates[self.pipeline_id] = update_id
-        log.info("Started update %s of pipeline %s", update_id, self.pipeline_id)
-        if timeout is None:
-            timeout = self.lakeflow.timeout
-        info = self._wait(update_id, timeout)
-        self._forget_update()
-        update = PipelineUpdate.from_info(ws, info)
-        self.updates.append(update)
-        log.info("Update %s of pipeline %s finished %s: %s", update_id, self.pipeline_id, update.state, self.url)
-        return update
-
-    def _wait(self, update_id: str, timeout: timedelta) -> pipelines.UpdateInfo:
-        """Poll the update until it ends, logging each change of its state. On timeout, stop it and raise."""
-        assert self.pipeline_id is not None
-        ws = self.lakeflow.ws
-        progress = session.current_item().stash.setdefault(PROGRESS, [])
-        deadline = time.monotonic() + timeout.total_seconds()
-        previous: str | None = None
-        while True:
-            info = ws.pipelines.get_update(self.pipeline_id, update_id).update or pipelines.UpdateInfo()
-            state = info.state.value if info.state else None
-            if state is not None and state != previous:
-                line = f"pipeline {self.pipeline_key}: {state}"
-                if previous is not None:
-                    line = f"pipeline {self.pipeline_key}: {previous} -> {state}"
-                log.info("%s", line)
-                progress.append(line)
-                previous = state
-            if state in TERMINAL_UPDATE_STATES:
-                return info
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(_poll_seconds(self.lakeflow))
-        stop_update(ws, self.pipeline_id)
-        self._forget_update()
-        raise LakeflowTimeout(
-            f"Update {update_id} of pipeline {self.pipeline_key!r} did not finish within {timeout} and was stopped: "
-            f"{self.url}"
-        )
-
-    def close(self, failed: bool = False) -> None:
-        """Stop an update that is still running, then delete the copy with its tables unless the keep rules say not to.
-
-        Args:
-            failed: Whether the test failed, which keeps the copy when `keep_failed` is on.
-        """
-        if self._closed:
-            return
-        self._closed = True
-        if self.pipeline_id is None:
-            return
-        if self._active_update is not None:
-            stop_update(self.lakeflow.ws, self.pipeline_id)
-            self._forget_update()
-        state = session.current()
-        if state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
-            log.warning("Keeping pipeline %s from %s: %s", self.pipeline_id, self.pipeline_key, self.url)
-            state.kept_pipelines.append(str(self.url))
-            return
-        session.delete_pipeline(self.lakeflow.ws, self.pipeline_id)
-        log.info("Deleted pipeline %s", self.pipeline_id)
-
-    def _teardown(self, item: pytest.Item) -> None:
-        """Close the copy at the end of the test that made it, unless a `with` block closes it."""
-        if not self._entered:
-            self.close(failed=item_failed(item.stash))
-
-    def _forget_update(self) -> None:
-        self._active_update = None
-        if self.pipeline_id is not None:
-            self.lakeflow.active_updates.pop(self.pipeline_id, None)
-
-
-def _as_list(names: Sequence[str] | None) -> list[str] | None:
-    if names is None:
-        return None
-    return list(names)
-
-
-def _close_all(copies: Sequence[EphemeralPipeline], failed: bool) -> None:
-    """Close every pipeline copy, even when closing one of them fails, and then raise the first error."""
-    errors: list[Exception] = []
-    for copy in copies:
-        try:
-            copy.close(failed=failed)
-        except Exception as e:
-            errors.append(e)
-    if errors:
-        raise errors[0]
-
-
-def _poll_seconds(lakeflow: Lakeflow) -> float:
-    if lakeflow.poll_interval is not None:
-        return lakeflow.poll_interval.total_seconds()
-    return POLL_SECONDS
-
-
 def _release_ended(slots: session.RunSlots) -> None:
     """Give back the slot of each run holding one that has ended, though nobody has waited for it yet."""
     for run_id, job in list(slots.holders.items()):
         try:
             run = job.lakeflow.ws.jobs.get_run(run_id)
         except DatabricksError as e:
-            log.debug("Could not poll run %s while waiting for a run slot: %s", run_id, e)
+            log.debug(f"Could not poll run {run_id} while waiting for a run slot: {e}")
             continue
         if terminated(run):
             slots.release(run_id)
-
-
-def stop_update(ws: WorkspaceClient, pipeline_id: str) -> None:
-    try:
-        ws.pipelines.stop(pipeline_id)
-        log.info("Stopped the update of pipeline %s", pipeline_id)
-    except DatabricksError as e:
-        log.warning("Could not stop the update of pipeline %s: %s", pipeline_id, e)
-
-
-def cancel_run(ws: WorkspaceClient, run_id: int) -> None:
-    try:
-        ws.jobs.cancel_run(run_id)
-        log.info("Cancelled run %s", run_id)
-    except DatabricksError as e:
-        log.warning("Could not cancel run %s: %s", run_id, e)
-
-
-def emit(item: pytest.Item, line: str) -> None:
-    """Write `lakeflow: <line>` to the terminal straight away, past output capture, as pytest's live logging does.
-
-    Does nothing without a terminal reporter, such as under `-p no:terminal`.
-    """
-    plugins = item.config.pluginmanager
-    reporter = plugins.get_plugin("terminalreporter")
-    if reporter is None:
-        return
-    # An xdist worker has a terminal reporter too, but execnet discards what it writes, so the line goes nowhere.
-    capture = plugins.get_plugin("capturemanager")
-    suspended: AbstractContextManager[object] = nullcontext()
-    if capture is not None:
-        suspended = capture.global_and_fixture_disabled()
-    with suspended:
-        reporter.write_line(f"lakeflow: {line}")
 
 
 def _dbt_commands(commands: Sequence[str] | None) -> list[str] | None:
@@ -1548,9 +1257,9 @@ def _dbt_commands(commands: Sequence[str] | None) -> list[str] | None:
     if commands is None:
         return None
     if isinstance(commands, str):
-        raise LakeflowError(f"dbt_commands must be a list of commands, not a string: {commands!r}")
+        raise ValueError(f"dbt_commands must be a list of commands, not a string: {commands!r}")
     if not commands:
-        raise LakeflowError(
+        raise ValueError(
             "dbt_commands must not be empty. Pass at least one command, such as ['dbt build'], or leave dbt_commands "
             "out to run each dbt task's own commands."
         )
@@ -1559,7 +1268,7 @@ def _dbt_commands(commands: Sequence[str] | None) -> list[str] | None:
 
 def _check_stop_after(job_key: str, stop_after: timedelta, timeout: timedelta) -> None:
     if stop_after > timeout:
-        raise LakeflowError(
+        raise ValueError(
             f"stop_after={stop_after} of {job_key!r} is longer than its timeout of {timeout}, so the run would time "
             "out before it is stopped. Pass a longer timeout or a shorter stop_after."
         )
@@ -1571,99 +1280,12 @@ def _performance_target(value: jobs.PerformanceTarget | str | None) -> jobs.Perf
     return jobs.PerformanceTarget(value)
 
 
-def record_outcome(item: pytest.Item, result: JobRun) -> None:
-    """Record the run's outcome in the test's user properties, with its resolved parameters when it failed.
-
-    The notebook lines of the failing tasks go to the stash instead, for the report section of a failed test.
-    """
-    item.user_properties.extend(
-        [
-            ("lakeflow_run_id", result.run_id),
-            ("lakeflow_result_state", result.result_state),
-            ("lakeflow_duration", f"{result.duration.total_seconds():.3f}"),
-        ]
-    )
-    if not result.failed:
-        return
-    item.user_properties.append(("lakeflow_failing", "; ".join(describe_failing(result))))
-    item.stash.setdefault(NOTEBOOKS, []).extend(describe_notebooks(result))
-    run_params = format_parameters(result.parameters)
-    if run_params:
-        item.user_properties.append(("lakeflow_params", run_params))
-    task_params = failing_parameters(result)
-    if task_params:
-        shown = {key: json.loads(text) for key, text in task_params.items()}
-        item.user_properties.append(("lakeflow_task_params", json.dumps(shown, sort_keys=True)))
-
-
 def _warn_on_failed_teardown(result: JobRun) -> None:
     """Log a failed teardown task, which leaves `succeeded` as it was, so that it does not pass unnoticed."""
     teardown = result.teardown
     if teardown is None or teardown.succeeded:
         return
-    log.warning("The teardown task of run %s failed: %s %s", result.run_id, task_outcome(teardown), teardown.run_url)
-
-
-def terminated(run: jobs.Run) -> bool:
-    """Whether the run has ended, from its V2 status, or its legacy life cycle when it has none."""
-    if run.status and run.status.state:
-        return run.status.state == TERMINATED
-    state = run.state.life_cycle_state if run.state else None
-    return state in TERMINAL_LIFE_CYCLE
-
-
-def _task_state(task: jobs.RunTask) -> tuple[str | None, bool]:
-    """The state to report for a task run, and whether it has terminated.
-
-    The V2 `status.state` while running and the result state once terminated, falling back to the legacy life cycle
-    state when the run has no V2 status. Any field may be missing.
-    """
-    result = task.state.result_state.value if task.state and task.state.result_state else None
-    if task.status is not None and task.status.state is not None:
-        status = task.status.state
-        if status != TERMINATED:
-            return status.value, False
-        details = task.status.termination_details
-        code = details.code.value if details and details.code else None
-        return result or code or status.value, True
-    life_cycle = task.state.life_cycle_state if task.state else None
-    if life_cycle in TERMINAL_LIFE_CYCLE:
-        return result or life_cycle.value, True
-    if life_cycle is None:
-        return None, False
-    return life_cycle.value, False
-
-
-def _task_states(run: jobs.Run) -> str:
-    """List each task run's state, such as `extract SUCCESS, transform RUNNING, load PENDING`."""
-    states = []
-    for task in run.tasks or []:
-        state, _ = _task_state(task)
-        states.append(f"{_label(task)} {state or '?'}")
-    return ", ".join(states) or "none"
-
-
-def _label(task: jobs.RunTask) -> str:
-    """Name a task run by its key, adding the attempt number of a retry."""
-    label = task.task_key or "?"
-    if task.attempt_number:
-        label = f"{label} (attempt {task.attempt_number})"
-    return label
-
-
-def _transition(task: jobs.RunTask, previous: str | None, state: str, output: jobs.RunOutput | None, done: bool) -> str:
-    """Describe a task run's change of state, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: x`."""
-    label = _label(task)
-    line = f"{label}: {previous} -> {state}" if previous else f"{label}: {state}"
-    if not done:
-        return line
-    elapsed = duration(task.start_time, task.end_time)
-    if elapsed:
-        line = f"{line} in {timedelta(seconds=int(elapsed.total_seconds()))}"
-    error = error_line(task, output)
-    if error:
-        line = f"{line} {error}"
-    return line
+    log.warning(f"The teardown task of run {result.run_id} failed: {task_outcome(teardown)} {teardown.run_url}")
 
 
 def _summary_line(notebook: DebugNotebook, item: pytest.Item | None, cut: list[str]) -> str:
@@ -1677,9 +1299,5 @@ def _summary_line(notebook: DebugNotebook, item: pytest.Item | None, cut: list[s
         where = f"{item.nodeid}, {where}"
     if cut:
         names = ", ".join(repr(key) for key in cut)
-        where = f"{where}; widgets cut at {helpers.WIDGET_LIMIT_BYTES} bytes: {names}"
+        where = f"{where}; widgets cut at {WIDGET_LIMIT_BYTES} bytes: {names}"
     return f"{notebook.url} ({where})"
-
-
-def item_failed(stash: pytest.Stash) -> bool:
-    return any(report.failed for report in stash.get(REPORTS, {}).values())

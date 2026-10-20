@@ -1,6 +1,6 @@
 # API reference
 
-Everything on this page is importable from `pytest_databricks_lakeflow`, apart from `serialise`, which is in `pytest_databricks_lakeflow.results`. The `lakeflow` fixture and the command-line flags are registered by the plugin's `pytest11` entry point.
+Everything on this page is importable from `pytest_databricks_lakeflow`. The `lakeflow` fixture and the command-line flags are registered by the plugin's `pytest11` entry point.
 
 ## The `lakeflow` fixture
 
@@ -114,11 +114,9 @@ The names of the rules that `Lakeflow.check(key, rules=...)` applies on top of t
 
 ::: pytest_databricks_lakeflow.SweepReport
 
-## `serialise`
-
-::: pytest_databricks_lakeflow.results.serialise
-
 ## Errors
+
+Two kinds of error leave the plugin. A `ValueError` means an argument is wrong on its own: a choice outside the ones listed, a `setup=` that is neither a function, a list nor a `.py` path, a stub value that is not JSON-serialisable, a `stop_after` longer than its `timeout`. A `LakeflowError`, or one of its subclasses, means the bundle, the job or the workspace did not fit: a task key the job does not have, a reference the copy cannot resolve, a run that did not finish, a deploy that failed. Catch `LakeflowError` for the second kind; the first kind is a mistake in the test to fix.
 
 ::: pytest_databricks_lakeflow.LakeflowError
 

@@ -13,10 +13,10 @@ from typing import Any
 
 from databricks.sdk.service import jobs
 
+from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 
 log = logging.getLogger("pytest_databricks_lakeflow")
-
 BUNDLE_FILES = ("databricks.yml", "databricks.yaml")
 MIN_CLI_VERSION = (1, 7, 0)
 UNRESOLVED = re.compile(r"\$\{[^}]+\}")
@@ -43,6 +43,24 @@ def require_root(path: Path) -> Path:
 
 def _has_bundle(path: Path) -> bool:
     return any((path / name).is_file() for name in BUNDLE_FILES)
+
+
+def resolve_root(bundle_root: str | Path | None, rootpath: Path) -> Path:
+    """Find the bundle root.
+
+    Args:
+        bundle_root: `Lakeflow`'s `bundle_root`, which is relative to the rootdir unless absolute.
+        rootpath: The pytest rootdir.
+
+    Returns:
+        `bundle_root`, or without one the nearest directory with a databricks.yml, starting at the rootdir.
+
+    Raises:
+        LakeflowBundleError: If there is no databricks.yml.
+    """
+    if bundle_root is None:
+        return bundle.find_root(rootpath)
+    return bundle.require_root((rootpath / bundle_root).resolve())
 
 
 def run_cli(args: list[str], root: Path, profile: str | None = None) -> str:
@@ -82,12 +100,12 @@ def deploy(
     *,
     flags: Sequence[str] = (),
 ) -> None:
-    log.info("Deploying bundle %s to target %s", root, target)
+    log.info(f"Deploying bundle {root} to target {target}")
     run_cli(["bundle", "deploy", "-t", target, "--auto-approve", *_var_args(variables), *flags], root, profile)
 
 
 def sync(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
-    log.info("Syncing bundle %s to target %s", root, target)
+    log.info(f"Syncing bundle {root} to target {target}")
     run_cli(["bundle", "sync", "-t", target, *_var_args(variables)], root, profile)
 
 
@@ -102,7 +120,7 @@ def summary(root: Path, target: str, profile: str | None, variables: Mapping[str
 
 
 def destroy(root: Path, target: str, profile: str | None, variables: Mapping[str, str] | None = None) -> None:
-    log.info("Destroying bundle %s target %s", root, target)
+    log.info(f"Destroying bundle {root} target {target}")
     run_cli(["bundle", "destroy", "-t", target, "--auto-approve", *_var_args(variables)], root, profile)
 
 
