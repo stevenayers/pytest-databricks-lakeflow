@@ -720,7 +720,7 @@ def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> 
 ```
 
 - A function takes any of `spark`, `dbutils` and `params`, and the plugin passes only the ones it declares. `params` is a dict of the job parameters with their values for the run (the job's `params` and then the run's `params` merged over the defaults), as strings, the way the job's own notebooks read them from their widgets. It holds the parameters the job declares, those `modify_settings` declares, and those passed undeclared under `allow_undeclared_params=True` to `job()` or `run()`, because the notebook reads every widget with `dbutils.widgets.getAll()` and leaves out the plugin's `__pytest_` ones. On a [helper cluster](task-tests.md#helper-compute) older than Databricks Runtime 13.3 LTS, which has no `getAll`, it holds only the declared parameters and the keys of `job(params=...)`.
-- The setup task, `__pytest_setup`, runs first: every task that has no `depends_on`, stubs included, comes to depend on it. The teardown task, `__pytest_teardown`, runs last, after every task that no other task depends on, probes included, with `run_if` set to `ALL_DONE`, so it runs whether the job passed or failed. Both run on every `run()`, and `run(only=...)` always includes them. A selected task still waits for the setup when the tasks between them are left out, because the platform marks a left-out task `DISABLED` only once the tasks before it have finished.
+- The setup task, `__pytest_setup`, runs first: every task that has no `depends_on`, stubs included, comes to depend on it. The teardown task, `__pytest_teardown`, runs last, after every task that no other task depends on, probes included, with `run_if` set to `ALL_DONE`, so it runs whether the job passed or failed. Both run on every `run()`, and `run(only=...)` always includes them, unless `teardown_at="close"` moves the teardown to [when the job closes](#tear-down-when-the-job-closes). A selected task still waits for the setup when the tasks between them are left out, because the platform marks a left-out task `DISABLED` only once the tasks before it have finished.
 - A value the function returns becomes the task's `output` as JSON, through `json.dumps(value, default=str)`, so `run.setup.output_json` gives it back.
 - `run.setup` and `run.teardown` are the two tasks' `TaskRun`s, or `None` when the job has none. They are in `run.injected_tasks` and do not count towards `run.succeeded`.
 - A failed setup leaves the job's tasks `UPSTREAM_FAILED`, so the run fails, and `repr(run)` names it first, as `setup: <error>`, so you do not chase a task that never ran.
@@ -741,7 +741,38 @@ def test_setup_on_a_newer_runtime(lakeflow: Lakeflow) -> None:
             assert job.run().setup.succeeded
 ```
 
-The teardown runs inside the same job run, after the job's tasks and before the test's assertions. Use it for side effects the test does not assert on: files under a volume, checkpoints, tables outside the temporary schema, rows written to a source table. Tables the test asserts on belong in [`lakeflow.schema()`](#temporary-schemas), which drops them after the test, so most tests need `setup=` only. Make the functions idempotent: the setup runs on every run, including every run of a job shared by several tests, hence `CREATE OR REPLACE TABLE`.
+The teardown runs inside the same job run, after the job's tasks and before the test's assertions, unless you [tear down when the job closes](#tear-down-when-the-job-closes). Use it for side effects the test does not assert on: files under a volume, checkpoints, tables outside the temporary schema, rows written to a source table. Tables the test asserts on belong in [`lakeflow.schema()`](#temporary-schemas), which drops them after the test, so most tests need `setup=` only. Make the functions idempotent: the setup runs on every run, including every run of a job shared by several tests, hence `CREATE OR REPLACE TABLE`.
+
+### Tear down when the job closes
+
+To assert on what the teardown removes, pass `teardown_at="close"`. Every run then leaves the teardown task out, and the job runs it alone when it closes, on leaving the `with` block or at the end of the test, before it is deleted:
+
+```python
+def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        landing_file = f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv"
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema},
+            setup=seed_orders,
+            teardown=remove_landing_file,
+            teardown_at="close",
+        ) as job:
+            run = job.run(only=["load"])
+            assert run.succeeded, run
+            assert run.teardown is None
+            lakeflow.ws.files.get_metadata(landing_file)
+        assert job.teardown_run.teardown.succeeded
+        assert job.teardown_run.teardown.output_json is True
+```
+
+- Each run passes `only`: what `run(only=...)` selects and the setup task, or, without `only`, every task but the teardown task. A full run leaves out the disabled tasks and the tasks downstream of them too, because the platform runs a disabled task that `only` names. The teardown task ends `DISABLED`, so `run.teardown` is `None`.
+- Closing the job cancels its active runs, then calls `run_now` with `only=["__pytest_teardown"]` and the job's `params`, not those of any one run, waits for it for `Lakeflow`'s `timeout`, and only then deletes or keeps the job. The run queues behind a run that is still being cancelled.
+- `job.teardown_run` is that run's `JobRun`, and `job.teardown_run.teardown` the teardown task's `TaskRun`. Assert on the task: the run's own `succeeded` is false, because none of the job's tasks ran in it. The run is not in `job.runs`. It is `None` when no run was started, since there is nothing to clean up, and when the job is kept.
+- A teardown run that fails or does not finish in time logs a warning with its run page, and the job is deleted or kept as usual. It never fails the test.
+- `keep=True` and `--lakeflow-keep` skip the teardown run, as they keep a temporary schema, so what the job wrote stays for you to look at. `keep_failed` does not: a job kept because its test failed is still cleaned up, and its teardown run is among the `Kept run:` lines.
+
+It costs one more run start per job, so the default stays `teardown_at="run"`. `lakeflow.task()` takes the same argument. `teardown_at="close"` without `teardown=` raises `LakeflowError`, and so does any value other than `"run"` and `"close"`, before anything is created.
 
 ### SQL statements and notebook files
 

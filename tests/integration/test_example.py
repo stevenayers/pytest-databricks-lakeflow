@@ -587,6 +587,58 @@ def test_only_still_runs_setup_and_teardown(lakeflow: Lakeflow) -> None:
         assert (timings["load"].start_time or 0) >= (timings["__pytest_setup"].end_time or 0)
 
 
+def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema:
+        landing_file = f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv"
+        with lakeflow.job(
+            "my_example_job",
+            params={"schema": schema},
+            setup=seed_orders,
+            teardown=remove_landing_file,
+            teardown_at="close",
+        ) as job:
+            run = job.run(only=["load"])
+            assert run.succeeded, run
+            assert run.task("load").output == "loaded 2 seeded orders"
+            assert run.teardown is None
+            lakeflow.ws.files.get_metadata(landing_file)
+        assert job.runs == [run]
+        assert job.teardown_run is not None and job.teardown_run.teardown is not None, job.teardown_run
+        assert job.teardown_run.teardown.succeeded, job.teardown_run.teardown
+        assert job.teardown_run.teardown.output_json is True
+        with pytest.raises(NotFound):
+            lakeflow.ws.files.get_metadata(landing_file)
+
+
+def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow) -> None:
+    with lakeflow.job(
+        "my_example_job",
+        params={"param1": "every run"},
+        disable=["transform"],
+        teardown=report_params,
+        teardown_at="close",
+    ) as job:
+        # Every task but the teardown is passed in only, the disabled one included.
+        run = job.run(params={"param2": "this run"})
+        assert run.succeeded, run
+        assert run.executed_tasks == ["extract", "my_wheel_task"]
+        assert sorted(run.disabled_tasks) == ["load", "transform"]
+        assert run.skipped_tasks == {}
+        assert run.teardown is None
+    teardown = job.teardown_run.teardown if job.teardown_run else None
+    assert teardown is not None and teardown.succeeded, job.teardown_run
+    # The teardown run gets the job's params, not those of a run.
+    assert teardown.output_json == {"param1": "every run", "param2": "world", "schema": "", "mode": "full"}
+
+
+def test_teardown_at_close_runs_after_a_cancelled_run(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", teardown=report_params, teardown_at="close") as job:
+        job.start(only=["extract"])
+    teardown = job.teardown_run.teardown if job.teardown_run else None
+    assert teardown is not None and teardown.succeeded, job.teardown_run
+    assert job.runs == []
+
+
 def test_failed_setup_is_named_first(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", setup=broken_setup, teardown=report_params) as job:
         run = job.run()
