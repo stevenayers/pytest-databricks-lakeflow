@@ -75,6 +75,7 @@ class FakeJobs:
         self.queued: list[list[jobs.Run]] = []
         self.after_cancel: dict[int, list[jobs.Run]] = {}
         self.polls: dict[int, list[jobs.Run]] = {}
+        self.run_errors: dict[int, Exception] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
         self.raw_outputs: dict[int, dict[str, Any] | Exception] = {}
         self.output_calls: list[int] = []
@@ -87,6 +88,8 @@ class FakeJobs:
         self.delete_log: Path | None = None
         self.deletions: list[str] = []
         self.list_calls = 0
+        self.list_kwargs: list[dict[str, Any]] = []
+        self.list_error: Exception | None = None
         self.gets: list[int] = []
         self.updated: list[tuple[int, jobs.JobSettings | None]] = []
         self.run_timeouts: list[int | None] = []
@@ -247,6 +250,8 @@ class FakeJobs:
         returns them in one `Run`.
         """
         self.get_run_calls.append({"run_id": run_id, **kwargs})
+        if run_id in self.run_errors:
+            raise self.run_errors[run_id]
         if run_id in self.polls:
             polls = self.polls[run_id]
             return polls.pop(0) if len(polls) > 1 else polls[0]
@@ -310,8 +315,22 @@ class FakeJobs:
             self.polls[run_id] = self.after_cancel.pop(run_id)
 
     def list(self, **kwargs: Any) -> Iterator[jobs.BaseJob]:
+        """List `listed`, or raise `list_error`.
+
+        Like the Jobs API, each job's tasks come back only with `expand_tasks`.
+        """
         self.list_calls += 1
-        return iter(self.listed)
+        self.list_kwargs.append(kwargs)
+        if self.list_error is not None:
+            raise self.list_error
+        if kwargs.get("expand_tasks"):
+            return iter(self.listed)
+        bare = []
+        for job in self.listed:
+            if job.settings is not None and job.settings.tasks:
+                job = replace(job, settings=replace(job.settings, tasks=None))
+            bare.append(job)
+        return iter(bare)
 
 
 class FakeApiClient:
@@ -347,6 +366,8 @@ class FakeWorkspace:
         self.modified: dict[str, int] = {}
         self.object_ids: dict[str, int] = {}
         self.upload_errors: dict[str, Exception] = {}
+        self.list_calls: list[str] = []
+        self.list_errors: dict[str, Exception] = {}
         self._ids = itertools.count(5000)
 
     def mkdirs(self, path: str) -> None:
@@ -379,9 +400,26 @@ class FakeWorkspace:
         return BytesIO(self.uploads[path]["content"].encode())
 
     def list(self, path: str, **kwargs: Any) -> Iterator[workspace.ObjectInfo]:
-        """List the objects in `listed` directly inside the folder `path`."""
+        """List the objects in `listed` directly inside the folder `path`.
+
+        Like the Workspace API, a folder that does not exist is a `NotFound`: one with nothing listed in it that was
+        neither made with `mkdirs` nor listed as a directory. A folder in `list_errors` raises its error.
+        """
         folder = path.rstrip("/")
-        return iter([info for info in self.listed if (info.path or "").rsplit("/", 1)[0] == folder])
+        self.list_calls.append(folder)
+        if folder in self.list_errors:
+            raise self.list_errors[folder]
+        inside = []
+        for info in self.listed:
+            if (info.path or "").rsplit("/", 1)[0] == folder:
+                inside.append(info)
+        directories = set(self.folders)
+        for info in self.listed:
+            if info.object_type == workspace.ObjectType.DIRECTORY:
+                directories.add(info.path or "")
+        if not inside and folder not in directories:
+            raise NotFound(f"Path ({folder}) doesn't exist.")
+        return iter(inside)
 
     def delete(self, path: str, **kwargs: Any) -> None:
         self.deleted.append(path)
@@ -404,14 +442,19 @@ class FakeFiles:
 class FakeSchemas:
     def __init__(self) -> None:
         self.created: list[str] = []
+        # The properties each schema was created with, by full name.
+        self.properties: dict[str, dict[str, str] | None] = {}
         self.deleted: list[str] = []
         self.listed: list[catalog.SchemaInfo] = []
         self.list_errors: dict[str, Exception] = {}
         self.deletions: list[str] = []
 
-    def create(self, name: str, catalog_name: str, **kwargs: Any) -> SimpleNamespace:
+    def create(
+        self, name: str, catalog_name: str, *, properties: dict[str, str] | None = None, **kwargs: Any
+    ) -> SimpleNamespace:
         self.created.append(f"{catalog_name}.{name}")
-        return SimpleNamespace(full_name=f"{catalog_name}.{name}")
+        self.properties[f"{catalog_name}.{name}"] = properties
+        return SimpleNamespace(full_name=f"{catalog_name}.{name}", properties=properties)
 
     def delete(self, full_name: str, *, force: bool | None = None) -> None:
         assert force
@@ -718,13 +761,23 @@ def notebook_export(commands: Sequence[dict[str, Any]]) -> str:
 
 
 def listed_job(
-    job_id: int, age_hours: float, tags: dict[str, str], creator: str = "someone@example.com"
+    job_id: int,
+    age_hours: float,
+    tags: dict[str, str],
+    creator: str = "someone@example.com",
+    notebooks: Sequence[str] = (),
+    tasks: Sequence[jobs.Task] = (),
 ) -> jobs.BaseJob:
-    """Build a job as `jobs.list` returns it, created `age_hours` ago by `creator`."""
+    """Build a job as `jobs.list` returns it, created `age_hours` ago by `creator`.
+
+    It has `tasks` and one notebook task for each of `notebooks`, which `jobs.list` returns only with `expand_tasks`.
+    """
     created = int(time.time() * 1000 - age_hours * HOUR_MS)
-    return jobs.BaseJob(
-        job_id=job_id, created_time=created, creator_user_name=creator, settings=jobs.JobSettings(tags=tags)
-    )
+    tasks = list(tasks)
+    for i, path in enumerate(notebooks):
+        tasks.append(jobs.Task(task_key=f"task_{i}", notebook_task=jobs.NotebookTask(notebook_path=path)))
+    settings = jobs.JobSettings(tags=tags, tasks=tasks or None)
+    return jobs.BaseJob(job_id=job_id, created_time=created, creator_user_name=creator, settings=settings)
 
 
 def sweep_candidates() -> list[jobs.BaseJob]:

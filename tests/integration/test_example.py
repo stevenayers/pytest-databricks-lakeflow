@@ -14,6 +14,7 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import time
 import warnings
 from collections.abc import Iterator
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING
 import pytest
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
-from databricks.sdk.service.workspace import ExportFormat, ObjectType
+from databricks.sdk.service.workspace import ExportFormat, ImportFormat, Language, ObjectType
 
 from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session
 from pytest_databricks_lakeflow.results import serialise
@@ -536,6 +537,11 @@ def broken_setup():
     raise ValueError("no seed data")
 
 
+def count_one(spark):
+    """A setup of its own, so that no other test's job uses its notebook."""
+    return spark.sql("SELECT 1 AS one").count()
+
+
 def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> None:
     with lakeflow.schema() as schema:
         with lakeflow.job(
@@ -822,15 +828,48 @@ def test_sweep_dry_run_lists_without_deleting(lakeflow: Lakeflow) -> None:
 
 
 def test_keep_ttl_tag_protects_a_job_from_the_sweep(lakeflow: Lakeflow, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert lakeflow.catalog, "set LAKEFLOW_CATALOG"
     # As --lakeflow-keep-ttl=48h sets it, for this test only.
     monkeypatch.setattr(session.current(), "keep_ttl", timedelta(hours=48))
-    with lakeflow.job("my_example_job") as job:
+    with lakeflow.schema() as schema, lakeflow.job("my_example_job", setup=count_one) as job:
         assert job.job_id is not None
         stored = lakeflow.ws.jobs.get(job.job_id).settings
         assert stored is not None and stored.tags is not None
         assert stored.tags["pytest_expires"] == (job.settings.tags or {})["pytest_expires"]
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stored.tags["pytest_expires"])
+        properties = lakeflow.ws.schemas.get(schema).properties or {}
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", properties["pytest_expires"])
+        setup = next(task.notebook_task.notebook_path for task in stored.tasks or [] if task.notebook_task)
         time.sleep(1)
-        options = session.SweepOptions(dry_run=True)
-        report = session.sweep(lakeflow.ws, "another_run", 0, "/unused", options)
+        # A dry run, because the helpers folder is shared with every other test of this user.
+        options = session.SweepOptions(dry_run=True, schemas_catalog=lakeflow.catalog, notebooks=True)
+        report = session.sweep(lakeflow.ws, "another_run", 0, posixpath.dirname(setup), options)
         assert job.job_id not in report.jobs
+        assert schema not in report.schemas
+        assert setup not in report.notebooks, report.notebooks
+
+
+def test_sweep_deletes_a_stale_notebook(lakeflow: Lakeflow) -> None:
+    ws = lakeflow.ws
+    me = ws.current_user.me().user_name
+    folder = f"/Users/{me}/.pytest_sweep_{secrets.token_hex(4)}"
+    setup = f"{folder}/setup_{secrets.token_hex(6)}"
+    # A debug notebook of a run that does not exist, so no job can protect it.
+    debug = f"{folder}/debug/my_example_job__transform__1"
+    source = b"# Databricks notebook source\nprint('scratch')\n"
+    try:
+        for path in (setup, debug):
+            ws.workspace.mkdirs(posixpath.dirname(path))
+            ws.workspace.upload(path, source, format=ImportFormat.SOURCE, language=Language.PYTHON)
+        time.sleep(1)
+        # A user who created nothing, so that the creator filter keeps every job and schema out of the sweep.
+        options = session.SweepOptions(notebooks=True)
+        report = session.sweep(ws, "another_run", 0, folder, options, user="pytest_nobody")
+        assert report.errors == ()
+        assert report.jobs == ()
+        assert sorted(report.notebooks) == sorted([setup, debug])
+        for path in (setup, debug):
+            with pytest.raises(NotFound):
+                ws.workspace.get_status(path)
+    finally:
+        ws.workspace.delete(folder, recursive=True)

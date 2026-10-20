@@ -127,15 +127,18 @@ steps:
 
 The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. On a user-to-machine (`databricks-cli`) profile, every xdist worker forces a refresh of the same token through `databricks auth token`, and two refreshes at once can fail with `exit status 45`. The plugin retries building its client, but CI should use a service principal, which has no CLI token to race on (see [the FAQ](limitations.md#why-did-the-cli-fail-with-exit-status-45-under-xdist)).
 
-A nightly job can clean up after every pipeline and developer that shares the workspace, as a principal allowed to delete their jobs and schemas. It needs a test that sets up the bundle, because the sweep runs at setup; dry-run it first and keep the report:
+A nightly job can clean up after every pipeline and developer that shares the workspace, as a principal allowed to delete their jobs and schemas. `Lakeflow.sweep()` needs no test and no bundle deploy; dry-run it first and keep the report:
 
-```bash
-uv run pytest tests/test_smoke.py --lakeflow-sweep --lakeflow-sweep-scope=all \
-    --lakeflow-sweep-schemas=dev_sandbox --lakeflow-sweep-notebooks \
-    --lakeflow-sweep-dry-run --lakeflow-sweep-report=sweep.json
+```python
+from pytest_databricks_lakeflow import Lakeflow
+
+report = Lakeflow(profile="ci").sweep(
+    scope="all", schemas_catalog="dev_sandbox", notebooks=True, dry_run=True, report="sweep.json"
+)
+print(report.jobs, report.schemas, report.notebooks, report.errors)
 ```
 
-Drop `--lakeflow-sweep-dry-run` once the report lists only what you expect. See [sweeping leftovers](configuration.md#sweeping-leftovers).
+Drop `dry_run=True` once the report lists only what you expect. See [sweeping leftovers](configuration.md#sweeping-leftovers) and [sweep from a script](configuration.md#sweep-from-a-script).
 
 When several branches, pipelines or developers share one test target, a deploy from one replaces the wheels that another session's jobs are running. Give each identity and branch its own deployment with the recipe in [isolating test deployments](how-it-works.md#isolating-test-deployments), and end the pipeline with `pytest --lakeflow-destroy`.
 
