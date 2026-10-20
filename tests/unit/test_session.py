@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import PermissionDenied
+from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import Lakeflow, helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
@@ -615,6 +616,57 @@ class TestSetup:
             """
         )
         pytester.runpytest().assert_outcomes(passed=1)
+
+
+class TestCheck:
+    """`Lakeflow.check` lints a template from any scope and creates nothing in the workspace."""
+
+    def test_check_from_a_session_scoped_fixture(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        fake_cli.deployed["broken"] = 1
+        configure_lakeflow(
+            pytester,
+            "",
+            '\n\n@pytest.fixture(scope="session")\ndef problems(lakeflow):\n    return lakeflow.check("my_job")\n',
+        )
+        pytester.makepyfile(
+            r"""
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowBundleError
+
+            def test_check(lakeflow, problems):
+                assert problems == []
+                with pytest.raises(KeyError, match=r"No job 'nope' in the bundle. Available: \['my_job'\]"):
+                    lakeflow.check("nope")
+                with pytest.raises(LakeflowBundleError, match="stale"):
+                    lakeflow.check("broken")
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
+        assert fake_ws.jobs.run_now_calls == []
+
+    def test_check_with_sync_none_only_validates(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        settings = example_settings()
+        settings.tasks = [jobs.Task(task_key="t", depends_on=[jobs.TaskDependency(task_key="missing")])]
+        fake_cli.validate = {"resources": {"jobs": {"my_job": settings.as_dict()}}}
+        configure_lakeflow(pytester, 'sync="none"')
+        pytester.makepyfile(
+            """
+            def test_check(lakeflow):
+                assert lakeflow.check("my_job") == [
+                    "Task 't': depends on 'missing', which is not a task in the job. Tasks: ['t']"
+                ]
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert [args for args in fake_cli.calls if args[0] == "bundle"] == [VALIDATE]
+        assert fake_ws.jobs.created == []
+        assert fake_ws.jobs.run_now_calls == []
 
 
 class TestHostCheck:
