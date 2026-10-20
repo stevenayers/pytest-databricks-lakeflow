@@ -223,6 +223,17 @@ class TestSharedSetup:
         assert len(run_ids.read_text().split()) == 6
         assert len(set(run_ids.read_text().split())) == 1
 
+    def test_xdist_workers_collect_the_same_check_items(self, pytester: pytest.Pytester, bundle_dir: Path) -> None:
+        pytest.importorskip("xdist")
+        log = make_xdist_conftest(pytester)
+        pytester.makepyfile("def test_nothing():\n    pass\n")
+        result = pytester.runpytest("-n", "2", "--lakeflow-check", "-v")
+        result.assert_outcomes(passed=2)
+        result.stdout.fnmatch_lines(["*PASSED*databricks.yml::my_job*"])
+        calls = log.read_text().splitlines()
+        assert calls.count(" ".join(DEPLOY)) == 1
+        assert calls.count(" ".join(SUMMARY)) == 1
+
     def test_xdist_workers_share_each_bundle_target(self, pytester: pytest.Pytester, bundle_dir: Path) -> None:
         pytest.importorskip("xdist")
         log = make_xdist_conftest(pytester, STAGING_FIXTURE)

@@ -72,6 +72,7 @@ class TestCommandLine:
                 "*--lakeflow-debug-notebook*",
                 "*--lakeflow-live*",
                 "*--lakeflow-max-concurrent-runs=N*",
+                "*--lakeflow-check*",
             ]
         )
         assert "The cap is per xdist worker." in " ".join(result.stdout.str().split())
