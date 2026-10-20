@@ -648,6 +648,24 @@ class TestCheck:
         assert fake_ws.jobs.created == []
         assert fake_ws.jobs.run_now_calls == []
 
+    def test_check_outside_any_test(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
+    ) -> None:
+        # The fixture above runs during the first test's setup; pytest_sessionstart runs before any test item exists.
+        pytester.makeconftest(
+            """
+            from pytest_databricks_lakeflow import Lakeflow
+
+            def pytest_sessionstart(session):
+                print("problems:", Lakeflow().check("my_job"))
+            """
+        )
+        pytester.makepyfile("def test_nothing():\n    pass\n")
+        result = pytester.runpytest("-s")
+        result.assert_outcomes(passed=1)
+        result.stdout.fnmatch_lines(["problems: []"])
+        assert fake_ws.jobs.created == []
+
     def test_check_with_sync_none_only_validates(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, bundle_dir: Path
     ) -> None:

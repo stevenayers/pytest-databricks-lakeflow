@@ -96,6 +96,8 @@ def test_pipeline_copy_writes_to_the_test_schema(lakeflow: Lakeflow) -> None:
         assert update.state == "COMPLETED", update
         assert (update.cause, update.full_refresh) == ("API_CALL", True)
         assert update.events(level="ERROR") == []
+        # The deployed pipeline owns a `numbers` table in its own schema, which this test cannot tell apart from one
+        # the copy wrote there, so it checks only that the copy's table is in the test schema.
         assert "numbers" in tables_in(lakeflow, schema)
         assert pipeline.pipeline_id is not None
         copy_id = pipeline.pipeline_id
