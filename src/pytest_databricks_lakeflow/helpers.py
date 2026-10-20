@@ -169,12 +169,20 @@ def lifecycle_source(step: LifecycleStep, rootpath: Path, argument: str) -> tupl
     return _function_source(step, argument), frozenset()
 
 
+def check_lifecycle_step(step: LifecycleStep, argument: str) -> None:
+    """Run the checks of `lifecycle_source` that need no rootdir, so that a bad `Lakeflow` default fails early.
+
+    Raises:
+        LakeflowError: In the cases where `lifecycle_source` raises it, except that a file is not looked for.
+    """
+    if isinstance(step, Path):
+        _check_file_suffix(step, argument)
+        return
+    lifecycle_source(step, Path(), argument)
+
+
 def _file_source(path: Path, rootpath: Path, argument: str) -> str:
-    if path.suffix != ".py":
-        raise LakeflowError(
-            f"{argument}= must be a .py file, got {path}. Put SQL statements in a list, or run them from a .py file "
-            "through spark.sql."
-        )
+    _check_file_suffix(path, argument)
     resolved = rootpath / path
     if not resolved.is_file():
         raise LakeflowError(f"{argument}= file {resolved} does not exist. A relative path starts at {rootpath}.")
@@ -182,6 +190,14 @@ def _file_source(path: Path, rootpath: Path, argument: str) -> str:
     if text.startswith(NOTEBOOK_MARKER):
         return text
     return f"{NOTEBOOK_MARKER}\n{text}"
+
+
+def _check_file_suffix(path: Path, argument: str) -> None:
+    if path.suffix != ".py":
+        raise LakeflowError(
+            f"{argument}= must be a .py file, got {path}. Put SQL statements in a list, or run them from a .py file "
+            "through spark.sql."
+        )
 
 
 def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, frozenset[str]]:
