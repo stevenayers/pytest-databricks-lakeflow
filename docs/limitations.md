@@ -66,7 +66,7 @@ Ephemeral jobs are tagged `pytest` and `pytest_run_id`, and, when they can be fo
 
 ### What does the plugin leave in my workspace?
 
-The deployed test target, the two helper notebooks under `helpers_path` with the `setup_<hash>` and `teardown_<hash>` notebooks of any `setup=` and `teardown=` functions, and any jobs and pipeline copies kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
+The deployed test target, the two helper notebooks under `helpers_path` with the `setup_<hash>` and `teardown_<hash>` notebooks of any `setup=` and `teardown=` functions, and any jobs and pipeline copies kept by the keep rules. A kept job's tags (`pytest_run_id`, `pytest_nodeid`, `pytest_job_key`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha`, `pytest_git_branch`) and description say which test, run, person and commit made it. See [How it works](how-it-works.md#what-is-left-in-the-workspace).
 
 ### Why does setup fail with "Bundle target 'test' deploys to ... but the workspace client is for ..."?
 
@@ -109,7 +109,7 @@ pytester's `make_pipeline` builds a new pipeline from the keyword arguments you 
 
 ### Can I use `Lakeflow` outside pytest?
 
-No. It raises `LakeflowError` outside a pytest session, and outside a test. Jobs are tied to the running test for naming, tagging and teardown.
+No. It raises `LakeflowError` outside a pytest session, and outside a test. Jobs are tied to the running test for naming, tagging and teardown. `lakeflow.attach(run_id)`, which reads a kept job's run back without running it, also runs inside a test, which records the run in its report section.
 
 ### How do I see what is happening?
 
