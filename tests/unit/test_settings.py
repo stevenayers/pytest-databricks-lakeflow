@@ -30,11 +30,13 @@ from pytest_databricks_lakeflow.settings import (
     disable_tasks,
     disabled_task_keys,
     escape,
+    for_each_bodies,
     force_conditions,
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
     inject_trigger,
+    lift_nested_task,
     lint,
     merge_environments,
     override_for_each_inputs,
@@ -56,6 +58,7 @@ from .fakes import (
     branching_settings,
     dbt_settings,
     example_settings,
+    fanout_objects_settings,
     for_each_settings,
     parent_settings,
     pipeline_settings,
@@ -1509,6 +1512,62 @@ class TestForEachInputs:
         with pytest.raises(LakeflowError, match=match):
             override_for_each_inputs(settings, inputs)
         assert settings == template()
+
+
+class TestLiftNestedTask:
+    """lift_nested_task puts a for-each task's body in its place, and for_each_bodies lists the bodies."""
+
+    def test_lift_replaces_the_loop_in_place(self) -> None:
+        template = fanout_objects_settings()
+        settings = fanout_objects_settings()
+        lifted = lift_nested_task(settings, "loop", "inner")
+        assert [t.task_key for t in settings.tasks or []] == ["extract", "inner", "after"]
+        assert lifted is task(settings, "inner")
+        # The body keeps everything of its own and takes the loop's upstream tasks, which upstream_from reads.
+        assert lifted == replace(nested_task(template, "loop"), depends_on=[jobs.TaskDependency(task_key="extract")])
+        assert "for_each_task" not in json.dumps(settings.as_dict())
+        assert task(settings, "after") == task(template, "after")
+
+    @pytest.mark.parametrize(
+        ("loop_key", "nested_key", "match"),
+        [
+            pytest.param(
+                "extract",
+                "x",
+                r"Task 'extract' has no for_each_task, so 'extract.x' names no nested task. For-each bodies: "
+                r"\['loop.inner'\]",
+                id="not-for-each",
+            ),
+            pytest.param(
+                "loop",
+                "nope",
+                r"for_each_task 'loop' nests 'inner', not 'nope'. For-each bodies: \['loop.inner'\]",
+                id="other-body",
+            ),
+            pytest.param(
+                "nope",
+                "inner",
+                r"No task 'nope' in the job. Available: \['after', 'extract', 'loop'\]",
+                id="unknown-loop",
+            ),
+        ],
+    )
+    def test_lift_rejects(self, loop_key: str, nested_key: str, match: str) -> None:
+        settings = fanout_objects_settings()
+        with pytest.raises(LakeflowError, match=match):
+            lift_nested_task(settings, loop_key, nested_key)
+        assert settings == fanout_objects_settings()
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            pytest.param(fanout_objects_settings, {"loop": "inner"}, id="objects"),
+            pytest.param(for_each_settings, {"loop": "each"}, id="strings"),
+            pytest.param(example_settings, {}, id="no-loops"),
+        ],
+    )
+    def test_for_each_bodies(self, template: Callable[[], jobs.JobSettings], expected: dict[str, str]) -> None:
+        assert for_each_bodies(template()) == expected
 
 
 TABLE_TRIGGER = {"type": "table", "table_update.updated_tables": "cat.sch.orders"}
