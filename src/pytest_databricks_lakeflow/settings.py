@@ -61,6 +61,9 @@ MAX_KEY_CHARS = 512
 # jobs/create refuses any reference to a task that is not in the job: "Invalid reference:
 # 'tasks.ghost.result_state'. Task 'ghost' does not exist."
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
+# jobs/create refuses a reference to an undeclared parameter: "Reference 'job.parameters.nope' in task 't' refers to
+# an undefined job parameter 'nope'."
+JOB_PARAMETER_REFERENCE = re.compile(r"\{\{\s*job\.parameters\.([\w-]+)\s*\}\}")
 # Of the references to a task that run_now(only=...) leaves out, task values fail the run, and so do outputs
 # ("Cannot access output from task '<key>' because the task was skipped."). The others resolve against the task's
 # DISABLED run: result_state to "disabled", error_code to "Disabled", run_id to its run id.
@@ -1179,6 +1182,77 @@ def check_output_references(job_key: str, settings: jobs.JobSettings) -> None:
             )
 
 
+def lint(settings: jobs.JobSettings) -> list[str]:
+    """Find the wiring mistakes in a job's settings that `bundle validate` passes, without changing them.
+
+    jobs/create refuses most of them, one at a time; this finds them all at once, before anything reaches the
+    workspace.
+
+    Args:
+        settings: The job's settings.
+
+    Returns:
+        One message per problem, each starting with the key of its task, in the order of `settings.tasks` with each
+        nested task after its `for_each_task`: a `{{job.parameters.<name>}}` the job does not declare, a
+        `{{tasks.<key>.values.<name>}}` whose task is not upstream, a `depends_on` task that is not in the job, and
+        retry settings on a `for_each_task`.
+    """
+    declared = sorted(_declared_params(settings))
+    keys = [task.task_key for task in settings.tasks or []]
+    graph = {task.task_key: {dep.task_key for dep in task.depends_on or []} for task in settings.tasks or []}
+    problems: list[str] = []
+    for task in settings.tasks or []:
+        upstream = _reachable(task.task_key, graph) & graph.keys()
+        problems += _task_problems(task, upstream, declared, keys)
+        if task.for_each_task and task.for_each_task.task:
+            # A nested task may refer to the task values of any task upstream of its for_each task, and jobs/create
+            # refuses a reference to the for_each task itself: "Task 'loop' must be a dependency of task 'inner'."
+            problems += _task_problems(task.for_each_task.task, upstream, declared, keys)
+    return problems
+
+
+def _task_problems(task: jobs.Task, upstream: set[str], declared: list[str], keys: list[str]) -> list[str]:
+    body = task.as_dict()
+    if "for_each_task" in body:
+        body["for_each_task"].pop("task", None)
+    text = json.dumps(body)
+    prefix = f"Task {task.task_key!r}:"
+    problems: list[str] = []
+    for name in sorted(set(JOB_PARAMETER_REFERENCE.findall(text)) - set(declared)):
+        problems.append(f"{prefix} {{{{job.parameters.{name}}}}} is not declared. Declared: {declared}")
+    for key in sorted(set(TASK_VALUES_REFERENCE.findall(text)) - upstream):
+        problems.append(
+            f"{prefix} refers to the task values of {key!r}, which is not upstream of it. Upstream: {sorted(upstream)}"
+        )
+    for dependency in task.depends_on or []:
+        if dependency.task_key not in keys:
+            problems.append(
+                f"{prefix} depends on {dependency.task_key!r}, which is not a task in the job. Tasks: {sorted(keys)}"
+            )
+    retries = _retries(task)
+    if task.for_each_task and retries:
+        # jobs/create refuses max_retries above 0 on a for_each task ("For each task cannot be retried but has
+        # retries configured") and accepts min_retry_interval_millis and retry_on_timeout there, to no effect. jobs/get
+        # returns max_retries 0 and retry_on_timeout false beside either, so those defaults are not reported.
+        nested = "its nested task"
+        if task.for_each_task.task:
+            nested += f" {task.for_each_task.task.task_key!r}"
+        problems.append(
+            f"{prefix} a for_each task cannot be retried, but it sets {retries}. Set retries on {nested} instead."
+        )
+    return problems
+
+
+def _retries(task: jobs.Task) -> str:
+    """The retry settings a task sets to other than their defaults, as `name=value` pairs."""
+    pairs: list[str] = []
+    for name in ("max_retries", "min_retry_interval_millis", "retry_on_timeout"):
+        value = getattr(task, name)
+        if value:
+            pairs.append(f"{name}={value}")
+    return ", ".join(pairs)
+
+
 def _running_stubs(settings: jobs.JobSettings, selected: Collection[str], stubs: Collection[str]) -> set[str]:
     """The stubs that run with the selected tasks: those a selected task depends on."""
     running: set[str] = set()
@@ -1195,7 +1269,7 @@ def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
     seen: set[str] = set()
     pending = [start]
     while pending:
-        for key in edges[pending.pop()] - seen:
+        for key in edges.get(pending.pop(), set()) - seen:
             seen.add(key)
             pending.append(key)
     return seen

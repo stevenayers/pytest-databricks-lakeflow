@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
+    lint,
     merge_environments,
     override_tasks,
     pipeline_task_ids,
@@ -262,6 +263,27 @@ class Lakeflow:
         if key not in state["templates"]:
             raise KeyError(f"No job {key!r} in the bundle. Available: {sorted(state['templates'])}")
         return jobs.JobSettings.from_dict(copy.deepcopy(state["templates"][key]))
+
+    def check(self, key: str) -> list[str]:
+        """Find the wiring mistakes in a bundle job's template, without creating or running anything.
+
+        It reports a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose
+        task is not upstream of the task that refers to it, a `depends_on` task that is not in the job, and retry
+        settings on a `for_each_task`, which belong on its nested task. `bundle validate` passes all of them. It
+        lints the template as deployed, and works outside a test, for example in a session-scoped fixture.
+
+        Args:
+            key: The bundle resource key of the job.
+
+        Returns:
+            One message per problem, each starting with `Task '<key>':`, in the order of the job's tasks. Empty if
+            there are none.
+
+        Raises:
+            KeyError: If the bundle has no job `key`.
+            LakeflowBundleError: If the job cannot be used as a template, for example because it is not deployed.
+        """
+        return lint(self.template(key))
 
     def job(
         self,
