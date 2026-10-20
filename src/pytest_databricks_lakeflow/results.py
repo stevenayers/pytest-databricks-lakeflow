@@ -663,6 +663,69 @@ def _event_millis(timestamp: str | None) -> int | None:
 
 
 @dataclass(frozen=True)
+class ForEachError:
+    """One error that iterations of a for-each task failed with, as the platform counts it.
+
+    Attributes:
+        message: The error message. The platform reports the same generic message, such as `Workload failed, see
+            run output for details`, for every iteration whose code raised; each iteration's own error is in
+            `TaskRun.iterations`.
+        count: How many iterations failed with it.
+        termination_category: The platform's category of the error, such as `RunExecutionError`, or `None`.
+    """
+
+    message: str
+    count: int
+    termination_category: str | None = None
+
+
+@dataclass(frozen=True)
+class ForEachStats:
+    """The iteration counts of a for-each task, as the platform reports them on the task run.
+
+    Each iteration counts once, however often it was retried.
+
+    Attributes:
+        total_iterations: How many iterations the task had, one per input.
+        succeeded_iterations: How many of them succeeded.
+        failed_iterations: How many of them failed.
+        errors: The errors they failed with, each with the number of iterations that failed with it.
+    """
+
+    total_iterations: int
+    succeeded_iterations: int
+    failed_iterations: int
+    errors: list[ForEachError] = field(default_factory=list)
+
+    @classmethod
+    def from_stats(cls, stats: jobs.ForEachStats) -> ForEachStats:
+        """Read the counts of a `RunForEachTask.stats`.
+
+        Args:
+            stats: The stats from `get_run`.
+
+        Returns:
+            The counts, with 0 for each one the platform does not report.
+        """
+        counts = stats.task_run_stats or jobs.ForEachTaskTaskRunStats()
+        errors: list[ForEachError] = []
+        for error in stats.error_message_stats or []:
+            errors.append(
+                ForEachError(
+                    message=error.error_message or "",
+                    count=error.count or 0,
+                    termination_category=error.termination_category,
+                )
+            )
+        return cls(
+            total_iterations=counts.total_iterations or 0,
+            succeeded_iterations=counts.succeeded_iterations or 0,
+            failed_iterations=counts.failed_iterations or 0,
+            errors=errors,
+        )
+
+
+@dataclass(frozen=True)
 class TaskRun:
     """The outcome of one task in a job run.
 
@@ -733,6 +796,17 @@ class TaskRun:
             pipeline's updates by its creation time, which lies between the task's start and end. `None` for any
             other task, for a task that did not run, and when no update was created in that time or the updates
             could not be read, which logs a warning.
+        iterations: The iterations of a for-each task, one `TaskRun` per input in iteration order, read once the run
+            finished from the for-each task run fetched by its own id. Each is built like a task, with one
+            `get_run_output` and one `get_run` for every attempt of it: `task_key` is the nested task's key, `output`,
+            `error` and the rest are its own, `parameters` are the nested task's resolved parameters, where the
+            iteration's input appears wherever the nested task passes `{{input}}`, and `attempts` holds every attempt
+            when the platform retried it. Iterations have no `task_values`, because the platform refuses
+            `taskValues.set` in an iteration, and no `notebook`. Empty for any other task, for a for-each task that
+            did not start, such as one that ended `UPSTREAM_FAILED`, and when the iterations could not be read, which
+            logs a warning.
+        for_each_stats: The iteration counts of a for-each task, as the platform reports them, or `None` for any
+            other task.
     """
 
     task_key: str
@@ -766,6 +840,8 @@ class TaskRun:
     notebook: NotebookView | None = None
     sql_result: SqlResult | None = None
     pipeline_update: PipelineUpdate | None = None
+    iterations: list[TaskRun] = field(default_factory=list)
+    for_each_stats: ForEachStats | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -1126,12 +1202,15 @@ def serialise(run: JobRun) -> dict[str, Any]:
     `code`, or `None`; `task_values` is a plain dict and `missing_task_value_reasons` holds the reason for each of
     `missing_task_values`; the outputs of SQL, alert, dbt, run-job, dashboard and clean room tasks are the dicts of
     the Jobs API, except that a dbt output leaves out `artifacts_headers`; `pipeline_update` is a dict of
-    `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or `None`. The run also gets `succeeded`.
+    `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or `None`; `iterations` is a list of tasks
+    serialised the same way, and `for_each_stats` a dict of its fields, with `errors` a list of dicts, or `None`. The
+    run also gets `succeeded`.
 
     `logs` and the exported `notebook` are left out, because logs can reach 5 MB per task. Instead `logs_file` and
     `notebook_file` name where `--lakeflow-report-dir` saves them, relative to the test's report directory:
     `<run_id>/<task_key>.log` and `<run_id>/<task_key>.html`, with `.attempt-<n>` before the suffix for an attempt
-    that was retried. Each is `None` when the task has no logs or no exported notebook.
+    that was retried and `.iteration-<n>`, counting from 0, for an iteration of a for-each task. Each is `None` when the
+    task has no logs or no exported notebook.
 
     Args:
         run: The run.
@@ -1190,6 +1269,9 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
         if index < len(task.attempts) - 1:
             attempt_stem = f"{stem}.attempt-{attempt.attempt}"
         attempts.append(_serialise_task(attempt, run_id, attempt_stem, files))
+    iterations: list[dict[str, Any]] = []
+    for index, iteration in enumerate(task.iterations):
+        iterations.append(_serialise_task(iteration, run_id, f"{stem}.iteration-{index}", files))
     child_run = None
     if task.child_run is not None:
         child_run = _serialise_run(task.child_run, files)
@@ -1239,6 +1321,8 @@ def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]
         "notebook_file": notebook_file,
         "sql_result": sql_result,
         "pipeline_update": pipeline_update,
+        "iterations": iterations,
+        "for_each_stats": asdict(task.for_each_stats) if task.for_each_stats is not None else None,
     }
 
 
@@ -1319,35 +1403,17 @@ def build_job_run(
         The run's outcome.
     """
     task_runs_by_key = _task_runs_by_key(run)
-    known_outputs = dict(outputs or {})
-    unread: list[jobs.RunTask] = []
+    every_attempt: list[jobs.RunTask] = []
     for task_runs in task_runs_by_key.values():
-        for task_run in task_runs:
-            if has_output(task_run) and (task_run.run_id or 0) not in known_outputs:
-                unread.append(task_run)
-    known_outputs.update(fetch_outputs(ws, unread))
-    ran: list[jobs.RunTask] = []
-    for task_runs in task_runs_by_key.values():
-        for task_run in task_runs:
-            if _ran(_result_state(task_run)):
-                ran.append(task_run)
-    resolved = fetch_resolved_values(ws, ran)
-    sql_results = fetch_sql_results(ws, ran)
-    pipeline_updates = fetch_pipeline_updates(ws, ran)
+        every_attempt.extend(task_runs)
+    built = _read_task_runs(ws, every_attempt, outputs or {}, job_keys or {}, notebook_export)
 
     attempts: dict[str, list[TaskRun]] = {}
     for key, task_runs in task_runs_by_key.items():
-        attempts[key] = []
-        for task_run in task_runs:
-            run_id = task_run.run_id or 0
-            attempt = _task_run(
-                task_run,
-                known_outputs.get(run_id),
-                resolved.get(run_id),
-                sql_results.get(run_id),
-                pipeline_updates.get(run_id),
-            )
-            attempts[key].append(_with_child_run(ws, attempt, job_keys or {}, notebook_export))
+        attempts[key] = [built[task_run.run_id or 0] for task_run in task_runs]
+        latest = task_runs[-1]
+        if latest.for_each_task is not None:
+            attempts[key][-1] = _with_iterations(ws, attempts[key][-1], latest, job_keys or {}, notebook_export)
 
     injected: dict[str, TaskRun] = {}
     user: dict[str, TaskRun] = {}
@@ -1404,6 +1470,88 @@ def _task_runs_by_key(run: jobs.Run) -> dict[str, list[jobs.RunTask]]:
     for task_runs in by_key.values():
         task_runs.sort(key=lambda t: t.attempt_number or 0)
     return by_key
+
+
+def _read_task_runs(
+    ws: WorkspaceClient,
+    task_runs: Sequence[jobs.RunTask],
+    outputs: Mapping[int, jobs.RunOutput],
+    job_keys: Mapping[int, str],
+    notebook_export: NotebookExport,
+) -> dict[int, TaskRun]:
+    """Build a `TaskRun` for each task run, by run id, reading its output, resolved parameters and the rest.
+
+    Only the outputs missing from `outputs` are fetched. A run-job task gets the child run it triggered.
+    """
+    known_outputs = dict(outputs)
+    unread: list[jobs.RunTask] = []
+    ran: list[jobs.RunTask] = []
+    for task_run in task_runs:
+        if has_output(task_run) and (task_run.run_id or 0) not in known_outputs:
+            unread.append(task_run)
+        if _ran(_result_state(task_run)):
+            ran.append(task_run)
+    known_outputs.update(fetch_outputs(ws, unread))
+    resolved = fetch_resolved_values(ws, ran)
+    sql_results = fetch_sql_results(ws, ran)
+    pipeline_updates = fetch_pipeline_updates(ws, ran)
+
+    built: dict[int, TaskRun] = {}
+    for task_run in task_runs:
+        run_id = task_run.run_id or 0
+        task = _task_run(
+            task_run,
+            known_outputs.get(run_id),
+            resolved.get(run_id),
+            sql_results.get(run_id),
+            pipeline_updates.get(run_id),
+        )
+        built[run_id] = _with_child_run(ws, task, job_keys, notebook_export)
+    return built
+
+
+def _with_iterations(
+    ws: WorkspaceClient,
+    task: TaskRun,
+    task_run: jobs.RunTask,
+    job_keys: Mapping[int, str],
+    notebook_export: NotebookExport,
+) -> TaskRun:
+    loop = task_run.for_each_task
+    stats = None
+    if loop is not None and loop.stats is not None:
+        stats = ForEachStats.from_stats(loop.stats)
+    # A cancelled for-each task may have started iterations before it stopped.
+    if not task.ran and not task.cancelled:
+        return replace(task, for_each_stats=stats)
+    iteration_runs = _iterations(ws, task_run)
+    log.info("Read %d iterations of task %s (run %s)", len(iteration_runs), task.task_key, task.run_id)
+    built = _read_task_runs(ws, iteration_runs, {}, job_keys, notebook_export)
+    grouped: list[list[TaskRun]] = []
+    for iteration_run in iteration_runs:
+        attempt = built[iteration_run.run_id or 0]
+        # The platform lists each retry of an iteration right after the attempt before it, as an iteration run of its
+        # own with a higher `attempt_number`. Only a retry's own `get_run` names its first attempt.
+        if grouped and attempt.attempt > 0:
+            grouped[-1].append(attempt)
+        else:
+            grouped.append([attempt])
+    iterations = [_with_attempts(attempts[-1], attempts) for attempts in grouped]
+    return replace(task, iterations=iterations, for_each_stats=stats)
+
+
+def _iterations(ws: WorkspaceClient, task_run: jobs.RunTask) -> list[jobs.RunTask]:
+    """List the iteration runs of a for-each task run, every attempt of each, in iteration order.
+
+    The job run does not list them: only the for-each task run fetched by its own id does. runs/get pages them 100 at
+    a time, and databricks-sdk's `jobs.get_run` follows `next_page_token` until it has them all.
+    """
+    try:
+        loop = ws.jobs.get_run(task_run.run_id or 0)
+    except DatabricksError as e:
+        log.warning("Could not read the iterations of task %s (run %s): %s", task_run.task_key, task_run.run_id, e)
+        return []
+    return list(loop.iterations or [])
 
 
 def _with_child_run(

@@ -53,6 +53,14 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 
 ::: pytest_databricks_lakeflow.TaskRun
 
+## `ForEachStats`
+
+::: pytest_databricks_lakeflow.ForEachStats
+
+## `ForEachError`
+
+::: pytest_databricks_lakeflow.ForEachError
+
 ## `Stub`
 
 ::: pytest_databricks_lakeflow.Stub
