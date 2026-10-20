@@ -529,7 +529,7 @@ class EphemeralJob:
             timeout=timeout,
             dbt_commands=commands,
         )
-        return RunHandle(self, run_id, item, first, timeout, stream=stream)
+        return RunHandle(self, run_id, item, first, timeout, stream=stream, performance_target=target)
 
     def _check_dbt_commands_allowed(self) -> None:
         # run_now refuses dbt_commands, a legacy run parameter, on a job that declares job parameters, with
@@ -1152,6 +1152,7 @@ class RunHandle:
         timeout: timedelta | None = None,
         *,
         stream: bool | None = None,
+        performance_target: jobs.PerformanceTarget | None = None,
     ) -> None:
         self.job = job
         self.run_id = run_id
@@ -1161,6 +1162,8 @@ class RunHandle:
         self._timeout = timeout
         # From run(stream=...); None follows --lakeflow-live.
         self._stream = stream
+        # From run(performance_target=...); None asks for the job's own.
+        self._performance_target = performance_target
         self._result: JobRun | None = None
 
     @property
@@ -1225,9 +1228,24 @@ class RunHandle:
         if stream:
             emit(self._item, finished)
         _warn_on_failed_teardown(result)
+        self._check_performance_target(result)
         if job.lakeflow.run_finished is not None:
             job.lakeflow.run_finished(result, self._item)
         return result
+
+    def _check_performance_target(self, result: JobRun) -> None:
+        """Warn when the run asked for `PERFORMANCE_OPTIMIZED`, from `run()` or the job's settings, and used `STANDARD`.
+
+        The job's settings say `PERFORMANCE_OPTIMIZED` when `Lakeflow`'s `performance_optimized` is set, or when the
+        template or `modify_settings` chose it.
+        """
+        requested = self._performance_target
+        if requested is None:
+            requested = self.job.settings.performance_target
+        if requested != jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED:
+            return
+        if result.effective_performance_target == "STANDARD":
+            self.job.lakeflow._warn_performance_override(self.job.job_key, result)
 
     def _emit_start(self) -> None:
         started = f"Started run {self.run_id} of job {self.job.job_id}"

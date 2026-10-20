@@ -77,6 +77,15 @@ The Jobs API accepts undeclared parameters silently, so a typo would pass unnoti
 
 The job's `performance_target` is `STANDARD`. The plugin warns about it. Pass `performance_optimized=True` to run tests with `PERFORMANCE_OPTIMIZED`, or `job.run(performance_target="PERFORMANCE_OPTIMIZED")` to speed up one run without changing the job's settings. `run.effective_performance_target` and each task's `effective_performance_target` show which mode the run actually used.
 
+The other cause is a workspace that does not honour the request. When a run asked for `PERFORMANCE_OPTIMIZED`, through `performance_optimized=True`, `run(performance_target=...)` or the template, and `run.effective_performance_target` is `STANDARD`, a workspace policy or the job's compute decided the mode, and the plugin warns once per `Lakeflow`:
+
+```text
+UserWarning: Run 123 of 'my_job' asked for PERFORMANCE_OPTIMIZED but used STANDARD. A workspace policy or the
+job's compute decides the performance mode; expect 3 to 4 minutes extra per run.
+```
+
+Nothing in the test can change that; ask a workspace admin about the policy.
+
 ### How do I clean up after a crashed session?
 
 Ephemeral jobs are tagged `pytest` and `pytest_run_id`, and, when they can be found out, `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch`, so a leftover job can be traced to its CI run, person and commit from the Jobs list. `pytest --lakeflow-sweep` deletes your own jobs and pipeline copies from other runs that are older than `sweep_hours`, 24 hours by default. Add `--lakeflow-sweep-schemas=<catalog>` to drop the temporary schemas of crashed sessions too, `--lakeflow-sweep-notebooks` for old `setup_<hash>` and `teardown_<hash>` notebooks, and `--lakeflow-sweep-scope=all` to clean up after everyone, which needs the right to delete their jobs and schemas. Run it with `--lakeflow-sweep-dry-run` first to see what it would delete. A job or schema made under `--lakeflow-keep-ttl` is kept until its `pytest_expires` time, and so are the setup, teardown and debug notebooks of every job the sweep keeps. `Lakeflow(...).sweep()` runs the same sweep from a script, without a test or a bundle deploy. See [sweeping leftovers](configuration.md#sweeping-leftovers). `pytest --lakeflow-destroy` runs `bundle destroy` for the test target at the end of the session.
