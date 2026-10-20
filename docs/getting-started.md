@@ -120,8 +120,10 @@ env:
   DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
 steps:
   - uses: databricks/setup-cli@<pinned sha>
-  - run: uv run pytest -n 4 --lakeflow-sweep
+  - run: uv run pytest tests bundle/databricks.yml -n 4 --lakeflow-sweep --lakeflow-check
 ```
+
+`--lakeflow-check` adds one test per bundle job, `databricks.yml::<key>`, that fails on a wiring mistake without running the job (see [Check a job without running it](job-tests.md#check-a-job-without-running-it)). Name the bundle's own `databricks.yml`, here `bundle/databricks.yml` for the fixture's `bundle_root="bundle"`, so pytest collects it although it is outside `tests`. The checks call the `lakeflow` fixture that this `databricks.yml` sees, so the override must be in a `conftest.py` in the bundle's directory or above it, such as one at the repository root. An override in `tests/conftest.py` is not seen there, and collection stops with an error rather than check the bundle with the default `Lakeflow()`.
 
 The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, so jobs can be traced back to the pipeline run. `--lakeflow-sweep` deletes jobs that an earlier, crashed run left behind. On a user-to-machine (`databricks-cli`) profile, every xdist worker forces a refresh of the same token through `databricks auth token`, and two refreshes at once can fail with `exit status 45`. The plugin retries building its client, but CI should use a service principal, which has no CLI token to race on (see [the FAQ](limitations.md#why-did-the-cli-fail-with-exit-status-45-under-xdist)).
 
