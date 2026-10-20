@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import Lakeflow
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError
 
 from .conftest import configure_lakeflow
 from .fakes import FakeWorkspaceClient, make_run
@@ -114,6 +116,14 @@ class TestLakeflowArguments:
         assert (lakeflow.modify_settings, lakeflow.run_finished) == (None, None)
         assert lakeflow.permissions is None
         assert lakeflow.access_control_list() is None
+        assert (lakeflow.run_as, lakeflow.queue, lakeflow.disable) == (None, None, None)
+        assert (lakeflow.extra_dependencies, lakeflow.setup, lakeflow.teardown, lakeflow.environments) == (
+            None,
+            None,
+            None,
+            None,
+        )
+        assert lakeflow.children == "warn"
         assert lakeflow.variables is None
         assert lakeflow.deploy_flags == ()
 
@@ -153,11 +163,49 @@ class TestLakeflowArguments:
             ({"sync": "upload"}, "sync must be one of deploy, sync, none, got 'upload'"),
             ({"side_effects": "other"}, "side_effects must be one of neutralise, keep, got 'other'"),
             ({"notebook_export": "bogus"}, "notebook_export must be one of never, failed, always, got 'bogus'"),
+            ({"children": "other"}, "children must be one of warn, refuse, got 'other'"),
         ],
     )
     def test_rejects_an_unknown_choice(self, arguments: dict[str, Any], message: str) -> None:
         with pytest.raises(ValueError, match=message):
             Lakeflow(**arguments)
+
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            pytest.param({"setup": "SELECT 1"}, "setup= takes a list of SQL statements, not a string", id="string"),
+            pytest.param({"teardown": []}, "teardown= is an empty list of SQL statements", id="empty-list"),
+            pytest.param({"setup": Path("seed.sql")}, "setup= must be a .py file, got seed.sql", id="not-py"),
+            pytest.param({"teardown": lambda spark: None}, "teardown= cannot be a lambda", id="lambda"),
+        ],
+    )
+    def test_rejects_a_bad_setup_default(self, arguments: dict[str, Any], message: str) -> None:
+        with pytest.raises(LakeflowError, match=re.escape(message)):
+            Lakeflow(**arguments)
+
+    @pytest.mark.parametrize(
+        ("environments", "message"),
+        [
+            pytest.param(
+                {"__pytest_serverless": {"environment_version": "5"}},
+                "Environment keys starting with '__pytest_' are reserved for the plugin: ['__pytest_serverless']",
+                id="reserved-key",
+            ),
+            pytest.param(
+                {"default": "5"},
+                "environments['default'] must be a mapping of spec fields to values, not str",
+                id="not-a-mapping",
+            ),
+            pytest.param(
+                {"default": {"version": "5"}},
+                "environments['default'] has fields that a serverless environment does not take: ['version']",
+                id="unknown-field",
+            ),
+        ],
+    )
+    def test_rejects_a_bad_environments_default(self, environments: dict[str, Any], message: str) -> None:
+        with pytest.raises(LakeflowError, match=re.escape(message)):
+            Lakeflow(environments=environments)
 
     @pytest.mark.parametrize("poll_interval", [timedelta(0), timedelta(seconds=-1)], ids=["zero", "negative"])
     def test_rejects_a_poll_interval_that_is_not_positive(self, poll_interval: timedelta) -> None:

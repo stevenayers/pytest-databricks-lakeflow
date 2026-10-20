@@ -142,6 +142,25 @@ Drop `dry_run=True` once the report lists only what you expect. See [sweeping le
 
 When several branches, pipelines or developers share one test target, a deploy from one replaces the wheels that another session's jobs are running. Give each identity and branch its own deployment with the recipe in [isolating test deployments](how-it-works.md#isolating-test-deployments), and end the pipeline with `pytest --lakeflow-destroy`.
 
+A CI run can be stricter than a developer's. `children="refuse"` fails a test whose copy would run a deployed child job, rather than warn, and `disable` switches off tasks such as notifications in every copy:
+
+```python
+import os
+
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    if os.environ.get("CI"):
+        return Lakeflow(children="refuse", disable=["notify_slack"])
+    return Lakeflow()
+```
+
+A job without a `notify_slack` task is left as it is, and a test that needs the task passes `disable=[]`. See [Defaults for per-call arguments](configuration.md#defaults-for-per-call-arguments).
+
 Jobs that the service principal creates are visible only to it and to workspace admins. Give your team access with `permissions`, so that they can open a kept job from the CI log:
 
 ```python
