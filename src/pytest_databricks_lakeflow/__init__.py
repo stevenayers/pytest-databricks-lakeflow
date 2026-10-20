@@ -19,6 +19,7 @@ from pytest_databricks_lakeflow.results import (
     TaskValues,
     Timing,
 )
+from pytest_databricks_lakeflow.session import SweepReport
 from pytest_databricks_lakeflow.settings import Stub
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "RunHandle",
     "SqlResult",
     "Stub",
+    "SweepReport",
     "TaskError",
     "TaskRun",
     "TaskValues",
