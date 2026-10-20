@@ -38,6 +38,7 @@ from pytest_databricks_lakeflow.settings import (
     Upstream,
     add_dependencies,
     apply_task_params,
+    check_environments,
     check_lifecycle_params,
     check_params,
     check_task_params,
@@ -177,6 +178,26 @@ class Lakeflow:
             other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as
             `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. `IS_OWNER` raises `ValueError`, because
             the creator owns every ephemeral job; use `CAN_MANAGE`.
+        run_as: The default of `run_as` on `job()` and `task()`. `None` runs each copy as you.
+        queue: The default of `queue` on `EphemeralJob.run()` and `start()`. `None` leaves each run to the job's own
+            queue setting.
+        disable: The default of `disable` on `job()`. Each copy disables the tasks of this list that its job has,
+            and a task key that the job does not have is skipped, whereas `disable` on the call refuses one.
+        extra_dependencies: The default of `extra_dependencies` on `job()` and `task()`.
+        children: The default of `children` on `job()` and `task()`: `"warn"` or `"refuse"`, for example
+            `"refuse"` in CI. Anything else raises `ValueError`.
+        setup: The default of `setup` on `job()` and `task()`, checked here as far as it can be without a test: a
+            string, an empty list, a statement with a stray `$`, a path that is not a `.py` file and a function the
+            plugin cannot ship raise `LakeflowError`.
+        teardown: The default of `teardown` on `job()` and `task()`, checked here as `setup` is.
+        environments: The default of `environments` on `job()` and `task()`, such as
+            `{"default": {"environment_version": "5"}}`. Each copy takes the overrides of the environments its job
+            has, and an environment key the job does not have is skipped, whereas `environments` on the call adds
+            one. A reserved key, an entry that is not a mapping or an unknown field raises `LakeflowError` here.
+
+            A per-call argument that is `None`, or left out, takes the field's value. Anything else replaces it
+            whole, so `disable=[]` on a call disables nothing and `environments={}` keeps the template's
+            environments.
         modify_settings: Called with each ephemeral job's settings and the test, just before the job is created.
             Change the settings in place.
         run_finished: Called with the outcome of each run and the test, after the run finishes.
@@ -214,6 +235,14 @@ class Lakeflow:
     keep_failed: bool = True
     strict_artifacts: bool = False
     permissions: Sequence[Mapping[str, str] | jobs.JobAccessControlRequest] | None = None
+    run_as: RunAs = None
+    queue: bool | None = None
+    disable: Sequence[str] | None = None
+    extra_dependencies: Sequence[str] | None = None
+    children: Children = "warn"
+    setup: LifecycleStep | None = field(default=None, repr=False)
+    teardown: LifecycleStep | None = field(default=None, repr=False)
+    environments: Mapping[str, Mapping[str, Any]] | None = None
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
     run_finished: Callable[[JobRun, pytest.Item], None] | None = field(default=None, repr=False)
     active_runs: set[int] = field(default_factory=set, init=False, repr=False)
@@ -234,8 +263,15 @@ class Lakeflow:
             raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
         if self.max_concurrent_runs is not None and self.max_concurrent_runs < 1:
             raise ValueError(f"max_concurrent_runs must be 1 or more, got {self.max_concurrent_runs}")
+        _check_children(self.children)
         _check_deploy_flags(self.deploy_flags)
         _check_permissions(self.access_control_list())
+        if self.setup is not None:
+            helpers.check_lifecycle_step(self.setup, "setup")
+        if self.teardown is not None:
+            helpers.check_lifecycle_step(self.teardown, "teardown")
+        if self.environments is not None:
+            check_environments(self.environments)
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -326,7 +362,7 @@ class Lakeflow:
         *,
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         force_conditions: Mapping[str, bool] | None = None,
-        children: Children = "warn",
+        children: Children | None = None,
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
         teardown_at: TeardownAt = "run",
@@ -364,13 +400,14 @@ class Lakeflow:
             params: Job parameters for every run of the copy.
             capture_task_values: The task value keys to capture, by task key.
             name: Replaces the test node id in the job name.
-            run_as: Who the copy runs as. `None` removes the template's `run_as`, so it runs as you. `"keep"` keeps
-                the template's. A string with `@` names a user, any other string names a service principal by its
-                application id, and a `jobs.JobRunAs` is used as given. A service principal needs you to have the
-                Service Principal User role on it, which is checked before the copy is created when the workspace
-                client knows its account id.
+            run_as: Who the copy runs as. `None` takes `Lakeflow`'s `run_as`, which by default removes the template's
+                `run_as`, so the copy runs as you. `"keep"` keeps the template's. A string with `@` names a user, any
+                other string names a service principal by its application id, and a `jobs.JobRunAs` is used as given.
+                A service principal needs you to have the Service Principal User role on it, which is checked before
+                the copy is created when the workspace client knows its account id.
             disable: Task keys to disable in the copy. Runs skip them, and the platform disables every task downstream
-                of them too. Both appear in `JobRun.disabled_tasks`, and `run(only=...)` refuses to name them.
+                of them too. Both appear in `JobRun.disabled_tasks`, and `run(only=...)` refuses to name them. `None`
+                takes `Lakeflow`'s `disable`, and `[]` disables none.
             task_params: Parameters for single tasks of the copy, by task key, in the shape the task type takes. A
                 mapping is merged into a notebook task's `base_parameters`, a Python wheel task's `named_parameters` or
                 a SQL task's `parameters`, so the template's `{{tasks.<key>.values.<name>}}` references survive. A list
@@ -384,12 +421,14 @@ class Lakeflow:
             children: What to do about Run Job tasks, which the copy keeps as deployed, so they run the deployed
                 child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled,
                 downstream of a disabled task nor inside a disabled `for_each_task`. `"refuse"` raises
-                `LakeflowError` instead, before anything is created.
+                `LakeflowError` instead, before anything is created. `None` takes `Lakeflow`'s `children`.
             setup: A function, a list of SQL statements or a `.py` file to run first, as the task `__pytest_setup`,
-                which every task without `depends_on` comes to depend on. Its outcome is `JobRun.setup`.
+                which every task without `depends_on` comes to depend on. Its outcome is `JobRun.setup`. `None` takes
+                `Lakeflow`'s `setup`.
             teardown: A function, a list of SQL statements or a `.py` file to run last, as the task
                 `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no other task depends on. Its
-                outcome is `JobRun.teardown`, and a failure is logged as a warning.
+                outcome is `JobRun.teardown`, and a failure is logged as a warning. `None` takes `Lakeflow`'s
+                `teardown`.
             teardown_at: When the teardown task runs. `"run"` runs it at the end of every run, before the test's
                 assertions. `"close"` leaves it out of every run, whose `teardown` is then `None`, and runs it alone
                 when the job closes, before it is deleted, with the job's `params`, so the assertions still see what
@@ -403,12 +442,13 @@ class Lakeflow:
                 a cluster. A wheel with extras reaches only the environments, because `libraries[].whl` takes no
                 extras. The helper tasks do not get them. The notebook tasks they do not reach, after `environments`
                 and `modify_settings`, such as a serverless notebook task without an `environment_key`, are named in
-                a `UserWarning` when the job is created.
+                a `UserWarning` when the job is created. `None` takes `Lakeflow`'s `extra_dependencies`.
             environments: Fields of the copy's serverless environment specs, by `environment_key`, such as
                 `{"default": {"environment_version": "5"}}`. A field replaces the template's field, after
                 `environment_version` and `extra_dependencies` are applied, so `dependencies` replaces the whole list.
                 A key the job does not have adds an environment holding only the fields passed, which a task can
-                use through `modify_settings`.
+                use through `modify_settings`. `None` takes the keys of `Lakeflow`'s `environments` that the job has,
+                and `{}` keeps the template's environments.
             task_overrides: Timeout and retry fields of the copy's tasks, by task key, such as
                 `{"load": {"timeout_seconds": 60, "max_retries": 1, "retry_on_timeout": True}}`. The fields are
                 `timeout_seconds`, which applies to each attempt, `max_retries`, `min_retry_interval_millis` and
@@ -488,6 +528,9 @@ class Lakeflow:
                 exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
+        children = self._option("children", children)
+        setup = self._option("setup", setup)
+        teardown = self._option("teardown", teardown)
         _check_children(children)
         _check_pipelines(pipelines, schema)
         _check_teardown_at(teardown_at, teardown)
@@ -499,9 +542,9 @@ class Lakeflow:
         # Applied first, so a task key or value it rejects gives no collision warning before the error.
         apply_task_params(key, settings, task_params or {})
         check_task_params(key, settings, task_params or {}, params or {})
-        disable_tasks(settings, disable or [])
+        disable_tasks(settings, self._disable(settings, disable))
         force_condition_outcomes(settings, force_conditions or {})
-        dependencies = self._resolve_local_wheels(extra_dependencies or [])
+        dependencies = self._resolve_local_wheels(self._option("extra_dependencies", extra_dependencies) or [])
         add_dependencies(settings, dependencies)
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
@@ -517,10 +560,10 @@ class Lakeflow:
             capture_task_values=capture_task_values,
             stubs=list(upstream_task_values or {}),
             name=name,
-            run_as=run_as,
+            run_as=self._option("run_as", run_as),
             children=children,
             method="job",
-            environments=environments,
+            environments=self._environments(settings, environments),
             extra_dependencies=dependencies,
             pipelines=pipelines,
             schema=schema,
@@ -537,7 +580,7 @@ class Lakeflow:
         *,
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         upstream_from: JobRun | None = None,
-        children: Children = "warn",
+        children: Children | None = None,
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
         teardown_at: TeardownAt = "run",
@@ -623,6 +666,9 @@ class Lakeflow:
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
             ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
+        children = self._option("children", children)
+        setup = self._option("setup", setup)
+        teardown = self._option("teardown", teardown)
         _check_children(children)
         _check_pipelines(pipelines, schema)
         _check_teardown_at(teardown_at, teardown)
@@ -655,7 +701,7 @@ class Lakeflow:
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
             raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
-        dependencies = self._resolve_local_wheels(extra_dependencies or [])
+        dependencies = self._resolve_local_wheels(self._option("extra_dependencies", extra_dependencies) or [])
         add_dependencies(settings, dependencies)
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object] | Stub] = {}
@@ -679,15 +725,45 @@ class Lakeflow:
             capture_task_values=capture,
             stubs=upstream,
             name=None,
-            run_as=run_as,
+            run_as=self._option("run_as", run_as),
             children=children,
             method="task",
-            environments=environments,
+            environments=self._environments(settings, environments),
             extra_dependencies=dependencies,
             pipelines=pipelines,
             schema=schema,
             teardown_at=teardown_at,
         )
+
+    def _option(self, name: str, value: Any) -> Any:
+        """Get the call's `value` of the argument `name`, or this `Lakeflow`'s `name` when the call passed `None`."""
+        if value is not None:
+            return value
+        return getattr(self, name)
+
+    def _disable(self, settings: jobs.JobSettings, disable: Sequence[str] | None) -> Sequence[str]:
+        """Get the tasks to disable: the call's `disable`, or this `Lakeflow`'s less the tasks the job lacks."""
+        if disable is not None:
+            return disable
+        keys = {task.task_key for task in settings.tasks or []}
+        kept: list[str] = []
+        for key in self.disable or []:
+            if key in keys:
+                kept.append(key)
+        return kept
+
+    def _environments(
+        self, settings: jobs.JobSettings, environments: Mapping[str, Mapping[str, Any]] | None
+    ) -> Mapping[str, Mapping[str, Any]]:
+        """Get the environment overrides: the call's, or this `Lakeflow`'s less the keys the job's environments lack."""
+        if environments is not None:
+            return environments
+        keys = {env.environment_key for env in settings.environments or []}
+        kept: dict[str, Mapping[str, Any]] = {}
+        for key, override in (self.environments or {}).items():
+            if key in keys:
+                kept[key] = override
+        return kept
 
     def attach(self, run_id: int) -> JobRun:
         """Rebuild the outcome of a finished run of a kept ephemeral job, without running anything.
@@ -1000,7 +1076,7 @@ class Lakeflow:
         run_as: RunAs,
         children: Children,
         method: str,
-        environments: Mapping[str, Mapping[str, Any]] | None,
+        environments: Mapping[str, Mapping[str, Any]],
         extra_dependencies: Sequence[str],
         pipelines: Pipelines,
         schema: str | None,
@@ -1033,7 +1109,7 @@ class Lakeflow:
             existing_cluster_id=self.existing_cluster_id,
             single_node=self.single_node,
         )
-        merge_environments(settings, environments or {})
+        merge_environments(settings, environments)
         if self.test_marker:
             inject_test_marker(settings, item.nodeid)
         copies: list[EphemeralPipeline] = []

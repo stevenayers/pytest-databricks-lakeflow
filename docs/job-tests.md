@@ -45,6 +45,8 @@ with lakeflow.job("my_example_job", params={"param1": "hello", "param2": "world"
 - `environments` changes the copy's serverless environments, see [below](#change-the-settings-before-the-job-is-created).
 - `upstream_task_values` replaces tasks of the copy with stubs that set the task values you give, see [below](#stub-upstream-tasks).
 
+`run_as`, `disable`, `extra_dependencies`, `environments`, `children`, `setup` and `teardown` take their default from the `Lakeflow` argument of the same name, so a `conftest.py` can set one for every test. A call that passes the argument replaces the default whole: `disable=[]` disables nothing. See [Defaults for per-call arguments](configuration.md#defaults-for-per-call-arguments).
+
 Entering the `with` block creates the job. Leaving it deletes the job, unless the block raised and `keep_failed` is on, which is the default. `pytest.skip` and `pytest.xfail` do not count as failures.
 
 `lakeflow.job()` also works without `with`. The job is then created by the first `run()` and deleted at the end of the test, or kept if the test failed:
@@ -947,6 +949,8 @@ def test_parent_is_refused(lakeflow: Lakeflow) -> None:
         lakeflow.job("parent", children="refuse")
 ```
 
+`Lakeflow(children="refuse")` makes refusing the default for every test, such as in CI, and a test that means to run the child passes `children="warn"`.
+
 When the child does run, `TaskRun.child_run_id` gives the id of its run and `TaskRun.child_run` gives the run itself as a `JobRun`, so you assert on the child's tasks with the same API as the parent's:
 
 ```python
@@ -970,6 +974,14 @@ To change the serverless environments of one copy, pass `environments` to `lakef
 def test_on_environment_5(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", environments={"default": {"environment_version": "5"}}) as job:
         assert job.run().succeeded
+```
+
+To change them for every copy, pass the same mapping to `Lakeflow(environments=...)`. Each copy then takes the entries for the environments its job has and skips the others, and a test that passes `environments` replaces the whole mapping, so `environments={}` runs the template's environments:
+
+```python
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(environments={"default": {"environment_version": "5"}})
 ```
 
 For a key the job already has, each field you pass replaces the template's field and the others are kept. `dependencies` replaces the whole list, the wheel from the bundle included, so `{"default": {"dependencies": ["/Volumes/main/libs/wheels/my_pkg-0.2.0-py3-none-any.whl"]}}` swaps the job's wheel for another one; to add packages to the list, use [`extra_dependencies`](#test-only-dependencies), which `environments` overrides when both set `dependencies` on the same environment. A key the job does not have adds a new environment, such as `{"gpu": {"environment_version": "4", "dependencies": ["torch"]}}`; moving a task onto it is a job for `modify_settings`. A new environment holds only the fields you pass: neither `Lakeflow(environment_version=...)` nor `extra_dependencies` reaches it, because both are applied to the template's environments before `environments` is merged. An `environment_version` here wins over `Lakeflow(environment_version=...)` for that environment. The fields are those of `compute.Environment`: `environment_version`, `base_environment`, `dependencies`, `java_dependencies`, and the others your databricks-sdk knows. `LakeflowError` is raised before the job is created for a key starting with `__pytest_`, which the plugin reserves, for an entry that is not a mapping of fields, for a field the spec does not have, for an environment that would set both `environment_version` and `base_environment` (set the one you do not want to `None`), and when the job would have more than 10 environments, the helper environment `__pytest_serverless` included.

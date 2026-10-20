@@ -25,7 +25,7 @@ All arguments are keyword-only.
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks so that a failure fails once and fast, instead of being retried by the platform. |
 | `performance_optimized` | `False` | Run every ephemeral job with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. |
 | `side_effects` | `"neutralise"` | `"neutralise"` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral job, so test runs do not email snapshots or notify subscribers. `"keep"` leaves them as the template has them. Alert tasks and Power BI tasks are left as they are in both modes; disable them with `disable=`. Any other value raises `ValueError`. |
-| `environment_version` | `None` | The serverless environment version of every environment copied from the template, such as `"5"`. Environments whose spec sets `base_environment` keep it, and the helper environment `__pytest_serverless` keeps `helpers_environment_version`. A test overrides it for one copy with `environments=`, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created). |
+| `environment_version` | `None` | The serverless environment version of every environment copied from the template, such as `"5"`. Environments whose spec sets `base_environment` keep it, and the helper environment `__pytest_serverless` keeps `helpers_environment_version`. `environments` overrides it for the environments it names, on `Lakeflow` for every copy or on a call for one, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created). |
 | `budget_policy_id` | `None` | The budget policy of every ephemeral job and pipeline copy. A pipeline copy without it keeps the deployed pipeline's. |
 | `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, stub, probe and nested `for_each_task` tasks included, so that tests skip cluster start-up. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. |
 | `single_node` | `False` | Make every job cluster and every task's `new_cluster`, nested `for_each_task` tasks and the `helpers_compute` cluster included, a single node cluster, so that runs start faster and cost one node: `num_workers` becomes 0, `autoscale` is removed, `spark.master` (`local[*, 4]`) and `spark.databricks.cluster.profile` (`singleNode`) are merged into `spark_conf` and `ResourceClass` (`SingleNode`) into `custom_tags`. Raises `LakeflowError` naming the cluster when one uses standard access mode (`USER_ISOLATION` or `DATA_SECURITY_MODE_STANDARD`), because single node compute needs dedicated access mode. Serverless tasks are left alone, and with `existing_cluster_id` there is no cluster left to change. |
@@ -37,10 +37,37 @@ All arguments are keyword-only.
 | `keep_failed` | `True` | Keep the ephemeral job and pipeline copies when their test fails. |
 | `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, or, with `sync="none"`, a local wheel built after its uploaded copy, instead of the `UserWarning` the plugin emits once per session for each. Later lookups fail with the same message. See [Limitations](limitations.md). |
 | `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. `IS_OWNER` raises `ValueError`: the creator owns every copy, so use `CAN_MANAGE`. See [Permissions](#permissions). |
+| `run_as` | `None`, run as you | The default of `run_as=` on `job()` and `task()`: `"keep"`, a user, a service principal's application id or a `jobs.JobRunAs`. See [Run as another identity](job-tests.md#run-as-another-identity). |
+| `queue` | `None`, the job's own setting | The default of `queue=` on `EphemeralJob.run()` and `start()`. |
+| `disable` | `None` | The default of `disable=` on `job()`: task keys to disable in every copy. A key that a job does not have is skipped for that job, whereas `disable=` on a call refuses it. |
+| `extra_dependencies` | `None` | The default of `extra_dependencies=` on `job()` and `task()`. See [Test-only dependencies](job-tests.md#test-only-dependencies). |
+| `children` | `"warn"` | The default of `children=` on `job()` and `task()`, `"warn"` or `"refuse"`, such as `"refuse"` in CI. Any other value raises `ValueError`. See [Jobs that run other jobs](job-tests.md#jobs-that-run-other-jobs). |
+| `setup`, `teardown` | `None` | The defaults of `setup=` and `teardown=` on `job()` and `task()`. A string, an empty list, a statement with a stray `$`, a path that is not a `.py` file or a function the plugin cannot ship raises `LakeflowError` when `Lakeflow` is made. See [Set up and tear down data](job-tests.md#set-up-and-tear-down-data). |
+| `environments` | `None` | The default of `environments=` on `job()` and `task()`, such as `{"default": {"environment_version": "5"}}`. Each copy takes the entries for the environments its job has; a key the job does not have is skipped, whereas `environments=` on a call adds it. A key starting with `__pytest_`, an entry that is not a mapping or an unknown field raises `LakeflowError` when `Lakeflow` is made. |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
 | `run_finished` | `None` | Called with each `JobRun` and the test after a run finishes, once per run however often `RunHandle.wait()` is called. |
 
-Test-only packages are set per test rather than on `Lakeflow`: pass `extra_dependencies` to `lakeflow.job()` or `lakeflow.task()`, see [Test-only dependencies](job-tests.md#test-only-dependencies).
+### Defaults for per-call arguments
+
+`run_as`, `queue`, `disable`, `extra_dependencies`, `children`, `setup`, `teardown` and `environments` hold the default of the argument of the same name on `lakeflow.job()` and `lakeflow.task()` (`queue` on `run()` and `start()`, `disable` on `job()` only). A call that leaves the argument out, or passes `None`, takes the `Lakeflow` value. Anything else replaces it whole, without merging: `disable=[]` disables nothing, `extra_dependencies=[]` adds none and `environments={}` leaves the template's environments as they are.
+
+```python
+@pytest.fixture(scope="session")
+def lakeflow() -> Lakeflow:
+    return Lakeflow(
+        children="refuse",
+        disable=["notify_slack"],
+        extra_dependencies=["chispa"],
+        environments={"default": {"environment_version": "5"}},
+    )
+
+
+def test_notifies(lakeflow):
+    with lakeflow.job("my_job", disable=[]) as job:  # [] replaces the default
+        assert job.run().succeeded
+```
+
+`disable` and `environments` on `Lakeflow` skip a task key or environment key that a job does not have, so one default can serve every job of the bundle. On a call, `disable=` refuses an unknown task and `environments=` adds a new environment.
 
 `Lakeflow` is a dataclass, so a `conftest.py` in a subdirectory can derive its own from the parent's:
 
@@ -54,7 +81,7 @@ from pytest_databricks_lakeflow import Lakeflow
 
 @pytest.fixture(scope="session")
 def lakeflow(lakeflow: Lakeflow) -> Lakeflow:
-    return dataclasses.replace(lakeflow, catalog="team_b")
+    return dataclasses.replace(lakeflow, catalog="team_b", children="refuse")
 ```
 
 The override applies to the tests below that directory only. Every `Lakeflow` that names the same bundle target shares one deploy. A second target, such as `Lakeflow(target="staging")` in another fixture, is deployed once too.

@@ -2062,13 +2062,15 @@ def describe(settings, item):
 
 @pytest.fixture(scope="session")
 def lakeflow(lakeflow):
-    return dataclasses.replace(lakeflow, modify_settings=describe)
+    return dataclasses.replace(lakeflow, modify_settings=describe, children="refuse")
 """
         )
         pytester.mkpydir("team_b")
         test = "def test_job(lakeflow):\n    with lakeflow.job('my_job') as job:\n        job.run()\n"
-        pytester.path.joinpath("team_a", "test_a.py").write_text(test)
-        pytester.path.joinpath("team_b", "test_b.py").write_text(test)
+        test_a = f"{test}    assert lakeflow.children == 'refuse'\n"
+        test_b = f"{test}    assert lakeflow.children == 'warn'\n"
+        pytester.path.joinpath("team_a", "test_a.py").write_text(test_a)
+        pytester.path.joinpath("team_b", "test_b.py").write_text(test_b)
         pytester.runpytest("team_a/test_a.py", "team_b/test_b.py").assert_outcomes(passed=2)
         descriptions = [created["description"] for created in fake_ws.jobs.created]
         assert descriptions[0] == "team a"
@@ -2089,6 +2091,145 @@ def drop_environment(settings, item):
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*LakeflowError*['load']*environment_key*"])
         assert fake_ws.jobs.created == []
+
+
+def environment_versions(created: dict[str, Any]) -> dict[str, str | None]:
+    return {e.environment_key: e.spec.environment_version for e in created["environments"]}
+
+
+class TestSessionDefaults:
+    """`Lakeflow` fields that set the default of a per-call argument, and the call that replaces one."""
+
+    def test_session_default_disable_applies_to_every_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, parent: int
+    ) -> None:
+        configure_lakeflow(pytester, 'disable=["load"]')
+        source = (
+            'def test_job(lakeflow):\n    lakeflow.job("my_job").create()\n'
+            '    lakeflow.job("parent", children="warn").create()\n'
+        )
+        run_tests(pytester, source).assert_outcomes(passed=1, warnings=1)
+        mine, other = fake_ws.jobs.created
+        assert [t.task_key for t in mine["tasks"] if t.disabled] == ["load"]
+        assert [t.task_key for t in other["tasks"] if t.disabled] == [], "a job without the task is left alone"
+
+    def test_call_argument_replaces_the_session_default(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(pytester, 'disable=["load"], environments={"default": {"environment_version": "5"}}')
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("my_job", disable=[]).create()
+                lakeflow.job("my_job", environments={}).create()
+                lakeflow.job("my_job", environments={"gpu": {"environment_version": "4"}}).create()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        no_disable, no_environments, appended = fake_ws.jobs.created
+        assert [t.task_key for t in no_disable["tasks"] if t.disabled] == []
+        assert environment_versions(no_disable) == {"default": "5"}
+        assert environment_versions(no_environments) == {"default": "4"}
+        assert environment_versions(appended) == {"default": "4", "gpu": "4"}
+
+    def test_session_default_environments_apply_to_every_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(
+            pytester,
+            'environments={"default": {"environment_version": "5"}, "gpu": {"environment_version": "4"}}, '
+            'helpers_environment_version="3"',
+        )
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("my_job", capture_task_values={"load": ["k"]}).create()
+                lakeflow.task("my_job.load").create()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        job, task = fake_ws.jobs.created
+        assert environment_versions(job) == {"default": "5", "__pytest_serverless": "3"}
+        assert environment_versions(task) == {"default": "5"}
+
+    def test_session_default_children_refuse(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, parent: int
+    ) -> None:
+        configure_lakeflow(pytester, 'children="refuse"')
+        refused = """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                with pytest.raises(LakeflowError, match="runs the deployed job 123, not a copy"):
+                    lakeflow.job("parent")
+        """
+        run_tests(pytester, refused).assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
+        warned = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("parent", children="warn").create()\n')
+        warned.assert_outcomes(passed=1, warnings=1)
+        warned.stdout.fnmatch_lines([CHILD_WARNING])
+        assert len(fake_ws.jobs.created) == 1
+
+    def test_session_default_run_as_keep(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        configure_lakeflow(pytester, 'run_as="keep"')
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("my_job").create()
+                lakeflow.task("my_job.transform", upstream_task_values={"extract": {"row_count": 1}}).create()
+                lakeflow.job("my_job", run_as="me@example.com").create()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        template = jobs.JobRunAs(user_name="someone@example.com")
+        assert [created["run_as"] for created in fake_ws.jobs.created] == [
+            template,
+            template,
+            jobs.JobRunAs(user_name="me@example.com"),
+        ]
+
+    def test_session_default_queue(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        configure_lakeflow(pytester, "queue=False")
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                with lakeflow.job("my_job") as job:
+                    job.run()
+                    job.start().wait()
+                    job.run(queue=True)
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        assert [call["queue"] for call in fake_ws.jobs.run_now_calls] == [
+            jobs.QueueSettings(enabled=False),
+            jobs.QueueSettings(enabled=False),
+            jobs.QueueSettings(enabled=True),
+        ]
+
+    def test_session_default_dependencies_and_lifecycle(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        configure_lakeflow(pytester, 'extra_dependencies=["pytest>=8"], setup=["SELECT 1"], teardown=["SELECT 2"]')
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                lakeflow.job("my_job").create()
+                lakeflow.task("my_job.load", extra_dependencies=[], setup=None, teardown=["SELECT 3"]).create()
+            """,
+        )
+        result.assert_outcomes(passed=1)
+        job, task = fake_ws.jobs.created
+        assert [e.spec.dependencies for e in job["environments"] if e.environment_key == "default"] == [["pytest>=8"]]
+        assert [e.spec.dependencies for e in task["environments"] if e.environment_key == "default"] == [None]
+        assert {"__pytest_setup", "__pytest_teardown"} <= {t.task_key for t in job["tasks"]}
+        assert {"__pytest_setup", "__pytest_teardown"} <= {t.task_key for t in task["tasks"]}
 
 
 class TestRunOptions:
