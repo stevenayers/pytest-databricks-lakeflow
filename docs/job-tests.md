@@ -881,3 +881,22 @@ def lakeflow() -> Lakeflow:
 ```
 
 Parameters that `modify_settings` declares are accepted by `params`. `run_finished` is the matching callback for outcomes: it receives each `JobRun` and the test, for example to record durations.
+
+## Check a job without running it
+
+`lakeflow.check(key)` lints the job's template and returns one message per wiring mistake, without creating or running anything. Each message starts with `Task '<key>':`, in the order of the job's tasks:
+
+```python
+def test_my_example_job_is_wired(lakeflow: Lakeflow) -> None:
+    problems = lakeflow.check("my_example_job")
+    assert not problems, "\n".join(problems)
+```
+
+It reports:
+
+- a `{{job.parameters.<name>}}` reference to a parameter the job does not declare;
+- a `{{tasks.<key>.values.<name>}}` reference to a task that is not upstream of the task that makes it, directly or through other tasks. A task nested in a `for_each_task` shares the upstream tasks of its `for_each_task`, which is not upstream of it;
+- a `depends_on` entry naming a task that is not in the job;
+- `max_retries`, `min_retry_interval_millis` or `retry_on_timeout` on a `for_each_task`, which cannot be retried. Set them on its nested task.
+
+`bundle validate` passes all of these. `jobs/create` and `jobs/reset` refuse the first three and `max_retries` on a `for_each_task`, one at a time, so with the default `sync="deploy"` the deploy fails on them before any test runs; it accepts the other two retry settings there, to no effect. With `Lakeflow(sync="sync")` or `Lakeflow(sync="none")`, `check` lints the job as `bundle validate` reads it, so it finds them all at once before anything is deployed or created. It uses the template the session has already loaded and works outside a test too, for example in a session-scoped fixture. It raises `KeyError` and `LakeflowBundleError` as `lakeflow.template(key)` does.

@@ -38,6 +38,10 @@
 
 `validate` resolves notebook paths but leaves wheel and JAR paths pointing at local files, and does not resolve `${resources...}` references. A deploy builds and uploads the wheels and gives job settings in which every path is a workspace path, read back with `jobs.get`. The deploy happens once per session, and a deploy of an unchanged bundle takes seconds. If you deploy the target yourself, `Lakeflow(sync="none")` skips it, see [sync strategies](configuration.md#sync-strategies).
 
+### Why not rely on `bundle validate`?
+
+Checking a bundle's schema and types is the CLI's job, and `bundle validate` does it. It does not model the Jobs API's own rules, so it passes a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose task is not upstream, a `depends_on` task that is not in the job and retries on a `for_each_task`, and the deploy refuses most of them later, one at a time. `lakeflow.check(key)` checks those Jobs API rules on the template without creating anything, see [Check a job without running it](job-tests.md#check-a-job-without-running-it).
+
 ### Why do my tests never run the deployed job?
 
 The deployed job keeps its schedule, notifications, `run_as` and bundle lock, and running it would mix test runs with real ones. Each test instead gets a copy with those removed and its dashboard and SQL alert subscriptions paused, named and tagged after the test, so runs are isolated and attributable and do not email subscribers. Alert and Power BI tasks are left alone; see [Limitations](#limitations). Jobs are cheap to create and delete.

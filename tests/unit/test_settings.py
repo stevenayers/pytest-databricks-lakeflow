@@ -31,6 +31,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
+    lint,
     merge_environments,
     override_tasks,
     pipeline_params,
@@ -809,6 +810,111 @@ class TestSelect:
         with pytest.raises(LakeflowError, match=r"Task 'load' refers to task values of \['extract'\]"):
             check_references(settings, {"load"}, {"extract"})
         check_references(settings, {"load", "transform"}, {"extract"})
+
+
+def notebook(key: str, *deps: str, **parameters: str) -> dict[str, Any]:
+    """Build a notebook task `key` that depends on `deps` and passes `parameters` as its base parameters."""
+    return {
+        "task_key": key,
+        "depends_on": [{"task_key": dep} for dep in deps],
+        "notebook_task": {"notebook_path": f"/{key}", "base_parameters": parameters},
+    }
+
+
+class TestLint:
+    """lint reports the wiring mistakes in a template that jobs/create would refuse, one message per problem."""
+
+    def test_the_example_template_has_no_problems(self) -> None:
+        assert lint(example_settings()) == []
+
+    def test_undeclared_job_parameter(self) -> None:
+        settings = example_settings()
+        transform = task(settings, "transform").notebook_task
+        assert transform is not None
+        transform.base_parameters = {"x": "{{job.parameters.nope}}", "y": "{{ job.parameters.param1 }}"}
+        assert lint(settings) == [
+            "Task 'transform': {{job.parameters.nope}} is not declared. Declared: ['param1', 'schema']"
+        ]
+
+    def test_task_values_need_a_transitive_upstream_task(self) -> None:
+        settings = example_settings()
+        load = task(settings, "load").python_wheel_task
+        assert load is not None
+        load.named_parameters = {"n": "{{tasks.extract.values.n}}"}
+        assert lint(settings) == []
+        task(settings, "extract").notebook_task = jobs.NotebookTask("/extract", {"n": "{{tasks.load.values.n}}"})
+        assert lint(settings) == [
+            "Task 'extract': refers to the task values of 'load', which is not upstream of it. Upstream: []"
+        ]
+
+    def test_unknown_dependency(self) -> None:
+        settings = example_settings()
+        transform = task(settings, "transform")
+        transform.depends_on = [*(transform.depends_on or []), jobs.TaskDependency(task_key="missing")]
+        assert lint(settings) == [
+            "Task 'transform': depends on 'missing', which is not a task in the job. "
+            "Tasks: ['classic', 'extract', 'load', 'transform']"
+        ]
+
+    @pytest.mark.parametrize(
+        ("retries", "sets"),
+        [
+            ({"max_retries": 2}, "max_retries=2"),
+            ({"max_retries": -1, "retry_on_timeout": True}, "max_retries=-1, retry_on_timeout=True"),
+            ({"min_retry_interval_millis": 1000}, "min_retry_interval_millis=1000"),
+        ],
+    )
+    def test_retries_on_a_for_each_task(self, retries: dict[str, Any], sets: str) -> None:
+        settings = with_tasks({**for_each(notebook("inner")), **retries})
+        assert lint(settings) == [
+            f"Task 'loop': a for_each task cannot be retried, but it sets {sets}. "
+            "Set retries on its nested task 'inner' instead."
+        ]
+
+    def test_retries_on_the_nested_task_and_the_defaults_jobs_get_returns_are_fine(self) -> None:
+        # jobs/get returns max_retries 0 and retry_on_timeout false beside any retry field a task sets, and
+        # jobs/create accepts them on a for_each task.
+        inner = {**notebook("inner"), "max_retries": 2, "retry_on_timeout": True}
+        settings = with_tasks({**for_each(inner), "max_retries": 0, "retry_on_timeout": False})
+        assert lint(settings) == []
+
+    def test_a_nested_task_shares_the_upstream_of_its_for_each_task(self) -> None:
+        # jobs/create accepts a nested task's reference to a task upstream of its for_each task, and refuses one to
+        # the for_each task itself: "Task 'loop' must be a dependency of task 'inner'."
+        upstream = for_each(notebook("inner", n="{{tasks.extract.values.n}}"))
+        settings = with_tasks({**upstream, "depends_on": [{"task_key": "transform"}]})
+        assert lint(settings) == []
+        settings = with_tasks(for_each(notebook("inner", n="{{tasks.loop.values.n}}", p="{{job.parameters.p}}")))
+        assert lint(settings) == [
+            "Task 'inner': {{job.parameters.p}} is not declared. Declared: ['param1', 'schema']",
+            "Task 'inner': refers to the task values of 'loop', which is not upstream of it. Upstream: []",
+        ]
+
+    def test_one_message_per_problem_in_task_order(self) -> None:
+        settings = jobs.JobSettings.from_dict(
+            {
+                "parameters": [{"name": "day", "default": ""}],
+                "tasks": [
+                    notebook("a", "ghost", x="{{job.parameters.x}}", y="{{tasks.c.values.n}}"),
+                    notebook("b", "a", x="{{job.parameters.x}}", y="{{job.parameters.day}}"),
+                    notebook("c", z="{{job.parameters.z}}", w="{{job.parameters.x}}"),
+                ],
+            }
+        )
+        assert lint(settings) == [
+            "Task 'a': {{job.parameters.x}} is not declared. Declared: ['day']",
+            "Task 'a': refers to the task values of 'c', which is not upstream of it. Upstream: []",
+            "Task 'a': depends on 'ghost', which is not a task in the job. Tasks: ['a', 'b', 'c']",
+            "Task 'b': {{job.parameters.x}} is not declared. Declared: ['day']",
+            "Task 'c': {{job.parameters.x}} is not declared. Declared: ['day']",
+            "Task 'c': {{job.parameters.z}} is not declared. Declared: ['day']",
+        ]
+
+    def test_lint_leaves_the_settings_unchanged(self) -> None:
+        settings = with_tasks({**for_each(notebook("inner", "ghost", n="{{tasks.x.values.n}}")), "max_retries": 2})
+        before = copy.deepcopy(settings.as_dict())
+        assert lint(settings)
+        assert settings.as_dict() == before
 
 
 class TestInjectLifecycle:
