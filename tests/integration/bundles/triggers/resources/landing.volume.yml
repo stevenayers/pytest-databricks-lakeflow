@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    landing:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.trigger_files.name}
+      name: landing
+      volume_type: MANAGED
+      comment: Watched by the paused file arrival trigger of file_job. Nothing is written to it.
