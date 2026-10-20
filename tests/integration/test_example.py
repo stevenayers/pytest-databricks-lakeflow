@@ -203,6 +203,17 @@ def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
         assert run.succeeded
 
 
+def test_performance_optimized_is_honoured(lakeflow: Lakeflow, recwarn: pytest.WarningsRecorder) -> None:
+    # The baseline: this workspace has no policy that overrides the performance mode, so no override warning.
+    optimized = dataclasses.replace(lakeflow, performance_optimized=True)
+    with optimized.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
+        run = job.run()
+    assert run.succeeded
+    assert run.effective_performance_target == "PERFORMANCE_OPTIMIZED"
+    overrides = [w for w in recwarn if "asked for PERFORMANCE_OPTIMIZED" in str(w.message)]
+    assert overrides == []
+
+
 @pytest.mark.parametrize(
     ("greeting", "expected"),
     [("hello", "hello world"), ("goodbye", "goodbye world")],
