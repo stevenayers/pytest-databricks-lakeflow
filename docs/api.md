@@ -19,7 +19,7 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 | `--lakeflow-sweep` | At session start, delete your leftover ephemeral jobs and pipeline copies from other runs that are older than `sweep_hours`. |
 | `--lakeflow-sweep-scope=all` | Sweep jobs, pipeline copies and schemas whoever created them, and every user's default helpers folder. The default is `mine`. |
 | `--lakeflow-sweep-schemas=<catalog>` | Also drop old `pytest_<run id>_*` schemas of other runs in that catalog. |
-| `--lakeflow-sweep-notebooks` | Also delete old `setup_<hash>`, `teardown_<hash>` and debug notebooks from the helpers folder that no job the sweep keeps uses. |
+| `--lakeflow-sweep-notebooks` | Also delete old `setup_<hash>`, `teardown_<hash>` and debug notebooks and inlined saved query files from the helpers folder that no job the sweep keeps uses. |
 | `--lakeflow-sweep-branch=<branch>` | Sweep only jobs, pipeline copies and schemas of `pytest_git_branch=<branch>`, and the notebooks that those jobs alone use. |
 | `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete in the terminal summary. |
 | `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file. |

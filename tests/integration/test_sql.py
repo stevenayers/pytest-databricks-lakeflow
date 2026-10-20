@@ -1,8 +1,11 @@
 r"""Integration tests for the ``sql`` bundle (tests/integration/bundles/sql), run in a real workspace.
 
 The bundle's ``sql_job`` runs SQL files on the warehouse named by the ``warehouse_id`` bundle variable, which
-these tests read from ``LAKEFLOW_WAREHOUSE_ID``. The tests that only read a task's result share one run of the
-tasks they read, marked with the ``xdist_group`` ``sql_run`` so that ``--dist loadgroup`` sends them to one worker.
+these tests read from ``LAKEFLOW_WAREHOUSE_ID``, and its ``saved_query_job`` runs a saved query that the module
+creates and passes as the ``query_id`` bundle variable. The whole module is in the ``xdist_group`` ``sql_run``, so
+that ``--dist loadgroup`` sends it to one worker: each worker would create its own saved query, and so deploy the
+target with its own variables at the same time as the others. The tests that only read a task's result share one
+run of the tasks they read.
 Run them with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
@@ -15,25 +18,53 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import secrets
 from collections.abc import Iterator
 
 import pytest
+from databricks.sdk.errors import NotFound
+from databricks.sdk.service import sql
 
 from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, Stub
 
 from .conftest import lakeflow_for
 
 WAREHOUSE_ID = os.environ.get("LAKEFLOW_WAREHOUSE_ID")
+CATALOG = os.environ.get("LAKEFLOW_CATALOG")
 
-pytestmark = pytest.mark.skipif(
-    not WAREHOUSE_ID, reason="set LAKEFLOW_WAREHOUSE_ID to the id of a SQL warehouse to run the sql bundle"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not WAREHOUSE_ID, reason="set LAKEFLOW_WAREHOUSE_ID to the id of a SQL warehouse to run the sql bundle"
+    ),
+    pytest.mark.xdist_group("sql_run"),
+]
 
 
 @pytest.fixture(scope="module")
-def lakeflow() -> Lakeflow:
+def saved_query_id() -> Iterator[str]:
+    """Create a saved query with a parameter default for ``saved_query_job``, and move it to the trash afterwards."""
+    ws = lakeflow_for("sql").ws
+    query = ws.queries.create(
+        query=sql.CreateQueryRequestQuery(
+            display_name=f"pytest_{secrets.token_hex(4)}",
+            warehouse_id=WAREHOUSE_ID,
+            query_text="SELECT :region AS region, current_catalog() AS catalog",
+            catalog=CATALOG,
+            parameters=[sql.QueryParameter(name="region", text_value=sql.TextValue(value="emea"))],
+        )
+    )
+    assert query.id is not None
+    try:
+        yield query.id
+    finally:
+        ws.queries.delete(query.id)
+
+
+@pytest.fixture(scope="module")
+def lakeflow(saved_query_id: str) -> Lakeflow:
     assert WAREHOUSE_ID is not None
-    return dataclasses.replace(lakeflow_for("sql"), variables={"warehouse_id": WAREHOUSE_ID})
+    variables = {"warehouse_id": WAREHOUSE_ID, "query_id": saved_query_id}
+    return dataclasses.replace(lakeflow_for("sql"), variables=variables)
 
 
 @pytest.fixture(scope="module")
@@ -42,7 +73,6 @@ def sql_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
         yield job.run(only=["query", "types", "wide", "use_results"])
 
 
-@pytest.mark.xdist_group("sql_run")
 def test_sql_file_task_runs_on_the_warehouse(sql_run: JobRun) -> None:
     assert sql_run.succeeded, sql_run
     task = sql_run.task("query")
@@ -59,7 +89,6 @@ def test_sql_file_task_runs_on_the_warehouse(sql_run: JobRun) -> None:
     assert result.truncated is False
 
 
-@pytest.mark.xdist_group("sql_run")
 def test_sql_result_values_are_strings_and_null_is_none(sql_run: JobRun) -> None:
     assert sql_run.succeeded, sql_run
     result = sql_run.task("types").sql_result
@@ -68,7 +97,6 @@ def test_sql_result_values_are_strings_and_null_is_none(sql_run: JobRun) -> None
     assert result.first_row == {"n": "1", "m": None, "d": "1.5", "day": "2026-01-01", "b": "true"}
 
 
-@pytest.mark.xdist_group("sql_run")
 def test_sql_result_is_cut_at_1000_rows(sql_run: JobRun) -> None:
     assert sql_run.succeeded, sql_run
     result = sql_run.task("wide").sql_result
@@ -107,7 +135,6 @@ def test_task_params_merge_into_sql_parameters(lakeflow: Lakeflow) -> None:
         assert parameterised.sql_result.first_row == {"n": "3"}
 
 
-@pytest.mark.xdist_group("sql_run")
 def test_output_references_resolve_to_the_query_results(sql_run: JobRun) -> None:
     assert sql_run.succeeded, sql_run
     parameters = sql_run.task("use_results").parameters
@@ -150,3 +177,23 @@ def test_stubbed_outputs_replace_the_references(lakeflow: Lakeflow) -> None:
             "row": parameters["row"],
             "rows": parameters["rows"],
         }
+
+
+def test_inlined_saved_query_returns_its_rows(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("saved_query_job", saved_queries="inline") as job:
+        run = job.run()
+        assert run.succeeded, run
+        task = run.task("saved")
+        # The task sets no parameter, so the query's default is carried into the SQL file task.
+        assert task.parameters == {"region": "emea"}
+        result = task.sql_result
+        assert result is not None
+        assert result.columns == ["region", "catalog"]
+        assert result.first_row["region"] == "emea"
+        if CATALOG:
+            assert result.first_row["catalog"] == CATALOG, "the USE CATALOG line applies the query's catalog"
+        sql_task = (job.settings.tasks or [])[0].sql_task
+        assert sql_task is not None and sql_task.file is not None
+        path = sql_task.file.path
+    with pytest.raises(NotFound):
+        lakeflow.ws.workspace.get_status(path)

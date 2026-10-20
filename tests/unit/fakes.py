@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import http.client
 import itertools
 import json
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from databricks.sdk.errors import BadRequest, InvalidParameterValue, NotFound
-from databricks.sdk.service import catalog, iam, jobs, pipelines, workspace
+from databricks.sdk.service import catalog, iam, jobs, pipelines, sql, workspace
 
 DATA = Path(__file__).parent / "data"
 HOST = "https://example.cloud.databricks.com"
@@ -383,6 +384,7 @@ class FakeWorkspace:
         self.upload_errors: dict[str, Exception] = {}
         self.list_calls: list[str] = []
         self.list_errors: dict[str, Exception] = {}
+        self.delete_errors: dict[str, Exception] = {}
         self._ids = itertools.count(5000)
 
     def mkdirs(self, path: str) -> None:
@@ -437,6 +439,10 @@ class FakeWorkspace:
         return iter(inside)
 
     def delete(self, path: str, **kwargs: Any) -> None:
+        """Delete `path`, unless it matches a glob in `delete_errors`, which raises that glob's error."""
+        for pattern, error in self.delete_errors.items():
+            if fnmatch.fnmatch(path, pattern):
+                raise error
         self.deleted.append(path)
         self.objects.discard(path)
 
@@ -452,6 +458,20 @@ class FakeFiles:
             return SimpleNamespace(last_modified=None)
         when = datetime.fromtimestamp(modified_at / 1000, tz=UTC)
         return SimpleNamespace(last_modified=format_datetime(when, usegmt=True))
+
+
+class FakeQueries:
+    """Serves the saved queries in `queries`, by id, as `WorkspaceClient.queries` does."""
+
+    def __init__(self) -> None:
+        self.queries: dict[str, sql.Query] = {}
+        self.get_calls: list[str] = []
+
+    def get(self, id: str) -> sql.Query:
+        self.get_calls.append(id)
+        if id not in self.queries:
+            raise NotFound(f"Query {id} does not exist.")
+        return self.queries[id]
 
 
 class FakeSchemas:
@@ -764,6 +784,7 @@ class FakeWorkspaceClient:
         self.workspace = FakeWorkspace()
         self.files = FakeFiles(self.workspace)
         self.schemas = FakeSchemas()
+        self.queries = FakeQueries()
         self.pipelines = FakePipelines()
         self.current_user = FakeCurrentUser()
         self.account_access_control_proxy = FakeAccountAccessControlProxy()
@@ -1504,6 +1525,65 @@ def dbt_settings() -> jobs.JobSettings:
             ],
         }
     )
+
+
+def saved_query_settings() -> jobs.JobSettings:
+    """Build a reporting job: `totals` runs the saved query q1 after `extract`, and `loop` runs q2 for each input."""
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] saved_queries",
+            "parameters": [{"name": "run_date", "default": "2026-10-20"}],
+            "tasks": [
+                {"task_key": "extract", "notebook_task": {"notebook_path": "/Workspace/src/extract"}},
+                {
+                    "task_key": "totals",
+                    "depends_on": [{"task_key": "extract"}],
+                    "sql_task": {"warehouse_id": "w1", "query": {"query_id": "q1"}, "parameters": {"limit": "5"}},
+                },
+                {
+                    "task_key": "loop",
+                    "for_each_task": {
+                        "inputs": '["a", "b"]',
+                        "task": {"task_key": "each", "sql_task": {"warehouse_id": "w1", "query": {"query_id": "q2"}}},
+                    },
+                },
+            ],
+        }
+    )
+
+
+QUERY_TEXT = "SELECT count(*) AS n FROM orders WHERE region = :region AND day = :run_date LIMIT :limit"
+
+
+def saved_queries() -> dict[str, sql.Query]:
+    """The saved queries of `saved_query_settings`, as `queries.get` returns them, by id.
+
+    q1 sets a catalog and schema and has a text, a numeric and a task-set parameter, and q2 a legacy `{{ }}` marker
+    with a single-value enum default and neither catalog nor schema.
+    """
+    return {
+        "q1": sql.Query.from_dict(
+            {
+                "id": "q1",
+                "query_text": QUERY_TEXT,
+                "catalog": "main",
+                "schema": "sales",
+                "parameters": [
+                    {"name": "region", "text_value": {"value": "emea"}},
+                    {"name": "limit", "numeric_value": {"value": 10}},
+                    {"name": "ratio", "numeric_value": {"value": 2.5}},
+                    {"name": "run_date", "date_value": {"date_value": "2026-01-01"}},
+                ],
+            }
+        ),
+        "q2": sql.Query.from_dict(
+            {
+                "id": "q2",
+                "query_text": "SELECT {{ size }} AS size",
+                "parameters": [{"name": "size", "enum_value": {"values": ["small"], "enum_options": "small\nlarge"}}],
+            }
+        ),
+    }
 
 
 def triggered_settings() -> jobs.JobSettings:

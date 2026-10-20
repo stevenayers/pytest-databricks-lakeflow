@@ -83,8 +83,9 @@ class SweepOptions:
     Attributes:
         scope: `mine` for jobs, pipelines and schemas this user created, `all` for anyone's.
         schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas from other runs are dropped too.
-        notebooks: Also delete old `setup_<hash>`, `teardown_<hash>` and debug notebooks from the helpers folder, or
-            with scope `all` from every user's default helpers folder too, unless a job the sweep keeps uses them.
+        notebooks: Also delete old `setup_<hash>`, `teardown_<hash>` and debug notebooks and inlined saved query
+            files from the helpers folder, or with scope `all` from every user's default helpers folder too, unless a
+            job the sweep keeps uses them.
         branch: Delete only jobs, pipelines and schemas whose `pytest_git_branch` tag or property is this branch, and
             only the notebooks that those jobs alone use.
         dry_run: Delete nothing, and report what would be deleted.
@@ -111,7 +112,7 @@ class SweepReport:
         jobs: The ids of the jobs.
         pipelines: The ids of the pipelines.
         schemas: The full names of the schemas.
-        notebooks: The workspace paths of the notebooks.
+        notebooks: The workspace paths of the notebooks and of the inlined saved query files.
         errors: What could not be listed or deleted.
     """
 
@@ -1083,7 +1084,7 @@ def _helpers_folders(ws: WorkspaceClient, helpers_folder: str, scope: SweepScope
 
 @dataclass(frozen=True)
 class _OldNotebook:
-    """A setup, teardown or debug notebook last changed before the cutoff. A debug notebook has its `run_id`."""
+    """A setup, teardown or debug notebook or a query file last changed before the cutoff, with a debug one's run."""
 
     path: str
     run_id: int | None = None
@@ -1113,7 +1114,7 @@ def _old_notebooks_in(ws: WorkspaceClient, folder: str, *, cutoff_ms: float) -> 
             path = info.path or ""
             if info.object_type == workspace.ObjectType.DIRECTORY and path == debug_folder:
                 has_debug_folder = True
-            elif _is_old_notebook(info, cutoff_ms) and LIFECYCLE_NOTEBOOK.fullmatch(posixpath.basename(path)):
+            elif _is_old_helper(info, cutoff_ms):
                 found.append(_OldNotebook(path))
         if has_debug_folder:
             for info in ws.workspace.list(debug_folder):
@@ -1127,8 +1128,22 @@ def _old_notebooks_in(ws: WorkspaceClient, folder: str, *, cutoff_ms: float) -> 
     return found, None
 
 
+def _is_old_helper(info: workspace.ObjectInfo, cutoff_ms: float) -> bool:
+    """Whether `info` is a setup or teardown notebook or an inlined saved query file, last changed before the cutoff."""
+    name = posixpath.basename(info.path or "")
+    if LIFECYCLE_NOTEBOOK.fullmatch(name):
+        return _is_old(info, workspace.ObjectType.NOTEBOOK, cutoff_ms)
+    if helpers.QUERY_FILE.fullmatch(name):
+        return _is_old(info, workspace.ObjectType.FILE, cutoff_ms)
+    return False
+
+
 def _is_old_notebook(info: workspace.ObjectInfo, cutoff_ms: float) -> bool:
-    return info.object_type == workspace.ObjectType.NOTEBOOK and (info.modified_at or 0) < cutoff_ms
+    return _is_old(info, workspace.ObjectType.NOTEBOOK, cutoff_ms)
+
+
+def _is_old(info: workspace.ObjectInfo, object_type: workspace.ObjectType, cutoff_ms: float) -> bool:
+    return info.object_type == object_type and (info.modified_at or 0) < cutoff_ms
 
 
 def _notebook_users(

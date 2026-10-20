@@ -107,7 +107,7 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 
 1. The first test that needs a job runs `databricks bundle deploy` for the target once per session and reads each deployed job's settings through the Jobs API.
 2. `lakeflow.job()` copies those settings into a new job named `[pytest] <test id>`, with schedules, triggers, notifications, `run_as` and the bundle marker removed and dashboard and SQL alert subscriptions paused (alert and Power BI tasks are left as they are), tagged with the run id, the test, and, when known, the CI run URL, user, commit and branch. Pass `run_as="keep"` to keep the template's `run_as`, and `trigger=` to give the `{{job.trigger.*}}` references the values a trigger would.
-3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values.
+3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values, and the rows of each SQL file task. With `saved_queries="inline"`, a saved query task runs its query's text as a SQL file task, so its rows come back too.
 4. Leaving the `with` block deletes the job unless the test failed. Session end cancels anything still running.
 5. `lakeflow.task()` does the same for one task, with the stub and probe tasks on serverless compute or a job cluster you name.
 6. `lakeflow.pipeline()`, or `pipelines="copy"` on `job()` and `task()`, makes a pipeline from a deployed pipeline's spec that publishes to the schema you pass, runs it in development mode, and deletes it with its tables before the schema is dropped.

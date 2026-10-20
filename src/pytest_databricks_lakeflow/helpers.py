@@ -4,6 +4,8 @@ import hashlib
 import inspect
 import json
 import posixpath
+import re
+import secrets
 import string
 import textwrap
 from collections.abc import Callable, Mapping, Sequence
@@ -24,6 +26,8 @@ PARAMS_WIDGET = "__pytest_params"
 MISSING = "__pytest_missing__"
 ARGUMENT_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 NOTEBOOK_DIGEST_CHARS = 12
+# `query_<run id>_<task key>_<8 hex digits>.sql`, as `query_file_path` names the SQL file of an inlined saved query.
+QUERY_FILE = re.compile(r"query_.+_[0-9a-f]{8}\.sql")
 
 SET_VALUES = f"""# Databricks notebook source
 import json
@@ -291,6 +295,33 @@ def upload_lifecycle(ws: WorkspaceClient, folder: str, role: str, source: str, u
         ws.workspace.upload(path, source.encode(), format=ImportFormat.SOURCE, language=Language.PYTHON, overwrite=True)
         uploaded.add(path)
     return path
+
+
+def query_file_path(folder: str, run_id: str, task_key: str) -> str:
+    """Name the SQL file that inlines the saved query of task `task_key` for one job of the run `run_id`.
+
+    Args:
+        folder: The helper notebooks' folder.
+        run_id: The id of the test session, with each character other than a letter, digit, `_` or `-` as `_`.
+        task_key: The key of the task that runs the saved query.
+
+    Returns:
+        `<folder>/query_<run id>_<task key>_<8 random hex digits>.sql`, unique to the job, so that deleting it with
+        the job leaves the files of other jobs alone.
+    """
+    run = re.sub(r"[^A-Za-z0-9_-]", "_", run_id)
+    return f"{folder.rstrip('/')}/query_{run}_{task_key}_{secrets.token_hex(4)}.sql"
+
+
+def upload_query_file(ws: WorkspaceClient, path: str, source: str) -> None:
+    """Upload the SQL file of an inlined saved query as a workspace file, replacing any at `path`.
+
+    Args:
+        ws: The workspace client.
+        path: The file's workspace path, in a folder that exists.
+        source: The SQL text.
+    """
+    ws.workspace.upload(path, source.encode(), format=ImportFormat.RAW, overwrite=True)
 
 
 def debug_notebook_source(notebook_path: str, parameters: Mapping[str, str], *, heading: str) -> str:
