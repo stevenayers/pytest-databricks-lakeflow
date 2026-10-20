@@ -1141,6 +1141,35 @@ def for_each_settings() -> jobs.JobSettings:
     )
 
 
+def dbt_settings() -> jobs.JobSettings:
+    """Build a deployed bundle job with a serverless dbt task, `dbt_build`, and a notebook task downstream of it."""
+    files = "/Workspace/Users/someone@example.com/.bundle/analytics/test/files"
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] analytics",
+            "environments": [{"environment_key": "dbt", "spec": {"environment_version": "4"}}],
+            "tasks": [
+                {
+                    "task_key": "dbt_build",
+                    "environment_key": "dbt",
+                    "dbt_task": {
+                        "commands": ["dbt deps", "dbt build"],
+                        "warehouse_id": "w1",
+                        "catalog": "prod_catalog",
+                        "schema": "analytics",
+                        "project_directory": f"{files}/dbt",
+                    },
+                },
+                {
+                    "task_key": "check",
+                    "depends_on": [{"task_key": "dbt_build"}],
+                    "notebook_task": {"notebook_path": f"{files}/src/check"},
+                },
+            ],
+        }
+    )
+
+
 def triggered_settings() -> jobs.JobSettings:
     """Build `example_settings` with `transform` reading the trigger type and the tables a table update trigger saw."""
     settings = example_settings()

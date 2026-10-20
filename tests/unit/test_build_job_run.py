@@ -1208,6 +1208,15 @@ class TestSerialise:
         assert set(files) == expected
         assert serialise(run) == data
 
+    def test_serialise_leaves_dbt_artifacts_headers_out(self) -> None:
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"dbt_build": "SUCCESS"})
+        dbt = jobs.DbtOutput(artifacts_link="https://x/y.tgz", artifacts_headers={"x-ms-signature": "secret"})
+        ws.jobs.outputs[run_id_of(raw, "dbt_build")] = jobs.RunOutput(dbt_output=dbt)
+        run = build_from(ws, raw)
+        assert serialise(run)["tasks"]["dbt_build"]["dbt_output"] == {"artifacts_link": "https://x/y.tgz"}
+        assert run.task("dbt_build").dbt_output == dbt
+
     def test_serialise_names_the_exported_notebook(self) -> None:
         ws = FakeWorkspaceClient()
         raw = make_run(1, {"extract": "SUCCESS", "transform": "FAILED"}, "FAILED", notebooks={"extract", "transform"})
