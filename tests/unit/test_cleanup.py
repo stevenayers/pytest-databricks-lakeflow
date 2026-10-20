@@ -30,6 +30,7 @@ FOLDER = "/Users/someone@example.com/.pytest-databricks-lakeflow"
 COLLEAGUE_FOLDER = "/Users/colleague@example.com/.pytest-databricks-lakeflow"
 DEBUG_FOLDER = f"{FOLDER}/debug"
 OLD = {"pytest": "", "pytest_run_id": "old-run"}
+SETUP_NOTEBOOK = f"{FOLDER}/setup_0123456789ab"
 USES_LAKEFLOW = "def test_{0}(lakeflow):\n    lakeflow.template('my_job')\n"
 USES_SCHEMA = "def test_schema(lakeflow):\n    with lakeflow.schema():\n        pass\n"
 FAILING_JOB = "def test_{0}(lakeflow):\n    lakeflow.job('my_job').create()\n    assert False\n"
@@ -428,19 +429,91 @@ class TestSweepSchemasAndNotebooks:
         fake_ws.jobs.listed = [listed_job(1, 30, {**OLD, "pytest_expires": expires(24)}), listed_job(2, 30, OLD)]
         fake_ws.jobs.polls[11] = [jobs.Run(run_id=11, job_id=1)]
         fake_ws.jobs.polls[12] = [jobs.Run(run_id=12, job_id=2)]
+        # Like runs/get, a run of a job deleted before this sweep still names its job.
+        fake_ws.jobs.polls[15] = [jobs.Run(run_id=15, job_id=99)]
         fake_ws.workspace.listed = [
             notebook("debug", 30, workspace.ObjectType.DIRECTORY),
             notebook("my_job__transform__11", 30, folder=DEBUG_FOLDER),
             notebook("my_job__transform__12", 30, folder=DEBUG_FOLDER),
             notebook("my_job__transform__13", 30, folder=DEBUG_FOLDER),
             notebook("my_job__transform__14", 1, folder=DEBUG_FOLDER),
+            notebook("my_job__transform__15", 30, folder=DEBUG_FOLDER),
             notebook("notes", 30, folder=DEBUG_FOLDER),
         ]
         report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
-        # Run 11 is of a job the expiry keeps, run 12 of a job this sweep deletes, and run 13 no longer exists.
-        assert report.notebooks == (f"{DEBUG_FOLDER}/my_job__transform__12", f"{DEBUG_FOLDER}/my_job__transform__13")
+        # Run 11 is of a job the expiry keeps, run 12 of a job this sweep deletes, run 13 no longer exists, and run 15
+        # is of a job that is no longer listed.
+        assert report.notebooks == (
+            f"{DEBUG_FOLDER}/my_job__transform__12",
+            f"{DEBUG_FOLDER}/my_job__transform__13",
+            f"{DEBUG_FOLDER}/my_job__transform__15",
+        )
         assert report.jobs == (2,)
         assert report.errors == ()
+
+    @pytest.mark.parametrize(
+        ("broken", "error", "swept"),
+        [
+            pytest.param("jobs.list", "Could not list the jobs: no access", (), id="jobs_unlisted"),
+            pytest.param(
+                "jobs.get_run",
+                f"Could not read run 12 of notebook {DEBUG_FOLDER}/my_job__transform__12: no access",
+                (f"{FOLDER}/setup_0123456789ab",),
+                id="run_unreadable",
+            ),
+        ],
+    )
+    def test_sweep_notebooks_keeps_what_it_cannot_judge(
+        self, fake_ws: FakeWorkspaceClient, broken: str, error: str, swept: tuple[str, ...]
+    ) -> None:
+        fake_ws.jobs.listed = [listed_job(1, 30, OLD)]
+        fake_ws.jobs.polls[12] = [jobs.Run(run_id=12, job_id=1)]
+        fake_ws.workspace.listed = [
+            notebook("setup_0123456789ab", 30),
+            notebook("debug", 30, workspace.ObjectType.DIRECTORY),
+            notebook("my_job__transform__12", 30, folder=DEBUG_FOLDER),
+        ]
+        if broken == "jobs.list":
+            fake_ws.jobs.list_error = PermissionDenied("no access")
+        else:
+            fake_ws.jobs.run_errors[12] = PermissionDenied("no access")
+        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        assert report.notebooks == swept
+        assert fake_ws.workspace.deleted == list(swept)
+        assert report.errors == (error,)
+
+    @pytest.mark.parametrize(
+        "task",
+        [
+            pytest.param(
+                jobs.Task(
+                    task_key="loop",
+                    for_each_task=jobs.ForEachTask(
+                        inputs="[1]",
+                        task=jobs.Task(task_key="body", notebook_task=jobs.NotebookTask(notebook_path=SETUP_NOTEBOOK)),
+                    ),
+                ),
+                id="for_each_body",
+            ),
+            pytest.param(
+                jobs.Task(
+                    task_key="query", sql_task=jobs.SqlTask(warehouse_id="w1", file=jobs.SqlTaskFile(SETUP_NOTEBOOK))
+                ),
+                id="sql_file",
+            ),
+            pytest.param(
+                jobs.Task(
+                    task_key="setup", notebook_task=jobs.NotebookTask(notebook_path=f"/Workspace{SETUP_NOTEBOOK}")
+                ),
+                id="workspace_prefix",
+            ),
+        ],
+    )
+    def test_sweep_notebooks_spares_every_kind_of_use(self, fake_ws: FakeWorkspaceClient, task: jobs.Task) -> None:
+        fake_ws.jobs.listed = [listed_job(1, 30, {**OLD, "pytest_expires": expires(24)}, tasks=[task])]
+        fake_ws.workspace.listed = [notebook("setup_0123456789ab", 30), notebook("teardown_0123456789ab", 30)]
+        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        assert report.notebooks == (f"{FOLDER}/teardown_0123456789ab",)
 
     def test_scope_all_sweeps_every_users_helpers_folder(self, fake_ws: FakeWorkspaceClient) -> None:
         locked = "/Users/locked@example.com/.pytest-databricks-lakeflow"

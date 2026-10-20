@@ -75,6 +75,7 @@ class FakeJobs:
         self.queued: list[list[jobs.Run]] = []
         self.after_cancel: dict[int, list[jobs.Run]] = {}
         self.polls: dict[int, list[jobs.Run]] = {}
+        self.run_errors: dict[int, Exception] = {}
         self.outputs: dict[int, jobs.RunOutput | Exception] = {}
         self.raw_outputs: dict[int, dict[str, Any] | Exception] = {}
         self.output_calls: list[int] = []
@@ -88,6 +89,7 @@ class FakeJobs:
         self.deletions: list[str] = []
         self.list_calls = 0
         self.list_kwargs: list[dict[str, Any]] = []
+        self.list_error: Exception | None = None
         self.gets: list[int] = []
         self.updated: list[tuple[int, jobs.JobSettings | None]] = []
         self.run_timeouts: list[int | None] = []
@@ -248,6 +250,8 @@ class FakeJobs:
         returns them in one `Run`.
         """
         self.get_run_calls.append({"run_id": run_id, **kwargs})
+        if run_id in self.run_errors:
+            raise self.run_errors[run_id]
         if run_id in self.polls:
             polls = self.polls[run_id]
             return polls.pop(0) if len(polls) > 1 else polls[0]
@@ -311,9 +315,14 @@ class FakeJobs:
             self.polls[run_id] = self.after_cancel.pop(run_id)
 
     def list(self, **kwargs: Any) -> Iterator[jobs.BaseJob]:
-        """List `listed`. Like the Jobs API, each job's tasks come back only with `expand_tasks`."""
+        """List `listed`, or raise `list_error`.
+
+        Like the Jobs API, each job's tasks come back only with `expand_tasks`.
+        """
         self.list_calls += 1
         self.list_kwargs.append(kwargs)
+        if self.list_error is not None:
+            raise self.list_error
         if kwargs.get("expand_tasks"):
             return iter(self.listed)
         bare = []
@@ -757,13 +766,14 @@ def listed_job(
     tags: dict[str, str],
     creator: str = "someone@example.com",
     notebooks: Sequence[str] = (),
+    tasks: Sequence[jobs.Task] = (),
 ) -> jobs.BaseJob:
     """Build a job as `jobs.list` returns it, created `age_hours` ago by `creator`.
 
-    It has one notebook task for each of `notebooks`, which `jobs.list` returns only with `expand_tasks`.
+    It has `tasks` and one notebook task for each of `notebooks`, which `jobs.list` returns only with `expand_tasks`.
     """
     created = int(time.time() * 1000 - age_hours * HOUR_MS)
-    tasks = []
+    tasks = list(tasks)
     for i, path in enumerate(notebooks):
         tasks.append(jobs.Task(task_key=f"task_{i}", notebook_task=jobs.NotebookTask(notebook_path=path)))
     settings = jobs.JobSettings(tags=tags, tasks=tasks or None)

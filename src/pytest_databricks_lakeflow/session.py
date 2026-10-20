@@ -858,8 +858,8 @@ def sweep(
     A job, pipeline or schema tagged `pytest_expires` is old once that time has passed, whatever its age. A pipeline
     reports no creation time, so its last change counts as its age. A notebook is deleted only when every job that
     uses it is deleted too, and with `options.branch` only when at least one is; a debug notebook is used by the job of
-    the run it replays. When the jobs cannot all be listed, no notebook is deleted. A failed delete or listing is
-    logged and recorded in the report's `errors`, and the sweep carries on.
+    the run it replays, while that job is listed. When the jobs cannot all be listed, no notebook is deleted. A failed
+    delete or listing is logged and recorded in the report's `errors`, and the sweep carries on.
 
     Args:
         ws: The workspace client.
@@ -1133,12 +1133,16 @@ def _notebook_users(
     """The jobs that use each notebook, by its path, or `None` when that could not be found out.
 
     A setup or teardown notebook is used by every job with a task that runs it. A debug notebook is used by the job
-    of the run it replays, which `runs/get` still names after the job is deleted; a run that no longer exists has no
-    job.
+    of the run it replays while that job is listed. `runs/get` still names the job after it is deleted, so a run of a
+    job deleted before this sweep, like a run that no longer exists, has no job.
     """
+    listed_ids: set[int] = set()
     by_path: dict[str, set[int]] = {}
     for job in listed:
-        if job.job_id is None or job.settings is None:
+        if job.job_id is None:
+            continue
+        listed_ids.add(job.job_id)
+        if job.settings is None:
             continue
         for path in _paths_used(job.settings.tasks or []):
             by_path.setdefault(path, set()).add(job.job_id)
@@ -1155,7 +1159,10 @@ def _notebook_users(
             _record(errors, f"Could not read run {notebook.run_id} of notebook {notebook.path}: {e}")
             users[notebook.path] = None
         else:
-            users[notebook.path] = set() if job_id is None else {job_id}
+            if job_id in listed_ids:
+                users[notebook.path] = {job_id}
+            else:
+                users[notebook.path] = set()
     return users
 
 
