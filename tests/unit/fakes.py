@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import itertools
 import json
 import os
@@ -671,23 +672,37 @@ def sp_rule_set(application_id: str) -> str:
 
 
 class FakeDbtResponse(BytesIO):
-    """The body of a pre-signed link, with the headers the storage service sends with it."""
+    """The body of a pre-signed link, with the headers the storage service sends with it.
 
-    def __init__(self, body: bytes, headers: Mapping[str, str]) -> None:
+    A response with `cut` set stops after that many bytes with `http.client.IncompleteRead`, as a connection dropped
+    part-way through the body does.
+    """
+
+    def __init__(self, body: bytes, headers: Mapping[str, str], cut: int | None = None) -> None:
         super().__init__(body)
         self.headers = dict(headers)
+        self.cut = cut
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self.cut is not None and self.tell() >= self.cut:
+            raise http.client.IncompleteRead(b"", len(self.getvalue()) - self.cut)
+        if self.cut is not None and size is not None and size >= 0:
+            size = min(size, self.cut - self.tell())
+        return super().read(size)
 
 
 class FakeDbtLinks:
     """Stands in for `dbt._open`, serving the tarball in `bodies` for each link and recording every request.
 
     A link without a body fails with HTTP 403, as an expired pre-signed link does, and one whose body is an exception
-    raises it. A link in `lengths` is served with that `Content-Length` header instead of the body's own length.
+    raises it. A link in `lengths` is served with that `Content-Length` header instead of the body's own length, and
+    one in `cuts` stops part-way through the body after that many bytes.
     """
 
     def __init__(self) -> None:
         self.bodies: dict[str, bytes | Exception] = {}
         self.lengths: dict[str, int] = {}
+        self.cuts: dict[str, int] = {}
         self.requests: list[tuple[str, dict[str, str]]] = []
 
     def __call__(self, url: str, headers: Mapping[str, str]) -> FakeDbtResponse:
@@ -697,7 +712,7 @@ class FakeDbtLinks:
         body = self.bodies[url]
         if isinstance(body, Exception):
             raise body
-        return FakeDbtResponse(body, {"Content-Length": str(self.lengths.get(url, len(body)))})
+        return FakeDbtResponse(body, {"Content-Length": str(self.lengths.get(url, len(body)))}, self.cuts.get(url))
 
 
 def dbt_tarball(

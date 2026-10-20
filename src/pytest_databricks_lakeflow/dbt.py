@@ -108,7 +108,9 @@ def read_artifacts(
         archive = download(output.artifacts_link, output.artifacts_headers or {}, dest / ARCHIVE_NAME, max_bytes)
         directory = extract(archive, dest / EXTRACTED_NAME)
         return parse(directory)
-    except (_Unreadable, OSError, ValueError, tarfile.TarError) as e:
+    except Exception as e:
+        # Anything that goes wrong here, from a body cut off mid-read (http.client.IncompleteRead) to a truncated
+        # gzip stream (EOFError), leaves the task's dbt None with a warning rather than failing the whole run.
         log.warning("Could not read the dbt artefacts of task %r: %s", task_key, _reason(e, output.artifacts_link))
         return None
 
@@ -116,9 +118,11 @@ def read_artifacts(
 def _reason(error: Exception, link: str) -> str:
     # The link's query string signs it, so it never reaches the log. urllib's HTTP errors leave it out anyway, but a
     # malformed URL is quoted in full.
-    message = str(error).replace(link, "<artifacts_link>")
+    message = str(error).replace(link, "<artifacts_link>") or type(error).__name__
     if isinstance(error, tarfile.ReadError):
         return f"not a tarball ({message})"
+    if isinstance(error, EOFError):
+        return f"the tarball is truncated ({message})"
     return message
 
 
@@ -127,6 +131,7 @@ def download(link: str, headers: Mapping[str, str], path: Path, max_bytes: int =
 
     Raises:
         OSError: If the request fails, such as with HTTP 403 once the link has expired.
+        http.client.HTTPException: If the body is cut off part-way, which removes what was written.
         _Unreadable: If the body is larger than `max_bytes`, which removes what was written.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,18 +140,27 @@ def download(link: str, headers: Mapping[str, str], path: Path, max_bytes: int =
         length = response.headers.get("Content-Length")
         if length is not None and length.isdigit() and int(length) > max_bytes:
             raise too_large
-        written = 0
-        with path.open("wb") as file:
-            while True:
-                chunk = response.read(CHUNK_BYTES)
-                written += len(chunk)
-                if not chunk or written > max_bytes:
-                    break
-                file.write(chunk)
+        try:
+            written = _write(response, path, max_bytes)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
     if written > max_bytes:
         path.unlink()
         raise too_large
     return path
+
+
+def _write(response: Any, path: Path, max_bytes: int) -> int:
+    written = 0
+    with path.open("wb") as file:
+        while True:
+            chunk = response.read(CHUNK_BYTES)
+            written += len(chunk)
+            if not chunk or written > max_bytes:
+                break
+            file.write(chunk)
+    return written
 
 
 def _open(link: str, headers: Mapping[str, str]) -> Any:
@@ -160,7 +174,8 @@ def extract(archive: Path, directory: Path) -> Path:
     The filter refuses members that would land outside `directory`, links that point outside it, and device files.
 
     Raises:
-        tarfile.TarError: If the archive is not a tarball or a member is refused.
+        tarfile.TarError: If the archive is not a tarball or a member is refused, which removes `directory`.
+        EOFError: If the archive is truncated, which removes `directory`.
         _Unreadable: If this Python has no extraction filters, which came in 3.11.4.
     """
     if not hasattr(tarfile, "data_filter"):
@@ -169,7 +184,7 @@ def extract(archive: Path, directory: Path) -> Path:
     try:
         with tarfile.open(archive) as tar:
             tar.extractall(directory, filter="data")
-    except tarfile.TarError:
+    except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise
     finally:
@@ -184,22 +199,31 @@ def parse(artifacts_dir: Path) -> DbtArtifacts:
     subfolder.
 
     Raises:
-        _Unreadable: If there is no `run_results.json`.
+        _Unreadable: If there is no `run_results.json`, or a file or a result in it is not a JSON object.
         ValueError: If a file is not JSON.
     """
     found = sorted(artifacts_dir.rglob("run_results.json"), key=lambda p: (len(p.parts), str(p)))
     if not found:
         raise _Unreadable("the tarball has no run_results.json")
-    run_results = json.loads(found[0].read_text())
+    run_results = _read_object(found[0])
     manifest = None
     manifest_path = found[0].with_name("manifest.json")
     if manifest_path.is_file():
-        manifest = json.loads(manifest_path.read_text())
+        manifest = _read_object(manifest_path)
     results: dict[str, DbtResult] = {}
     for entry in run_results.get("results") or []:
+        if not isinstance(entry, Mapping):
+            raise _Unreadable("run_results.json has a result that is not a JSON object")
         result = _result(entry)
         results[result.unique_id] = result
     return DbtArtifacts(artifacts_dir=artifacts_dir, results=results, run_results=run_results, manifest=manifest)
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    loaded = json.loads(path.read_text())
+    if not isinstance(loaded, dict):
+        raise _Unreadable(f"{path.name} is not a JSON object")
+    return loaded
 
 
 def _result(entry: Mapping[str, Any]) -> DbtResult:

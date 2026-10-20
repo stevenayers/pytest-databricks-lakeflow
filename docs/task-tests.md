@@ -270,7 +270,7 @@ def test_ci_models(lakeflow: Lakeflow) -> None:
 - `run_results` and `manifest`, the two files as parsed JSON. `manifest` is `None` when the tarball has none.
 - `artifacts_dir`, where the tarball was extracted, with `target/` (the compiled SQL, `run_results.json`, `manifest.json` and the rest) and `logs/dbt.log` beside it. Each run gets a temporary directory, removed at the end of the pytest session, so a run that a module-scoped fixture shares keeps its files for every test. `keep` and `--lakeflow-keep` keep it and log where.
 
-The platform runs the task's commands one after another, and `run_results.json` describes the last one that wrote it, such as `dbt build` after `dbt deps`. `dbt` is `None` by default, for any other task, and when the artefacts cannot be read: a tarball over 50 MB, an expired link, a tarball without `run_results.json` or with a member that would land outside its directory each log a warning naming the task, and the run is built as usual.
+The platform runs the task's commands one after another, and `run_results.json` describes the last one that wrote it, such as `dbt build` after `dbt deps`. `dbt` is `None` by default, for any other task, and when the artefacts cannot be read: a tarball over 50 MB, an expired link, a download cut off part-way, a truncated tarball, a tarball without `run_results.json`, with a `run_results.json` that is not a JSON object, or with a member that would land outside its directory each log a warning naming the task, and the run is built as usual.
 
 `job.run(dbt_commands=[...])` replaces the commands of every dbt task in one run instead, leaving the copy's settings alone, so one job can run different selections:
 

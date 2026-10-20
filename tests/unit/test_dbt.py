@@ -111,6 +111,28 @@ class TestUnreadable:
                 "outside the destination",
                 id="path-outside",
             ),
+            pytest.param(dbt_tarball(ORDERS_AND_BAD)[:100], None, dbt.MAX_ARTIFACT_BYTES, "truncated", id="truncated"),
+            pytest.param(
+                dbt_tarball(None, extra={"target/run_results.json": b"[]"}),
+                None,
+                dbt.MAX_ARTIFACT_BYTES,
+                "run_results.json is not a JSON object",
+                id="run-results-not-an-object",
+            ),
+            pytest.param(
+                dbt_tarball(None, extra={"target/run_results.json": b'{"results": ["model.proj.orders"]}'}),
+                None,
+                dbt.MAX_ARTIFACT_BYTES,
+                "run_results.json has a result that is not a JSON object",
+                id="result-not-an-object",
+            ),
+            pytest.param(
+                dbt_tarball(ORDERS_AND_BAD, extra={"target/manifest.json": b'"nodes"'}),
+                None,
+                dbt.MAX_ARTIFACT_BYTES,
+                "manifest.json is not a JSON object",
+                id="manifest-not-an-object",
+            ),
         ],
     )
     def test_unreadable_artifacts_log_a_warning(
@@ -136,3 +158,15 @@ class TestUnreadable:
         assert reason in message
         assert "sig=secret" not in message
         assert list(tmp_path.rglob("escape.txt")) == []
+        assert list(tmp_path.rglob(dbt.ARCHIVE_NAME)) == []
+
+    def test_a_body_cut_off_part_way_leaves_no_partial_archive(
+        self, links: FakeDbtLinks, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        links.bodies[DBT_LINK] = dbt_tarball(ORDERS_AND_BAD)
+        links.cuts[DBT_LINK] = 100
+        with caplog.at_level(logging.WARNING, logger="pytest_databricks_lakeflow"):
+            assert dbt.read_artifacts("dbt_build", OUTPUT, tmp_path, max_bytes=dbt.MAX_ARTIFACT_BYTES) is None
+        [record] = caplog.records
+        assert "IncompleteRead" in record.getMessage()
+        assert list(tmp_path.rglob(dbt.ARCHIVE_NAME)) == []
