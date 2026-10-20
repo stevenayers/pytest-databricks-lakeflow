@@ -85,13 +85,14 @@ TRIGGER_PARAM_PREFIX = f"{PREFIX}trigger_"
 # The trigger references that jobs/create refuses in a job without that trigger, by the first part of their path.
 TRIGGER_KINDS = {"table_update": "table update", "file_arrival": "file arrival"}
 # jobs/create refuses a deeper reference: "Invalid reference: 'input.e.f'. Input reference can only access top-level
-# keys."
+# keys." So a deployed template has none, and the pattern matches `{{input}}` and `{{input.<key>}}` only.
 INPUT_REFERENCE = re.compile(r"\{\{\s*input(?:\.([^.\s}]+))?\s*\}\}")
 INPUT_PARAMETER = f"{PREFIX}input"
 # jobs/create refuses job parameters longer than this as JSON: "The provided parameters (in json representation) are
 # too long (10032 bytes); it cannot exceed 10000 bytes." for one parameter `p` with a default of 10,000 characters.
 # It counts 29 characters for each definition plus its name and its JSON-escaped default, a comma between two
-# definitions and 2 for the brackets, and a non-ASCII character as one.
+# definitions and 2 for the brackets, and a non-ASCII character as one. The limit is on the parameter list as a whole,
+# not on each value as the For each docs say, so the input's room depends on every other parameter of the copy.
 MAX_PARAMETERS_JSON_CHARS = 10_000
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
@@ -982,6 +983,8 @@ def lift_nested_task(settings: jobs.JobSettings, loop_key: str, nested_key: str)
         raise LakeflowError(
             f"for_each_task {loop_key!r} nests {body.task_key!r}, not {nested_key!r}. For-each bodies: {bodies}"
         )
+    # The body runs where its loop sits in the graph, so it takes the loop's `depends_on`: `upstream_values_from`
+    # finds the tasks to stub from it, and `wrap_task` replaces them with the stubs.
     body.depends_on = loop.depends_on
     settings.tasks = [body if task is loop else task for task in settings.tasks or []]
     return body
@@ -1007,8 +1010,7 @@ def inject_input(settings: jobs.JobSettings, task_key: str, value: object | None
     Raises:
         LakeflowError: If the task refers to `{{input}}` and `value` is `None`, or `value` is given and the task does
             not refer to it, `value` is not a string, number, boolean or mapping, a key is not in `value`, or a
-            rendered value contains `{{` or is not JSON-serialisable, or the job parameters would be longer than 10,000
-            characters as JSON. Nothing is changed then.
+            rendered value contains `{{` or is not JSON-serialisable. Nothing is changed then.
     """
     target = require_task(settings, task_key)
     text = json.dumps(target.as_dict())
@@ -1033,17 +1035,32 @@ def inject_input(settings: jobs.JobSettings, task_key: str, value: object | None
     for parameter in settings.parameters or []:
         if parameter.name not in names:
             kept.append(parameter)
-    size = _parameters_json_chars([*kept, *definitions])
-    if size > MAX_PARAMETERS_JSON_CHARS:
-        raise LakeflowError(
-            f"input for task {task_key!r} makes the job parameters {size} characters as JSON. jobs/create allows "
-            f"{MAX_PARAMETERS_JSON_CHARS}."
-        )
     rewritten = _point_at_parameters(text, INPUT_REFERENCE, _input_parameter)
     lifted = jobs.Task.from_dict(json.loads(rewritten))
     settings.tasks = [lifted if task is target else task for task in settings.tasks or []]
     settings.parameters = [*kept, *definitions]
     return settings
+
+
+def check_input_size(settings: jobs.JobSettings, task_key: str) -> None:
+    """Fail early when the job parameters, the input that `inject_input` declared among them, are too long.
+
+    jobs/create limits the job parameters as a whole, so this runs once every parameter of the copy is declared: the
+    trigger parameters and the test marker too.
+
+    Args:
+        settings: The job's settings, after `inject_input`.
+        task_key: The task `inject_input` gave the input to, for the message.
+
+    Raises:
+        LakeflowError: If the job parameters are longer than 10,000 characters as JSON.
+    """
+    size = _parameters_json_chars(settings.parameters or [])
+    if size > MAX_PARAMETERS_JSON_CHARS:
+        raise LakeflowError(
+            f"input for task {task_key!r} makes the job parameters {size} characters as JSON. jobs/create allows "
+            f"{MAX_PARAMETERS_JSON_CHARS}."
+        )
 
 
 def _parameters_json_chars(parameters: Sequence[jobs.JobParameterDefinition]) -> int:
@@ -1091,7 +1108,8 @@ def _render_input(task_key: str, key: str, value: object) -> str:
 
 def _rendered_item(value: object, *, whole: bool) -> str:
     # A for-each iteration gives a string as it is and an integer item as written, but turns every number in an
-    # object into a double: {"id": 7} gives {{input}} '{"id":7.0}' and {{input.id}} '7.0'.
+    # object into a Java double: {"id": 7} gives {{input}} '{"id":7.0}' and {{input.id}} '7.0'. The lifted body gets
+    # the same text, so it parses the input as it would in its loop.
     if isinstance(value, str):
         return value
     if whole and isinstance(value, int) and not isinstance(value, bool):
@@ -1471,7 +1489,7 @@ def select(
     Returns:
         `only` followed by the injected tasks it does not already select. When `only` selects a task in `exclude`,
         every selected task by its key instead, in sorted order, without the disabled tasks and the tasks downstream
-        of them that `only` does not name.
+        of them.
 
     Raises:
         LakeflowError: If `only` names a task that is not in the job.
@@ -1487,10 +1505,9 @@ def select(
     if selected.isdisjoint(exclude):
         return [*only, *sorted(needed - selected)]
     # `key+` reaches the teardown task, which depends on every leaf, and run_now has no way to leave one task out of a
-    # `+` selection, so the selection is spelt out. The platform runs a disabled task that only names, but not one that
-    # a `+` reaches, nor one downstream of it, so those stay out.
-    named = {entry.strip("+") for entry in only}
-    left_out = set(exclude) | (disabled_task_keys(settings) - named)
+    # `+` selection, so the selection is spelt out. The platform does not run a disabled task that a `+` reaches, nor
+    # one downstream of it, so those stay out. `check_disabled` has already refused an `only` that names one.
+    left_out = set(exclude) | disabled_task_keys(settings)
     return sorted((selected | needed) - left_out)
 
 

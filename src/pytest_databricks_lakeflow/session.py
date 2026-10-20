@@ -226,6 +226,8 @@ class SessionState:
         live: Whether `--lakeflow-live` is set.
         max_concurrent_runs: The value of `--lakeflow-max-concurrent-runs`, or `None`.
         slots: The cap on the runs this process has active, made by the first run under a cap, or `None`.
+        slots_lock: Held while `run_slots` makes or reads `slots`, so threads starting their first capped runs at
+            once share one cap.
     """
 
     rootpath: Path
@@ -259,6 +261,7 @@ class SessionState:
     live: bool = False
     max_concurrent_runs: int | None = None
     slots: RunSlots | None = None
+    slots_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def run_slots(self, cap: int | None) -> RunSlots | None:
         """Get the cap on this process's active runs, making it on first use. The command-line flag wins over `cap`.
@@ -276,18 +279,19 @@ class SessionState:
             cap = self.max_concurrent_runs
         if cap is None:
             return None
-        if self.slots is None:
-            self.slots = RunSlots(cap)
+        with self.slots_lock:
+            if self.slots is None:
+                self.slots = RunSlots(cap)
+                return self.slots
+            if cap != self.slots.cap and cap not in self.slots.ignored:
+                self.slots.ignored.add(cap)
+                log.warning(
+                    "max_concurrent_runs=%s differs from the cap of %s that this process already uses, which every "
+                    "Lakeflow in the process shares, so it is ignored",
+                    cap,
+                    self.slots.cap,
+                )
             return self.slots
-        if cap != self.slots.cap and cap not in self.slots.ignored:
-            self.slots.ignored.add(cap)
-            log.warning(
-                "max_concurrent_runs=%s differs from the cap of %s that this process already uses, which every "
-                "Lakeflow in the process shares, so it is ignored",
-                cap,
-                self.slots.cap,
-            )
-        return self.slots
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job, pipeline or schema. The command-line flags win over `Lakeflow`'s arguments.

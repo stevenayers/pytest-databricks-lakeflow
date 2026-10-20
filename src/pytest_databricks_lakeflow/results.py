@@ -806,7 +806,7 @@ class TaskRun:
             did not start, such as one that ended `UPSTREAM_FAILED`, and when the iterations could not be read, which
             logs a warning.
         for_each_stats: The iteration counts of a for-each task, as the platform reports them, or `None` for any
-            other task.
+            other task and for a for-each task run that reports no stats.
     """
 
     task_key: str
@@ -1254,7 +1254,8 @@ def _serialise_run(run: JobRun, files: dict[str, str]) -> dict[str, Any]:
 
 
 def _serialise_task(task: TaskRun, run_id: int, stem: str, files: dict[str, str]) -> dict[str, Any]:
-    # `stem` names the side files: the task key, plus the attempt number for an attempt that was retried.
+    # `stem` names the side files: the task key, plus the attempt number for an attempt that was retried and the
+    # index for an iteration of a for-each task.
     logs_file = None
     if task.logs:
         logs_file = f"{run_id}/{stem}.log"
