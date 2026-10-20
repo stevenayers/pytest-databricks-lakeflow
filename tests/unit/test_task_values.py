@@ -26,8 +26,8 @@ from pytest_databricks_lakeflow.settings import (
     wrap_task,
 )
 
-from .conftest import configure_lakeflow
-from .fakes import FakeWorkspaceClient, example_settings, make_run, recorded
+from .conftest import FakeCli, configure_lakeflow
+from .fakes import FakeWorkspaceClient, example_settings, for_each_settings, make_run, recorded
 
 HELPERS = Helpers(set_values="/h/set_values", get_values="/h/get_values")
 UPSTREAM = {"extract": {"row_count": 42, "source_path": "/Volumes/x/y/z"}}
@@ -553,6 +553,34 @@ class TestEndToEnd:
             "n": "7",
         }
         assert stub_values(created, "extract") == escape({"row_count": 42})
+
+    def test_for_each_inputs_on_a_task_job(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["fanout"] = fake_ws.jobs.add(for_each_settings())
+        fake_ws.jobs.queue(make_run(80, {"loop": "SUCCESS"}))
+        pytester.makepyfile(
+            """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_task(lakeflow):
+                with lakeflow.task("fanout.loop", for_each_inputs=["a"]) as task:
+                    assert task.run().succeeded
+
+            def test_not_for_each(lakeflow):
+                match = r"Task 'transform' in for_each_inputs has no for_each_task. For-each tasks: \\[\\]"
+                with pytest.raises(LakeflowError, match=match):
+                    lakeflow.task("my_job.transform", upstream_task_values=UPSTREAM, for_each_inputs=["a"])
+
+            UPSTREAM = {"extract": {"row_count": 1}}
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=2)
+        [created] = fake_ws.jobs.created
+        assert [t.task_key for t in created["tasks"]] == ["loop"]
+        assert created["tasks"][0].for_each_task.inputs == '["a"]'
 
     def test_job_capture_task_values_end_to_end(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         fake_ws.jobs.queue(*recorded("probe_failure"))

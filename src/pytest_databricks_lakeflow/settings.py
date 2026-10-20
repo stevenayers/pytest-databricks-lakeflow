@@ -58,6 +58,9 @@ MAX_PARAMETER_DEFAULT_BYTES = 4096
 MAX_ENVIRONMENTS = 10
 MAX_VALUE_CHARS = 49152
 MAX_KEY_CHARS = 512
+# jobs/create refuses a literal for_each_task.inputs longer than this ("Invalid inputs: cannot exceed 5000
+# characters"), although the docs give 48 KB for an array that comes from a task value reference.
+MAX_FOR_EACH_INPUTS_CHARS = 5000
 # jobs/create refuses any reference to a task that is not in the job: "Invalid reference:
 # 'tasks.ghost.result_state'. Task 'ghost' does not exist."
 TASK_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.")
@@ -745,6 +748,55 @@ def _force_condition(task: jobs.Task, outcome: bool) -> None:
         condition.right,
     )
     task.condition_task = jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right=expected)
+
+
+def override_for_each_inputs(settings: jobs.JobSettings, inputs: Mapping[str, Sequence[object]]) -> jobs.JobSettings:
+    """Replace the `inputs` of the named for-each tasks with the JSON of the given lists.
+
+    Each list is encoded with `escape`, as the stub widgets are, so a `{{` in a value is not read as a reference.
+    Every entry is checked before any task is changed.
+
+    Args:
+        settings: The job's settings. They are changed in place.
+        inputs: The list each for-each task iterates over, by task key.
+
+    Returns:
+        `settings`.
+
+    Raises:
+        LakeflowError: If a key is not a task in the job or its task has no `for_each_task`, or a list is not a list,
+            is not JSON-serialisable or is longer than 5,000 characters as JSON.
+    """
+    tasks = {t.task_key: t for t in settings.tasks or []}
+    loops = sorted(key for key, task in tasks.items() if task.for_each_task)
+    encoded: dict[str, str] = {}
+    for key, values in inputs.items():
+        if key not in tasks:
+            raise LakeflowError(f"Unknown task {key!r} in for_each_inputs. For-each tasks: {loops}")
+        if key not in loops:
+            raise LakeflowError(f"Task {key!r} in for_each_inputs has no for_each_task. For-each tasks: {loops}")
+        encoded[key] = _for_each_inputs(key, values)
+    for key, text in encoded.items():
+        loop = tasks[key].for_each_task
+        assert loop is not None
+        loop.inputs = text
+    return settings
+
+
+def _for_each_inputs(key: str, values: Sequence[object]) -> str:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        # list("ab") would iterate over the characters.
+        raise LakeflowError(f"for_each_inputs[{key!r}] must be a list, got {values!r}")
+    try:
+        text = escape(list(values))
+    except (TypeError, ValueError) as e:
+        raise LakeflowError(f"Inputs for task {key!r} in for_each_inputs are not JSON-serialisable: {e}") from None
+    if len(text) > MAX_FOR_EACH_INPUTS_CHARS:
+        raise LakeflowError(
+            f"Inputs for task {key!r} in for_each_inputs are {len(text)} characters as JSON. A for-each task allows "
+            f"{MAX_FOR_EACH_INPUTS_CHARS}."
+        )
+    return text
 
 
 def pipeline_params(

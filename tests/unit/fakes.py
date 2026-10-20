@@ -1095,3 +1095,30 @@ def branching_settings() -> jobs.JobSettings:
             ],
         }
     )
+
+
+def for_each_settings() -> jobs.JobSettings:
+    """Build a fan-out job: `loop` repeats the notebook task `each` over three inputs, then `after` runs."""
+    nb = "/Workspace/Users/someone@example.com/.bundle/lakeflow_for_each/test/files/src/notebooks"
+    return jobs.JobSettings.from_dict(
+        {
+            "name": "[dev someone] fanout",
+            "tasks": [
+                {
+                    "task_key": "loop",
+                    "for_each_task": {
+                        "inputs": '["a", "b", "c"]',
+                        "task": {
+                            "task_key": "each",
+                            "notebook_task": {"notebook_path": f"{nb}/each", "base_parameters": {"item": "{{input}}"}},
+                        },
+                    },
+                },
+                {
+                    "task_key": "after",
+                    "depends_on": [{"task_key": "loop"}],
+                    "notebook_task": {"notebook_path": f"{nb}/after"},
+                },
+            ],
+        }
+    )
