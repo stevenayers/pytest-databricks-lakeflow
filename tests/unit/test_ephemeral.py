@@ -2578,6 +2578,76 @@ class TestDbtArtifacts:
             shutil.rmtree(artifacts_dir.parent.parent)
 
 
+class TestPerformanceOverride:
+    """The warning when a run asked for `PERFORMANCE_OPTIMIZED` and used `STANDARD`."""
+
+    def test_overridden_performance_target_warns_once(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        fake_ws.jobs.queue(make_run(8, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        configure_lakeflow(pytester, "performance_optimized=True")
+        result = run_tests(
+            pytester,
+            """
+            def test_job(lakeflow):
+                run = lakeflow.job("my_job").run()
+                assert run.succeeded
+                assert run.effective_performance_target == "STANDARD"
+                lakeflow.job("my_job").run()
+            """,
+        )
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines(
+            [
+                "*Run 7 of 'my_job' asked for PERFORMANCE_OPTIMIZED but used STANDARD. A workspace policy or the "
+                "job's compute decides the performance mode; expect 3 to 4 minutes extra per run.*"
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        ("target", "warnings"),
+        [
+            pytest.param("PERFORMANCE_OPTIMIZED", 1, id="optimized"),
+            pytest.param("STANDARD", 0, id="standard"),
+        ],
+    )
+    def test_per_run_performance_target_decides(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, target: str, warnings: int
+    ) -> None:
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        if target == "STANDARD":
+            configure_lakeflow(pytester, "performance_optimized=True")
+        result = run_tests(
+            pytester, f'def test_job(lakeflow):\n    lakeflow.job("my_job").run(performance_target="{target}")\n'
+        )
+        result.assert_outcomes(passed=1, warnings=warnings)
+
+    def test_no_warning_when_nothing_was_requested(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        result.assert_outcomes(passed=1, warnings=0)
+
+    def test_template_target_counts_as_a_request(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        template = fake_ws.jobs.settings[fake_cli.deployed["my_job"]]
+        template.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        result.assert_outcomes(passed=1, warnings=1)
+
+    def test_no_warning_without_an_effective_target(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}))
+        configure_lakeflow(pytester, "performance_optimized=True")
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        result.assert_outcomes(passed=1, warnings=0)
+
+
 class TestTimeouts:
     """The poll interval, the run timeout, the job's `timeout_seconds` and cancelling on expiry."""
 
