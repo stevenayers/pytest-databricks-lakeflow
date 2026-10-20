@@ -588,22 +588,7 @@ def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Ma
     """
     if not environments:
         return settings
-    reserved = sorted(key for key in environments if key.startswith(PREFIX))
-    if reserved:
-        raise LakeflowError(f"Environment keys starting with {PREFIX!r} are reserved for the plugin: {reserved}")
-    known = sorted(f.name for f in fields(compute.Environment))
-    for key, override in environments.items():
-        if not isinstance(override, Mapping):
-            raise LakeflowError(
-                f"environments[{key!r}] must be a mapping of spec fields to values, not {type(override).__name__}"
-            )
-        # Environment.from_dict drops a field it does not know without a word.
-        unknown = sorted(set(override) - set(known))
-        if unknown:
-            raise LakeflowError(
-                f"environments[{key!r}] has fields that a serverless environment does not take: {unknown}. "
-                f"Known fields: {known}"
-            )
+    check_environments(environments)
     merged = list(settings.environments or [])
     positions = {env.environment_key: index for index, env in enumerate(merged)}
     for key, override in environments.items():
@@ -620,6 +605,31 @@ def merge_environments(settings: jobs.JobSettings, environments: Mapping[str, Ma
         )
     settings.environments = merged
     return settings
+
+
+def check_environments(environments: Mapping[str, Mapping[str, Any]]) -> None:
+    """Check the per-job environment overrides that need no job: their keys, and the fields of each override.
+
+    Raises:
+        LakeflowError: If a key starts with `__pytest_`, an override is not a mapping or holds a field that
+            `compute.Environment` does not have.
+    """
+    reserved = sorted(key for key in environments if key.startswith(PREFIX))
+    if reserved:
+        raise LakeflowError(f"Environment keys starting with {PREFIX!r} are reserved for the plugin: {reserved}")
+    known = sorted(f.name for f in fields(compute.Environment))
+    for key, override in environments.items():
+        if not isinstance(override, Mapping):
+            raise LakeflowError(
+                f"environments[{key!r}] must be a mapping of spec fields to values, not {type(override).__name__}"
+            )
+        # Environment.from_dict drops a field it does not know without a word.
+        unknown = sorted(set(override) - set(known))
+        if unknown:
+            raise LakeflowError(
+                f"environments[{key!r}] has fields that a serverless environment does not take: {unknown}. "
+                f"Known fields: {known}"
+            )
 
 
 def _merged_environment(

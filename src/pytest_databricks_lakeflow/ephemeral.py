@@ -334,7 +334,8 @@ class EphemeralJob:
                 than `timeout`.
             performance_target: The performance target of this run only, such as `"PERFORMANCE_OPTIMIZED"`. It
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
-            queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
+            queue: Whether this run may queue behind other runs. Defaults to `Lakeflow`'s `queue`, and when that is
+                `None` to the job's own queue setting.
             full_refresh: Whether the job's pipeline tasks run a full refresh in this run. Defaults to what each
                 `pipeline_task` sets. The pipeline is the deployed one, unless the job was made with
                 `pipelines="copy"`.
@@ -478,6 +479,8 @@ class EphemeralJob:
     ) -> RunHandle:
         """Start a run as `start()` does, with the handle streaming as `stream` says, `None` following the flag."""
         target = _performance_target(performance_target)
+        if queue is None:
+            queue = self.lakeflow.queue
         queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
         assert self.job_id is not None
