@@ -1,6 +1,6 @@
 [project]
 name = "pytest-databricks-lakeflow"
-version = "0.7.0"
+version = "0.8.0"
 description = "Run Lakeflow Jobs from a Databricks Asset Bundle as throwaway jobs inside pytest tests."
 readme = "README.md"
 requires-python = ">=3.11"
