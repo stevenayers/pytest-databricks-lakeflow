@@ -509,8 +509,8 @@ def unreached_notebook_tasks(
     It reads the settings as they are created, after `environments` and `modify_settings`. A notebook task on a
     cluster needs each dependency in its `libraries`, and a serverless one in the `spec.dependencies` of the
     environment its `environment_key` names. A serverless notebook task without an `environment_key` has neither.
-    Disabled tasks, tasks nested in a disabled `for_each_task`, notebook tasks on a SQL warehouse, which take no Python
-    packages, and the setup, teardown, probe and stub tasks are left out.
+    Disabled tasks, tasks downstream of one, tasks nested in a disabled `for_each_task`, notebook tasks on a SQL
+    warehouse, which take no Python packages, and the setup, teardown, probe and stub tasks are left out.
 
     Args:
         settings: The job's settings.
@@ -529,7 +529,7 @@ def unreached_notebook_tasks(
             listed = env.spec.dependencies or []
         environments[env.environment_key] = listed
     unreached: list[str] = []
-    for task in _enabled_tasks(settings):
+    for task in _enabled_tasks(settings, skip=disabled_task_keys(settings)):
         if task.task_key.startswith(PREFIX) or task.task_key in stubs:
             continue
         if task.notebook_task is None or task.notebook_task.warehouse_id:
@@ -758,7 +758,9 @@ def _force_condition(task: jobs.Task, outcome: bool) -> None:
     task.condition_task = jobs.ConditionTask(op=jobs.ConditionTaskOp.EQUAL_TO, left="true", right=expected)
 
 
-def override_for_each_inputs(settings: jobs.JobSettings, inputs: Mapping[str, Sequence[object]]) -> jobs.JobSettings:
+def override_for_each_inputs(
+    settings: jobs.JobSettings, inputs: Mapping[str, Sequence[object]], *, stubs: Collection[str] = ()
+) -> jobs.JobSettings:
     """Replace the `inputs` of the named for-each tasks with the JSON of the given lists.
 
     Each list is encoded with `escape`, as the stub widgets are, so a `{{` in a value is not read as a reference.
@@ -767,6 +769,7 @@ def override_for_each_inputs(settings: jobs.JobSettings, inputs: Mapping[str, Se
     Args:
         settings: The job's settings. They are changed in place.
         inputs: The list each for-each task iterates over, by task key.
+        stubs: Keys of the tasks `upstream_task_values` replaced with stubs, which have no `for_each_task`.
 
     Returns:
         `settings`.
@@ -781,6 +784,11 @@ def override_for_each_inputs(settings: jobs.JobSettings, inputs: Mapping[str, Se
     for key, values in inputs.items():
         if key not in tasks:
             raise LakeflowError(f"Unknown task {key!r} in for_each_inputs. For-each tasks: {loops}")
+        if key in stubs:
+            raise LakeflowError(
+                f"Task {key!r} in for_each_inputs is stubbed by upstream_task_values, so it has no for_each_task. "
+                f"For-each tasks: {loops}"
+            )
         if key not in loops:
             raise LakeflowError(f"Task {key!r} in for_each_inputs has no for_each_task. For-each tasks: {loops}")
         encoded[key] = _for_each_inputs(key, values)

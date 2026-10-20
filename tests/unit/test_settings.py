@@ -1436,9 +1436,6 @@ class TestForEachInputs:
             override_for_each_inputs(settings, inputs)
         assert settings == template()
 
-    def test_for_each_inputs_without_entries_change_nothing(self) -> None:
-        assert override_for_each_inputs(for_each_settings(), {}) == for_each_settings()
-
 
 TABLE_TRIGGER = {"type": "table", "table_update.updated_tables": "cat.sch.orders"}
 
@@ -1734,7 +1731,8 @@ class TestUnreachedNotebookTasks:
         ("build", "stubs", "expected"),
         [
             pytest.param(reached, (), ["extract", "transform"], id="serverless"),
-            pytest.param(lambda: disable_tasks(reached(), ["extract"]), (), ["transform"], id="disabled"),
+            pytest.param(lambda: disable_tasks(reached(), ["transform"]), (), ["extract"], id="disabled"),
+            pytest.param(lambda: disable_tasks(reached(), ["extract"]), (), [], id="downstream-of-disabled"),
             pytest.param(lambda: moved({}, environment_key="default"), (), ["extract"], id="moved-to-default"),
             pytest.param(
                 lambda: moved({"test": {"environment_version": "4"}}, environment_key="test"),

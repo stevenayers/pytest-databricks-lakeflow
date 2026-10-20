@@ -1370,14 +1370,30 @@ class TestForEachInputs:
         assert tasks["after"].depends_on == [jobs.TaskDependency(task_key="loop")]
         assert tasks["after"].notebook_task == template["after"].notebook_task
 
-    def test_for_each_inputs_for_an_unknown_task_fail_before_creation(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            pytest.param(
+                'for_each_inputs={"nope": []}',
+                "*Unknown task 'nope' in for_each_inputs. For-each tasks: ?'loop'?*",
+                id="unknown",
+            ),
+            pytest.param(
+                'for_each_inputs={"loop": ["a"]}, upstream_task_values={"loop": {"k": "v"}}',
+                "*Task 'loop' in for_each_inputs is stubbed by upstream_task_values, so it has no for_each_task. "
+                "For-each tasks: ??*",
+                id="stubbed",
+            ),
+        ],
+    )
+    def test_for_each_inputs_fail_before_creation(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli, arguments: str, message: str
     ) -> None:
         fake_cli.deployed["fanout"] = fake_ws.jobs.add(for_each_settings())
-        source = 'def test_job(lakeflow):\n    lakeflow.job("fanout", for_each_inputs={"nope": []})\n'
+        source = f'def test_job(lakeflow):\n    lakeflow.job("fanout", {arguments})\n'
         result = run_tests(pytester, source)
         result.assert_outcomes(failed=1)
-        result.stdout.fnmatch_lines(["*Unknown task 'nope' in for_each_inputs. For-each tasks: ?'loop'?*"])
+        result.stdout.fnmatch_lines([message])
         assert fake_ws.jobs.created == []
 
 
