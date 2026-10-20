@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pytest_databricks_lakeflow.client import Lakeflow
+from pytest_databricks_lakeflow.dbt import DbtArtifacts, DbtResult
 from pytest_databricks_lakeflow.ephemeral import EphemeralJob, EphemeralPipeline, RunHandle
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError, LakeflowRunFailed, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
@@ -25,6 +26,8 @@ from pytest_databricks_lakeflow.settings import ALL_RULES, DEFAULT_RULES, Stub
 __all__ = [
     "ALL_RULES",
     "DEFAULT_RULES",
+    "DbtArtifacts",
+    "DbtResult",
     "DebugNotebook",
     "EphemeralJob",
     "EphemeralPipeline",

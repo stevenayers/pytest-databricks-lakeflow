@@ -36,7 +36,7 @@ LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<cat
     LAKEFLOW_WAREHOUSE_ID=<warehouse id> uv run pytest tests/integration -n 8 --dist loadgroup --lakeflow-sweep
 ```
 
-`--dist loadgroup` sends the tests of each `xdist_group` to one worker, so a run that a module-scoped fixture shares between them happens once rather than once per worker. `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on and the `alerts` bundle evaluates its alerts on, passed as the bundle variable `warehouse_id`; `test_sql.py` and `test_alerts.py` skip when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
+`--dist loadgroup` sends the tests of each `xdist_group` to one worker, so a run that a module-scoped fixture shares between them happens once rather than once per worker. `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, the `alerts` bundle evaluates its alerts on and the `dbt` bundle's dbt task runs on, passed as the bundle variable `warehouse_id`; `test_sql.py`, `test_alerts.py` and `test_dbt.py` skip when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
 
 `tests/integration/test_classic.py` is skipped unless `LAKEFLOW_CLASSIC=1` is set as well. Its bundle runs on a classic job cluster (`Standard_D4s_v5`, `SINGLE_USER` access mode, no cluster policy), which takes five to ten minutes to start, and it checks `single_node=True` against the Jobs API and the cluster's reported `spark.master`. Run it on its own when you change the compute overrides:
 
@@ -91,6 +91,10 @@ tests/integration/
             databricks.yml
             resources/*.yml      # the schema, the volume and the job
             src/notebooks/*.py
+        dbt/                     # name: lakeflow_dbt, a serverless dbt task on the LAKEFLOW_WAREHOUSE_ID warehouse, in the LAKEFLOW_CATALOG catalog
+            databricks.yml
+            resources/*.job.yml
+            dbt/                 # a dbt project of two models; the tests build into a lakeflow.schema() through --vars
     test_example.py              # one module per bundle, named after it
     test_run_job.py              # child_run and the children= option against the run_job bundle
     test_sql.py
@@ -101,6 +105,7 @@ tests/integration/
     test_for_each.py
     test_pipelines.py
     test_triggers.py
+    test_dbt.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
@@ -125,7 +130,7 @@ tests/integration/
 
 Names that reach the workspace (bundle names, job names, task keys, notebooks, schemas, tags, parameters) must be neutral and specific to the use case.
 
-In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs and serverless pipelines, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped. The optional repository variable `LAKEFLOW_WAREHOUSE_ID` names a SQL warehouse the service principal can use; without it the `sql` and `alerts` bundles' tests are skipped. The `alerts` bundle deploys its own alerts, so with the variable set the service principal also needs permission to create alerts in the workspace. The job runs the tests with `--lakeflow-report-dir=lakeflow-report`, then checks that each `report.json` there lists at least one run and that the failing `transform` notebook was exported, and uploads the directory and the JUnit XML as artefacts.
+In CI, the `Integration tests` job runs on pushes to `main` once these settings exist: the repository variables `DATABRICKS_HOST` and `LAKEFLOW_CATALOG`, and, in a GitHub environment named `integration`, the secrets `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` for a service principal that can create jobs and serverless pipelines, use serverless compute and create schemas in that catalog. Until `DATABRICKS_HOST` is set, the job is skipped. The optional repository variable `LAKEFLOW_WAREHOUSE_ID` names a SQL warehouse the service principal can use; without it the `sql`, `alerts` and `dbt` bundles' tests are skipped. The `alerts` bundle deploys its own alerts, so with the variable set the service principal also needs permission to create alerts in the workspace. The job runs the tests with `--lakeflow-report-dir=lakeflow-report`, then checks that each `report.json` there lists at least one run and that the failing `transform` notebook was exported, and uploads the directory and the JUnit XML as artefacts.
 
 ## Making a change
 

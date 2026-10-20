@@ -167,6 +167,11 @@ class Lakeflow:
             in the job name. Tests cannot pass the parameter themselves.
         notebook_export: Which notebook tasks to read with `jobs.export_run` after a run, into `TaskRun.notebook`:
             `failed` for those that ran and did not succeed, `always` for every one that ran, `never` for none.
+        dbt_artifacts: Download the artefacts of each dbt task as soon as its run finishes, while the platform's
+            30 minute link is valid, and parse them into `TaskRun.dbt`. They go into a temporary directory per run,
+            removed at the end of the pytest session unless `keep` or `--lakeflow-keep` is set. A tarball over
+            50 MB, an expired link or a tarball without `run_results.json` leaves `TaskRun.dbt` `None` with a warning
+            naming the task.
         sweep_hours: The age after which `--lakeflow-sweep` and `sweep()` delete leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
@@ -232,6 +237,7 @@ class Lakeflow:
     allow_undeclared_params: bool = False
     test_marker: bool = False
     notebook_export: NotebookExport = "failed"
+    dbt_artifacts: bool = False
     sweep_hours: float = 24
     keep: bool = False
     keep_failed: bool = True

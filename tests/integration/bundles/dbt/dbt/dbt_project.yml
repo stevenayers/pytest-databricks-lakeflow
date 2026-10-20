@@ -1,0 +1,11 @@
+name: lakeflow_dbt
+version: "1.0.0"
+config-version: 2
+profile: lakeflow_dbt
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+models:
+  lakeflow_dbt:
+    +materialized: table

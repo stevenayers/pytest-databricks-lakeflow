@@ -1,0 +1,22 @@
+bundle:
+  name: lakeflow_dbt
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    description: The id of the SQL warehouse the dbt task runs on. Passed by the tests from LAKEFLOW_WAREHOUSE_ID.
+  catalog:
+    description: The catalog the dbt task builds in. Passed by the tests from LAKEFLOW_CATALOG.
+
+targets:
+  test:
+    mode: development
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/test
+    presets:
+      trigger_pause_status: PAUSED
+      tags:
+        purpose: pytest
