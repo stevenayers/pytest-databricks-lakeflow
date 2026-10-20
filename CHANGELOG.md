@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.13.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.12.0...v0.13.0) (2026-10-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* Everything after `params` on `job()` and `task()`, after `only` on `run()` and `start()`, and after `key` on `check()` is keyword-only. `task()` gains `name=`.
+* `pytest_databricks_lakeflow.serialise` is gone: call `run.as_dict()`. `EphemeralJob.pipelines` is `pipeline_copies`, also as a constructor keyword.
+* Tests that caught `LakeflowError` for a wrong argument must catch `ValueError`: a choice outside the listed values, a reserved `__pytest_` name, a setup or teardown step the plugin cannot ship, a `task_params` or `for_each_inputs` shape, a `task_overrides` field, a `force_conditions` outcome, a stub value or output, a `trigger` value, an `environments` override, a lint rule name, `stop_after` longer than its `timeout`, `replay` without `only`, and `upstream_from` or `replay` of another job. The `teardown_at` message reads `teardown_at must be one of run, close, got 'x'`.
+
+### Features
+
+* add a recipes section to the docs with an "I want to..." index ([de95d69](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/de95d69f32ed89943aa6399dcd3903d667f9bfad))
+* raise ValueError for a wrong argument and LakeflowError for a bundle, job or workspace problem ([de95d69](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/de95d69f32ed89943aa6399dcd3903d667f9bfad))
+* replace serialise(run) with JobRun.as_dict() and EphemeralJob.pipelines with pipeline_copies ([de95d69](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/de95d69f32ed89943aa6399dcd3903d667f9bfad))
+* take the options of job(), task(), run(), start() and check() by keyword ([de95d69](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/de95d69f32ed89943aa6399dcd3903d667f9bfad))
+
 ## [0.12.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.11.0...v0.12.0) (2026-10-20)
 
 
