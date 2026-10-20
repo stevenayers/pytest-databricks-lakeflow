@@ -257,6 +257,7 @@ class Lakeflow:
     active_updates: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _ws: WorkspaceClient | None = field(default=None, init=False, repr=False)
     _state_cache: tuple[session.SessionState, dict[str, Any]] | None = field(default=None, init=False, repr=False)
+    _warned_performance_override: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.sync not in SYNC_STRATEGIES:
@@ -1056,6 +1057,18 @@ class Lakeflow:
             return
         warned.add(key)
         warnings.warn(message, stacklevel=3)
+
+    def _warn_performance_override(self, job_key: str, run: JobRun) -> None:
+        """Warn, once for this `Lakeflow`, that a run asked for `PERFORMANCE_OPTIMIZED` and used another target."""
+        if self._warned_performance_override:
+            return
+        self._warned_performance_override = True
+        warnings.warn(
+            f"Run {run.run_id} of {job_key!r} asked for PERFORMANCE_OPTIMIZED but used "
+            f"{run.effective_performance_target}. A workspace policy or the job's compute decides the performance "
+            "mode; expect 3 to 4 minutes extra per run.",
+            stacklevel=4,
+        )
 
     def _resolve_local_wheels(self, dependencies: Sequence[str]) -> list[str]:
         """Point each `./` and `../` entry of `extra_dependencies` at the uploaded copies of the files it matches."""

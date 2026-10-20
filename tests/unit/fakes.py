@@ -932,6 +932,7 @@ def make_run(
     pipeline_tasks: Mapping[str, str] | None = None,
     trigger: jobs.TriggerType = jobs.TriggerType.ONE_TIME,
     iterations: Mapping[str, Sequence[str]] | None = None,
+    effective_performance_target: str | None = None,
 ) -> jobs.Run:
     """Build a terminated run whose tasks ended in `states`, keyed by task key.
 
@@ -961,6 +962,9 @@ def make_run(
     `for_each_task` with the platform's `stats`, and the run is a `RunWithIterations`, so `FakeJobs` lists the
     iterations on the task run fetched by its own id. An iteration's run id is the for-each task run's id times 1,000
     plus its position.
+
+    `effective_performance_target` is the serverless performance mode the run and every task run report, such as
+    `"STANDARD"`. `None`, the default, is what a run on classic compute reports.
     """
     states_by_key = {key: [state] for key, state in states.items()}
     for key, key_states in (attempts or {}).items():
@@ -984,6 +988,7 @@ def make_run(
                     sql_task=_sql_file(sql_files, key),
                     pipeline_task=_pipeline(pipeline_tasks, key),
                     for_each_task=_for_each(iterations, key),
+                    effective_performance_target=_performance_target(effective_performance_target),
                 )
             )
     loops: dict[int, list[jobs.RunTask]] = {}
@@ -1000,6 +1005,7 @@ def make_run(
         start_time=1_000,
         end_time=6_000,
         trigger=trigger,
+        effective_performance_target=_performance_target(effective_performance_target),
     )
     return with_iterations(run, loops)
 
@@ -1124,6 +1130,12 @@ def _pipeline(pipeline_ids: Mapping[str, str] | None, key: str) -> jobs.Pipeline
     if pipeline_ids is None or key not in pipeline_ids:
         return None
     return jobs.PipelineTask(pipeline_id=pipeline_ids[key])
+
+
+def _performance_target(target: str | None) -> jobs.PerformanceTarget | None:
+    if target is None:
+        return None
+    return jobs.PerformanceTarget(target)
 
 
 def _for_each(iterations: Mapping[str, Sequence[str]] | None, key: str) -> jobs.RunForEachTask | None:
