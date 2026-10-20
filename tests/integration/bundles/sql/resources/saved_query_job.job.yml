@@ -1,0 +1,11 @@
+resources:
+  jobs:
+    saved_query_job:
+      name: saved_query_job
+      description: A saved query task for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: saved
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            query:
+              query_id: ${var.query_id}

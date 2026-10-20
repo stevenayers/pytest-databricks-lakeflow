@@ -7,6 +7,8 @@ include:
 variables:
   warehouse_id:
     description: The id of the SQL warehouse that runs the sql_job queries. Passed by the tests from LAKEFLOW_WAREHOUSE_ID.
+  query_id:
+    description: The id of the saved query that saved_query_job runs. Created and passed by tests/integration/test_sql.py.
 
 targets:
   test:

@@ -515,6 +515,25 @@ class TestSweepSchemasAndNotebooks:
         report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
         assert report.notebooks == (f"{FOLDER}/teardown_0123456789ab",)
 
+    def test_sweep_notebooks_reaches_inlined_query_files(self, fake_ws: FakeWorkspaceClient) -> None:
+        used = f"{FOLDER}/query_old-run_totals_0123abcd.sql"
+        query = jobs.Task(
+            task_key="totals", sql_task=jobs.SqlTask(warehouse_id="w1", file=jobs.SqlTaskFile(f"/Workspace{used}"))
+        )
+        fake_ws.jobs.listed = [listed_job(1, 30, {**OLD, "pytest_expires": expires(24)}, tasks=[query])]
+        fake_ws.workspace.listed = [
+            notebook("query_old-run_totals_0123abcd.sql", 30, workspace.ObjectType.FILE),
+            notebook("query_old-run_each_89abcdef.sql", 30, workspace.ObjectType.FILE),
+            notebook("query_old-run_each_fedcba98.sql", 1, workspace.ObjectType.FILE),
+            notebook("query_totals.sql", 30, workspace.ObjectType.FILE),
+            notebook("query_old-run_each_76543210.sql", 30),
+        ]
+        report = session.sweep(as_client(fake_ws), "this-run", 24, FOLDER, session.SweepOptions(notebooks=True))
+        # The first is used by a job the expiry keeps, the third is young, and the last two are not named as the
+        # plugin names a query file.
+        assert report.notebooks == (f"{FOLDER}/query_old-run_each_89abcdef.sql",)
+        assert fake_ws.workspace.deleted == list(report.notebooks)
+
     def test_scope_all_sweeps_every_users_helpers_folder(self, fake_ws: FakeWorkspaceClient) -> None:
         locked = "/Users/locked@example.com/.pytest-databricks-lakeflow"
         fake_ws.workspace.listed = [
