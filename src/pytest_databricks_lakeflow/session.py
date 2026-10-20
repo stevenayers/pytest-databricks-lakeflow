@@ -193,6 +193,7 @@ class SessionState:
             short, for the terminal summary.
         sp_user_roles: Whether an identity has the Service Principal User role on a service principal, as
             `check_sp_user_role` found it, by workspace host, identity and application id.
+        live: Whether `--lakeflow-live` is set.
     """
 
     rootpath: Path
@@ -223,6 +224,7 @@ class SessionState:
     debug_notebook: bool = False
     debug_notebooks: list[str] = field(default_factory=list)
     sp_user_roles: dict[tuple[str, str, str], bool | None] = field(default_factory=dict)
+    live: bool = False
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
         """Decide whether to keep a job, pipeline or schema. The command-line flags win over `Lakeflow`'s arguments.
