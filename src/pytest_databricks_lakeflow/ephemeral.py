@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 import warnings
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
@@ -41,11 +41,13 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     check_references,
     check_selections,
+    check_trigger_references,
     create_kwargs,
     disabled_task_keys,
     job_timeout_seconds,
     name_lifecycle_params,
     pipeline_params,
+    pipeline_task_ids,
     require_task,
     rewire_pipelines,
     rewire_teardown,
@@ -110,7 +112,8 @@ class EphemeralJob:
         extra_dependencies: The test-only dependencies passed to `job()` or `task()`, local wheels resolved to their
             uploaded copies.
         pipelines: The pipeline copies that `pipelines="copy"` made, created just before the job and closed just after
-            it.
+            it. They are chosen again when the job is created, after `modify_settings`, so a pipeline task that it
+            repoints or adds gets a copy too.
         job_id: The job's id, once created.
         runs: The outcome of each finished run, in order.
     """
@@ -135,6 +138,8 @@ class EphemeralJob:
         self.stubs = frozenset(stubs)
         self.extra_dependencies = list(extra_dependencies)
         self.pipelines = list(pipelines)
+        # Set by `pipelines="copy"`: copies the pipeline with the given id, once modify_settings has run.
+        self._copy_pipeline: Callable[[str], EphemeralPipeline] | None = None
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
         self._run_urls: dict[int, str] = {}
@@ -166,12 +171,13 @@ class EphemeralJob:
 
         Emits a `UserWarning` naming the notebook tasks that `extra_dependencies` does not reach, checked after
         `modify_settings`, before `jobs.create`. `modify_settings` sees the deployed pipelines' ids, which are replaced
-        by the copies' ids after it.
+        by the copies' ids after it. With `pipelines="copy"`, the pipelines to copy are chosen after it too.
 
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
                 declare after `modify_settings` has run, a serverless task that needs an environment has none, or a
-                task refers to the output of a notebook task, which `jobs.create` refuses.
+                task refers to the output of a notebook task, or to a table update or file arrival trigger that the
+                copy does not have, which `jobs.create` refuses.
                 Also if the job runs as a service principal and you do not have the Service Principal User role on
                 it, or `jobs.create` refuses the job with `PERMISSION_DENIED`, with the platform's error as its
                 cause. Without a service principal in `run_as`, errors from `jobs.create` are raised unchanged.
@@ -187,6 +193,7 @@ class EphemeralJob:
         check_params(self.job_key, self.settings, self.params, self.lakeflow.allow_undeclared_params)
         check_compute(self.settings)
         check_output_references(self.job_key, self.settings)
+        check_trigger_references(self.job_key, self.settings)
         self._warn_unreached_dependencies()
         self._create_pipelines()
         self.job_id = self._create_job()
@@ -208,12 +215,33 @@ class EphemeralJob:
 
     def _create_pipelines(self) -> None:
         """Create the pipeline copies and point the job's pipeline tasks at them."""
+        if self._copy_pipeline is not None:
+            self.pipelines = self._chosen_pipelines(self._copy_pipeline)
+            # Chosen once: a second create() after a failed one finds the tasks on the copies already.
+            self._copy_pipeline = None
         copies: dict[str, str] = {}
         for copy in self.pipelines:
             copy.create()
             assert copy.pipeline_id is not None
             copies[copy.source_id] = copy.pipeline_id
         rewire_pipelines(self.settings, copies)
+
+    def _chosen_pipelines(self, copy_pipeline: Callable[[str], EphemeralPipeline]) -> list[EphemeralPipeline]:
+        """Copy each pipeline that an enabled pipeline task updates after `modify_settings`, reusing the copies made.
+
+        A copy that `job()` made for a pipeline that no task updates any more is dropped, unless it has been created.
+        """
+        made = {copy.source_id: copy for copy in self.pipelines}
+        chosen: list[EphemeralPipeline] = []
+        for pipeline_id in pipeline_task_ids(self.settings):
+            if pipeline_id in made:
+                chosen.append(made.pop(pipeline_id))
+            else:
+                chosen.append(copy_pipeline(pipeline_id))
+        for copy in made.values():
+            if copy.pipeline_id is not None:
+                chosen.append(copy)
+        return chosen
 
     def _create_job(self) -> int | None:
         """Create the job, checking first that its creator may make it run as the service principal it names."""
@@ -751,6 +779,7 @@ class EphemeralJob:
         module- or session-scoped fixture closes, the test being torn down. Outside a test the run is not polled.
         The job is deleted even when the polling is interrupted. The pipeline copies go after the job, with the same
         keep rules, so a kept job never points at a deleted pipeline, and they go even when deleting the job fails.
+        When the job was never created, no job points at them, so `keep_failed` does not keep them.
 
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.
@@ -772,7 +801,20 @@ class EphemeralJob:
             try:
                 self._delete_unless_kept(failed)
             finally:
-                _close_all(self.pipelines, failed)
+                self._close_pipelines(failed)
+
+    def _close_pipelines(self, failed: bool) -> None:
+        if self.job_id is None:
+            made = [copy.pipeline_id for copy in self.pipelines if copy.pipeline_id is not None]
+            if made:
+                log.warning(
+                    "The job copying %r was not created, so no job points at its pipeline copies %s, and they are "
+                    "deleted whatever keep_failed says",
+                    self.job_key,
+                    made,
+                )
+            failed = False
+        _close_all(self.pipelines, failed)
 
     def _write_debug_notebooks(self) -> None:
         """Write a debug notebook for each notebook task that failed in the last run. Errors are only logged."""
