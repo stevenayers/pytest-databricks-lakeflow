@@ -81,6 +81,8 @@ OUTPUT_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.output\.([\w.-]+)\s*\}\}
 # arrival trigger configured.") and any other path ("Invalid reference: 'job.trigger.nope'. 'trigger' is unknown.").
 TRIGGER_REFERENCE = re.compile(r"\{\{\s*job\.trigger\.([\w.]+)\s*\}\}")
 TRIGGER_PARAM_PREFIX = f"{PREFIX}trigger_"
+# The trigger references that jobs/create refuses in a job without that trigger, by the first part of their path.
+TRIGGER_KINDS = {"table_update": "table update", "file_arrival": "file arrival"}
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
@@ -802,7 +804,45 @@ def _for_each_inputs(key: str, values: Sequence[object]) -> str:
             f"Inputs for task {key!r} in for_each_inputs are {len(text)} characters as JSON. A for-each task allows "
             f"{MAX_FOR_EACH_INPUTS_CHARS}."
         )
+    _check_for_each_items(key, values)
     return text
+
+
+def _check_for_each_items(key: str, values: Sequence[object]) -> None:
+    """Fail on the items that jobs/create refuses in a for-each task's inputs, given values that are JSON-serialisable.
+
+    jobs/create refuses `[null]`, `[[1, 2]]`, `[1, {"k": 1}]` and `[{"k": 1}, "a"]` with "The JSON string in the inputs
+    field should be an array of primitives or objects.", and accepts `[1, "a"]` and objects holding lists, objects or
+    null.
+    """
+    first = None
+    for index, value in enumerate(values):
+        kind = _item_kind(value)
+        found = f"{kind} at index {index}"
+        if kind in ("None", "a nested list"):
+            raise LakeflowError(_for_each_items_message(key, found))
+        if first is None:
+            first = kind
+        elif kind != first:
+            raise LakeflowError(_for_each_items_message(key, f"{found} after {first} at index 0"))
+
+
+def _item_kind(value: object) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, Mapping):
+        return "an object"
+    if isinstance(value, (str, int, float)):
+        return "a primitive"
+    # Anything else that serialises to JSON is a list or a tuple.
+    return "a nested list"
+
+
+def _for_each_items_message(key: str, found: str) -> str:
+    return (
+        f"Inputs for task {key!r} in for_each_inputs hold {found}. jobs/create takes a list of all primitives or all "
+        "objects, without null or nested lists."
+    )
 
 
 def inject_trigger(settings: jobs.JobSettings, trigger: Mapping[str, str]) -> jobs.JobSettings:
@@ -1268,6 +1308,53 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
                 "could not resolve it. Select them in only, or stub them with Stub(outputs=...) in "
                 "upstream_task_values on job()."
             )
+
+
+def check_trigger_references(job_key: str, settings: jobs.JobSettings) -> None:
+    """Fail early when a task keeps a table update or file arrival trigger reference that the copy cannot resolve.
+
+    `sanitise` strips the template's trigger, so jobs/create refuses `{{job.trigger.table_update.*}}` and
+    `{{job.trigger.file_arrival.*}}` in the copy unless `trigger=` rewrote them or `modify_settings` set that trigger.
+
+    Args:
+        job_key: The bundle resource key of the job, for the message.
+        settings: The job's settings, as they will be created.
+
+    Raises:
+        LakeflowError: If a task, nested tasks included, refers to a trigger of a kind the settings do not have.
+    """
+    configured = _configured_triggers(settings.trigger)
+    for task in _with_nested(settings.tasks):
+        for match in TRIGGER_REFERENCE.finditer(json.dumps(_own_fields(task))):
+            path = match[1]
+            kind = path.split(".")[0]
+            if kind not in TRIGGER_KINDS or kind in configured:
+                continue
+            raise LakeflowError(
+                f"Task {task.task_key!r} of {job_key!r} refers to {match[0]}, but the copy has no "
+                f"{TRIGGER_KINDS[kind]} trigger, and jobs/create refuses the reference without one. Set its value with "
+                f"trigger={{{path!r}: ...}} on job() or task()."
+            )
+
+
+def _configured_triggers(trigger: jobs.TriggerSettings | None) -> set[str]:
+    configured: set[str] = set()
+    if trigger is None:
+        return configured
+    if trigger.table_update is not None:
+        configured.add("table_update")
+    if trigger.file_arrival is not None:
+        configured.add("file_arrival")
+    return configured
+
+
+def _own_fields(task: jobs.Task) -> dict[str, Any]:
+    """The task as a dict, without the task nested in its `for_each_task`, which `_with_nested` lists on its own."""
+    own = task.as_dict()
+    loop = own.get("for_each_task")
+    if loop is not None:
+        own["for_each_task"] = {key: value for key, value in loop.items() if key != "task"}
+    return own
 
 
 def check_output_references(job_key: str, settings: jobs.JobSettings) -> None:
