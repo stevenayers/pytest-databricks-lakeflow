@@ -87,12 +87,17 @@ def make_repository(path: Path, branch: str = "topic") -> str:
 
 
 class FakeCli:
-    """Stands in for `bundle.run_cli`. Summary reports every job registered in `deployed`, merged into `summary`."""
+    """Stands in for `bundle.run_cli`.
+
+    Summary reports every job registered in `deployed` and every pipeline in `deployed_pipelines`, merged into
+    `summary`. A pipeline whose id is empty is reported without one, as a pipeline that is not deployed.
+    """
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.invocations: list[tuple[list[str], Path, str | None]] = []
         self.deployed: dict[str, int] = {}
+        self.deployed_pipelines: dict[str, str] = {}
         self.summary: dict[str, Any] = {}
         self.validate: dict[str, Any] = {}
         self.errors: dict[str, Exception] = {}
@@ -108,7 +113,10 @@ class FakeCli:
             return "Databricks CLI v1.7.0\n"
         if args[:2] == ["bundle", "summary"]:
             jobs = {key: {"id": str(job_id)} for key, job_id in self.deployed.items()}
-            return json.dumps({**self.summary, "resources": {"jobs": jobs}})
+            pipelines: dict[str, dict[str, str]] = {}
+            for key, pipeline_id in self.deployed_pipelines.items():
+                pipelines[key] = {"id": pipeline_id} if pipeline_id else {"modified_status": "created"}
+            return json.dumps({**self.summary, "resources": {"jobs": jobs, "pipelines": pipelines}})
         if args[:2] == ["bundle", "validate"]:
             return json.dumps(self.validate)
         return ""

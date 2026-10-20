@@ -12,7 +12,7 @@ import pytest
 
 from pytest_databricks_lakeflow import bundle
 from pytest_databricks_lakeflow.client import Lakeflow
-from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, cancel_run
+from pytest_databricks_lakeflow.ephemeral import NOTEBOOKS, PROGRESS, REPORTS, cancel_run, stop_update
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
 from pytest_databricks_lakeflow.report import clear as clear_reports
 from pytest_databricks_lakeflow.report import write as write_report
@@ -41,33 +41,37 @@ SWEEP_FLAGS = {
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("lakeflow", "Lakeflow Jobs from a Databricks Asset Bundle")
-    group.addoption("--lakeflow-keep", action="store_true", help="Keep every ephemeral job and temporary schema.")
+    group.addoption(
+        "--lakeflow-keep", action="store_true", help="Keep every ephemeral job, pipeline copy and temporary schema."
+    )
     group.addoption(
         "--lakeflow-keep-failed",
         action="store_true",
         dest="lakeflow_keep_failed",
         default=None,
-        help="Keep the ephemeral job when its test fails, even with Lakeflow(keep_failed=False).",
+        help="Keep the ephemeral job and pipeline copies when their test fails, even with Lakeflow(keep_failed=False).",
     )
     group.addoption(
         "--no-lakeflow-keep-failed",
         action="store_false",
         dest="lakeflow_keep_failed",
         default=None,
-        help="Delete the ephemeral job even when its test fails.",
+        help="Delete the ephemeral job and pipeline copies even when their test fails.",
     )
     group.addoption(
         "--lakeflow-keep-ttl",
         metavar="DURATION",
-        help="Tag every ephemeral job with a pytest_expires time this far ahead, such as 48h or 7d. The sweep keeps "
-        "a tagged job until then, whatever its age.",
+        help="Tag every ephemeral job and pipeline copy with a pytest_expires time this far ahead, such as 48h or 7d. "
+        "The sweep keeps a tagged job or pipeline until then, whatever its age.",
     )
-    group.addoption("--lakeflow-sweep", action="store_true", help="Delete leftover ephemeral jobs at session start.")
+    group.addoption(
+        "--lakeflow-sweep", action="store_true", help="Delete leftover ephemeral jobs and pipelines at session start."
+    )
     group.addoption(
         "--lakeflow-sweep-scope",
         choices=SWEEP_SCOPES,
         default=None,
-        help="Sweep jobs and schemas that you created (mine, the default) or that anyone created (all).",
+        help="Sweep jobs, pipelines and schemas that you created (mine, the default) or that anyone created (all).",
     )
     group.addoption(
         "--lakeflow-sweep-schemas",
@@ -83,7 +87,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--lakeflow-sweep-branch",
         metavar="BRANCH",
-        help="Sweep only jobs whose pytest_git_branch tag is this branch.",
+        help="Sweep only jobs and pipelines whose pytest_git_branch tag is this branch.",
     )
     group.addoption(
         "--lakeflow-sweep-dry-run",
@@ -275,11 +279,15 @@ def _cancel_active_runs(state: SessionState) -> None:
             cancel_run(used.ws, run_id)
         state.cancelled_runs += len(used.active_runs)
         used.active_runs.clear()
+        for pipeline_id in sorted(used.active_updates):
+            stop_update(used.ws, pipeline_id)
+        used.active_updates.clear()
 
 
 def _report_to_controller(workeroutput: dict[str, Any], state: SessionState) -> None:
     workeroutput["lakeflow_deployed"] = state.deployed
     workeroutput["lakeflow_kept_jobs"] = state.kept_jobs
+    workeroutput["lakeflow_kept_pipelines"] = state.kept_pipelines
     workeroutput["lakeflow_kept_schemas"] = state.kept_schemas
     workeroutput["lakeflow_debug_notebooks"] = state.debug_notebooks
     workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
@@ -307,6 +315,7 @@ def pytest_testnodedown(node: Any, error: object) -> None:
     for root, target, profile, variables in output.get("lakeflow_deployed", []):
         state.deployed.append((root, target, profile, tuple(tuple(pair) for pair in variables)))
     state.kept_jobs.extend(output.get("lakeflow_kept_jobs", []))
+    state.kept_pipelines.extend(output.get("lakeflow_kept_pipelines", []))
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.debug_notebooks.extend(output.get("lakeflow_debug_notebooks", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
@@ -318,13 +327,20 @@ def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter, config: p
     state = config.stash.get(STATE, None)
     if state is None or hasattr(config, "workerinput"):
         return
-    summarised = (state.kept_jobs, state.kept_schemas, state.debug_notebooks, state.cancelled_runs)
+    summarised = (
+        state.kept_jobs,
+        state.kept_pipelines,
+        state.kept_schemas,
+        state.debug_notebooks,
+        state.cancelled_runs,
+    )
     if not any(summarised) and state.sweep_dry_run is None:
         return
     terminalreporter.write_sep("=", "lakeflow")
     if state.sweep_dry_run is not None:
         _summarise_dry_run(terminalreporter, state.sweep_dry_run)
-    for noun, names in (("job", state.kept_jobs), ("schema", state.kept_schemas)):
+    kept = (("job", state.kept_jobs), ("pipeline", state.kept_pipelines), ("schema", state.kept_schemas))
+    for noun, names in kept:
         if names:
             terminalreporter.write_line(f"lakeflow: {_count(len(names), noun)} kept")
             for name in names:

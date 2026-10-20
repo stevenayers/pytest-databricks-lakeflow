@@ -13,7 +13,7 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest: deploy
 ## Why this exists
 
 - A job in a bundle is usually checked by deploying it and pressing Run. This turns that into a pytest test, with `assert`, `parametrize` and xdist.
-- Every test runs its own copy of the job, so tests run in parallel and never touch the jobs your bundle deployed, except the children of Run Job tasks, which the plugin warns about.
+- Every test runs its own copy of the job, so tests run in parallel and never touch the jobs your bundle deployed, except the children of Run Job tasks, which the plugin warns about. With `pipelines="copy"`, the pipelines that a job's pipeline tasks update are copied too and publish to the test's temporary schema, and `lakeflow.pipeline()` copies one pipeline on its own, so a pipeline change is checked without touching the deployed pipeline's tables.
 - Task values cannot be read through the Jobs API. The plugin injects tasks that set and capture them, so one task can be tested on its own with the upstream values you choose.
 - Test data needs no seed task in the bundle and no Databricks Connect. `setup=` and `teardown=` run plain Python functions with the real `spark` and `dbutils`, a list of SQL statements, or a notebook file as the first and last tasks of the copy.
 
@@ -109,13 +109,14 @@ Inside the task, `dbutils.jobs.taskValues.get(taskKey="extract", key="source_pat
 3. `run()` starts the job, waits, and returns a `JobRun` with every task's state, output, logs, error and captured values.
 4. Leaving the `with` block deletes the job unless the test failed. Session end cancels anything still running.
 5. `lakeflow.task()` does the same for one task, with the stub and probe tasks on serverless compute or a job cluster you name.
+6. `lakeflow.pipeline()`, or `pipelines="copy"` on `job()` and `task()`, makes a pipeline from a deployed pipeline's spec that publishes to the schema you pass, runs it in development mode, and deletes it with its tables before the schema is dropped.
 
 ## Documentation
 
 Everything else is on the docs site: <https://stevenayers.github.io/pytest-databricks-lakeflow/>
 
 - [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, bundle target, first test
-- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, repeated runs, failures, temporary schemas, shared runs
+- [Writing job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): parameters, `only`, stubbed upstream tasks and replay, repeated runs, failures, temporary schemas, pipeline copies, shared runs
 - [Writing task tests](https://stevenayers.github.io/pytest-databricks-lakeflow/task-tests/): stubs, probes, value rules, helper compute
 - [Configuration](https://stevenayers.github.io/pytest-databricks-lakeflow/configuration/): every `Lakeflow` argument, command-line flag and sync strategy
 - [How it works](https://stevenayers.github.io/pytest-databricks-lakeflow/how-it-works/): the deploy and teardown lifecycle, xdist, timing

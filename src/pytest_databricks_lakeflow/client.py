@@ -14,13 +14,14 @@ from typing import Any, Literal, get_args
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import bundle, helpers, session
-from pytest_databricks_lakeflow.ephemeral import EphemeralJob
+from pytest_databricks_lakeflow.ephemeral import EphemeralJob, EphemeralPipeline
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
-from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, JobRun, NotebookExport
+from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport
 from pytest_databricks_lakeflow.settings import (
     SIDE_EFFECTS,
     Helpers,
@@ -39,9 +40,11 @@ from pytest_databricks_lakeflow.settings import (
     inject_test_marker,
     merge_environments,
     override_tasks,
+    pipeline_task_ids,
     require_task,
     run_job_tasks,
     sanitise,
+    sanitise_pipeline,
     stub_upstream,
     upstream_values_from,
     wrap_task,
@@ -54,6 +57,8 @@ Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
 Children = Literal["warn", "refuse"]
 CHILDREN: tuple[str, ...] = get_args(Children)
+Pipelines = Literal["deployed", "copy"]
+PIPELINES: tuple[str, ...] = get_args(Pipelines)
 # A setup or teardown notebook's source, and the job parameters its statements read.
 Notebook = tuple[str, frozenset[str]]
 UNVERSIONED_ARTIFACTS = (
@@ -121,7 +126,7 @@ class Lakeflow:
         environment_version: The serverless environment version of every environment copied from the template,
             except those whose spec sets `base_environment`. The helper environment keeps
             `helpers_environment_version`.
-        budget_policy_id: The budget policy of every ephemeral job.
+        budget_policy_id: The budget policy of every ephemeral job and pipeline.
         existing_cluster_id: A running cluster for every task that the template puts on a job cluster or a new
             cluster, stub, probe, setup and teardown tasks and tasks nested in a `for_each_task` included, so that
             tests skip cluster start-up. The job clusters are dropped. Serverless and warehouse tasks keep their
@@ -154,6 +159,8 @@ class Lakeflow:
             Change the settings in place.
         run_finished: Called with the outcome of each run and the test, after the run finishes.
         active_runs: Ids of the runs started by this `Lakeflow` that have not finished.
+        active_updates: The update that `EphemeralPipeline.run()` started and that has not ended, by the id of the
+            pipeline copy.
     """
 
     bundle_root: str | Path | None = None
@@ -187,6 +194,7 @@ class Lakeflow:
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
     run_finished: Callable[[JobRun, pytest.Item], None] | None = field(default=None, repr=False)
     active_runs: set[int] = field(default_factory=set, init=False, repr=False)
+    active_updates: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _ws: WorkspaceClient | None = field(default=None, init=False, repr=False)
     _state_cache: tuple[session.SessionState, dict[str, Any]] | None = field(default=None, init=False, repr=False)
 
@@ -273,6 +281,8 @@ class Lakeflow:
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
         upstream_task_values: Upstream | None = None,
+        pipelines: Pipelines = "deployed",
+        schema: str | None = None,
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
@@ -351,6 +361,13 @@ class Lakeflow:
                 run but no longer hold it back. It is applied after `task_params`, `disable`, `force_conditions`,
                 `extra_dependencies` and `task_overrides`, so what they set on that task is lost. It appears in
                 `JobRun.injected_tasks`.
+            pipelines: What the copy's pipeline tasks update. `"deployed"` leaves them on the deployed pipelines, so
+                every run updates those pipelines' tables. `"copy"` makes a copy of each pipeline that an enabled
+                pipeline task updates, as `pipeline()` does, publishing to `schema` and named after the job and the
+                pipeline's bundle key. The copies are created just before the job, after `modify_settings`, which
+                still sees the deployed pipelines' ids, and closed just after it with the same keep rules.
+            schema: The full name of the schema the pipeline copies publish to, as `schema()` yields it. Needed with
+                `pipelines="copy"`, and refused without it.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -377,10 +394,15 @@ class Lakeflow:
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
                 a value that is too large or not JSON-serialisable, an output that contains `{{` or is not
                 JSON-serialisable, or no output for a path that a task of the copy refers to. When the job is created,
-                also if a task of the copy refers to the output of a notebook task that is not a stub.
-            ValueError: If `children` is not `"warn"` or `"refuse"`.
+                also if a task of the copy refers to the output of a notebook task that is not a stub. Also if
+                `pipelines` is `"copy"` without `schema` or the copy has no enabled pipeline task, `schema` is passed
+                without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
+            LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
+                exist.
+            ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
         _check_children(children)
+        _check_pipelines(pipelines, schema)
         notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         settings = self.template(key)
@@ -410,6 +432,8 @@ class Lakeflow:
             method="job",
             environments=environments,
             extra_dependencies=dependencies,
+            pipelines=pipelines,
+            schema=schema,
         )
 
     def task(
@@ -428,6 +452,8 @@ class Lakeflow:
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
+        pipelines: Pipelines = "deployed",
+        schema: str | None = None,
     ) -> EphemeralJob:
         """Make a throwaway job that holds one task of a bundle job.
 
@@ -456,6 +482,9 @@ class Lakeflow:
             environments: Fields of the job's serverless environment specs, by `environment_key`, as for `job()`.
             task_overrides: Timeout and retry fields of the task, as for `job()`. Only the task under test can be
                 named, as `{"<task_key>": {...}}`.
+            pipelines: `"copy"` makes a copy of the pipeline that the task updates, publishing to `schema`, as for
+                `job()`.
+            schema: The full name of the schema the pipeline copy publishes to, as for `job()`.
 
         Returns:
             The job, created when entered with `with` or on its first run.
@@ -469,10 +498,12 @@ class Lakeflow:
                 JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
                 `"refuse"` and the task is a Run Job task, or `task_params` or `task_overrides` names another task.
                 Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
-                cannot be applied or `setup` or `teardown` cannot run.
-            ValueError: If `children` is not `"warn"` or `"refuse"`.
+                cannot be applied, `setup` or `teardown` cannot run, or `pipelines` and `schema` do not fit the task.
+            LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
+            ValueError: If `children` is not `"warn"` or `"refuse"`, or `pipelines` is not `"deployed"` or `"copy"`.
         """
         _check_children(children)
+        _check_pipelines(pipelines, schema)
         notebooks = _lifecycle_notebooks(setup, teardown)
         item = session.current_item()
         job_key, _, task_key = ref.partition(".")
@@ -515,7 +546,63 @@ class Lakeflow:
             method="task",
             environments=environments,
             extra_dependencies=dependencies,
+            pipelines=pipelines,
+            schema=schema,
         )
+
+    def pipeline(
+        self,
+        key: str,
+        schema: str,
+        *,
+        configuration: Mapping[str, str] | None = None,
+        name: str | None = None,
+    ) -> EphemeralPipeline:
+        """Make a throwaway copy of a bundle pipeline that publishes to `schema`.
+
+        The copy is made from the deployed pipeline's spec, so it runs the code that the last `bundle deploy` uploaded.
+        It publishes to `schema`, in the publishing mode the deployed pipeline uses, runs in development mode, and
+        leaves out the deployment, the continuous and trigger settings, the notifications and the event log. It runs as
+        you. Only tables that the pipeline's code names without a schema go to `schema`; a fully qualified name still
+        writes where it says.
+
+            with lakeflow.schema() as schema, lakeflow.pipeline("my_pipeline", schema=schema) as pipeline:
+                update = pipeline.run(full_refresh=True)
+                assert update.state == "COMPLETED"
+
+        The copy is deleted with its tables before the schema is dropped, unless the keep rules keep it.
+
+        Args:
+            key: The bundle resource key of the pipeline.
+            schema: The full name of the schema the copy publishes to, `catalog.schema`, as `schema()` yields it.
+            configuration: Keys to set in the copy's configuration, over the deployed pipeline's, for code that reads
+                its catalog or schema from `spark.conf`.
+            name: Replaces the test node id in the copy's name.
+
+        Returns:
+            The copy, created when entered with `with` or on its first run.
+
+        Raises:
+            KeyError: If the bundle has no pipeline `key`.
+            LakeflowBundleError: If `sync` is not `"deploy"`, the pipeline is not deployed, or it no longer exists.
+            LakeflowError: If called outside a test, `schema` is not a full name, the pipeline publishes to the Hive
+                metastore, or the copy would have more than 25 tags without the attribution tags.
+        """
+        item = session.current_item()
+        if self.sync != "deploy":
+            raise LakeflowBundleError('Pipelines need Lakeflow(sync="deploy"), which reads their deployed specs.')
+        state = self._state()
+        errors = state.get("pipeline_errors", {})
+        if key in errors:
+            raise LakeflowBundleError(errors[key])
+        ids = state.get("pipeline_ids", {})
+        if key not in ids:
+            raise KeyError(f"No pipeline {key!r} in the bundle. Available: {sorted(ids)}")
+        pipeline = self._pipeline_copy(
+            item, key, ids[key], schema, configuration=configuration, name=name or item.nodeid
+        )
+        item.addfinalizer(partial(pipeline._teardown, item))
+        return pipeline
 
     @contextmanager
     def schema(self, catalog: str | None = None) -> Generator[str, None, None]:
@@ -655,6 +742,8 @@ class Lakeflow:
         method: str,
         environments: Mapping[str, Mapping[str, Any]] | None,
         extra_dependencies: Sequence[str],
+        pipelines: Pipelines,
+        schema: str | None,
     ) -> EphemeralJob:
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
@@ -667,23 +756,12 @@ class Lakeflow:
             if children == "refuse":
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
-        current = session.current()
-        attribution = dict(current.attribution)
-        if "pytest_user" not in attribution:
-            user = self._state().get("user")
-            if user:
-                attribution["pytest_user"] = user
+        tags = self._tags(item)
         sanitise(
             settings,
             name=name or item.nodeid,
-            tags={
-                "pytest": "",
-                "pytest_run_id": self.run_id,
-                "pytest_nodeid": item.nodeid,
-                **current.expiry_tag(),
-                **attribution,
-            },
-            description=f"{item.nodeid} {attribution.get('pytest_ci_url', '')}".strip(),
+            tags=tags,
+            description=f"{item.nodeid} {tags.get('pytest_ci_url', '')}".strip(),
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
             run_as=run_as,
@@ -697,11 +775,85 @@ class Lakeflow:
         merge_environments(settings, environments or {})
         if self.test_marker:
             inject_test_marker(settings, item.nodeid)
+        copies: list[EphemeralPipeline] = []
+        if pipelines == "copy":
+            assert schema is not None
+            copies = self._pipeline_copies(item, key, settings, schema, name or item.nodeid)
         job = EphemeralJob(
-            self, key, settings, params, capture_task_values, stubs, extra_dependencies=extra_dependencies
+            self,
+            key,
+            settings,
+            params,
+            capture_task_values,
+            stubs,
+            extra_dependencies=extra_dependencies,
+            pipelines=copies,
         )
         item.addfinalizer(partial(job._teardown, item))
         return job
+
+    def _tags(self, item: pytest.Item) -> dict[str, str]:
+        """The tags of each ephemeral job and pipeline copy that `item` makes, the attribution tags included."""
+        current = session.current()
+        attribution = dict(current.attribution)
+        if "pytest_user" not in attribution:
+            user = self._state().get("user")
+            if user:
+                attribution["pytest_user"] = user
+        return {
+            "pytest": "",
+            "pytest_run_id": self.run_id,
+            "pytest_nodeid": item.nodeid,
+            **current.expiry_tag(),
+            **attribution,
+        }
+
+    def _pipeline_copies(
+        self, item: pytest.Item, job_key: str, settings: jobs.JobSettings, schema: str, name: str
+    ) -> list[EphemeralPipeline]:
+        """Copy each pipeline that an enabled pipeline task of the job updates, for `pipelines="copy"`."""
+        pipeline_ids = pipeline_task_ids(settings)
+        if not pipeline_ids:
+            keys = sorted(task.task_key for task in settings.tasks or [] if not task.task_key.startswith(PREFIX))
+            raise LakeflowError(f"Job {job_key!r} has no pipeline task to copy. Tasks: {keys}")
+        keys_by_id: dict[str, str] = {}
+        for pipeline_key, pipeline_id in self._state().get("pipeline_ids", {}).items():
+            keys_by_id[pipeline_id] = pipeline_key
+        copies: list[EphemeralPipeline] = []
+        for pipeline_id in pipeline_ids:
+            pipeline_key = keys_by_id.get(pipeline_id, pipeline_id)
+            copies.append(self._pipeline_copy(item, pipeline_key, pipeline_id, schema, name=f"{name} {pipeline_key}"))
+        return copies
+
+    def _pipeline_copy(
+        self,
+        item: pytest.Item,
+        pipeline_key: str,
+        pipeline_id: str,
+        schema: str,
+        *,
+        name: str,
+        configuration: Mapping[str, str] | None = None,
+    ) -> EphemeralPipeline:
+        """Make a copy of the deployed pipeline `pipeline_id` from its spec, without creating it yet."""
+        try:
+            spec = self.ws.pipelines.get(pipeline_id).spec
+        except NotFound:
+            raise LakeflowBundleError(
+                f"Pipeline {pipeline_key!r} (id {pipeline_id}) does not exist in the workspace, so the bundle state is "
+                "stale. Run `databricks bundle deploy` again."
+            ) from None
+        if spec is None:
+            raise LakeflowError(f"Pipeline {pipeline_key!r} (id {pipeline_id}) has no spec to copy")
+        kwargs = sanitise_pipeline(
+            spec,
+            name,
+            self._tags(item),
+            schema=schema,
+            configuration=configuration,
+            budget_policy_id=self.budget_policy_id,
+        )
+        return EphemeralPipeline(self, pipeline_key, pipeline_id, kwargs, schema)
 
 
 def _check_deploy_flags(deploy_flags: Sequence[str]) -> None:
@@ -761,6 +913,15 @@ def _check_lifecycle_params(
 def _check_children(children: str) -> None:
     if children not in CHILDREN:
         raise ValueError(f"children must be one of {', '.join(CHILDREN)}, got {children!r}")
+
+
+def _check_pipelines(pipelines: str, schema: str | None) -> None:
+    if pipelines not in PIPELINES:
+        raise ValueError(f"pipelines must be one of {', '.join(PIPELINES)}, got {pipelines!r}")
+    if pipelines == "copy" and schema is None:
+        raise LakeflowError('pipelines="copy" needs schema: pass the name that lakeflow.schema() yields')
+    if pipelines == "deployed" and schema is not None:
+        raise LakeflowError('schema applies to pipeline copies: pass pipelines="copy" as well')
 
 
 def _child_message(job_key: str, task: jobs.Task) -> str:

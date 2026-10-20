@@ -9,12 +9,12 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from types import TracebackType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import jobs
+from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow import helpers, session
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
@@ -22,6 +22,7 @@ from pytest_databricks_lakeflow.results import (
     PREFIX,
     DebugNotebook,
     JobRun,
+    PipelineUpdate,
     build_job_run,
     describe_failing,
     describe_notebooks,
@@ -39,12 +40,14 @@ from pytest_databricks_lakeflow.settings import (
     check_output_references,
     check_params,
     check_references,
+    check_selections,
     create_kwargs,
     disabled_task_keys,
     job_timeout_seconds,
     name_lifecycle_params,
     pipeline_params,
     require_task,
+    rewire_pipelines,
     rewire_teardown,
     select,
     selected_tasks,
@@ -73,6 +76,7 @@ TERMINAL_LIFE_CYCLE = (
     jobs.RunLifeCycleState.SKIPPED,
     jobs.RunLifeCycleState.INTERNAL_ERROR,
 )
+TERMINAL_UPDATE_STATES = frozenset({"COMPLETED", "FAILED", "CANCELED"})
 
 # The last state logged for each task attempt, keyed by task key and attempt number, and whether it had terminated.
 LoggedStates = dict[tuple[str, int], tuple[str, bool]]
@@ -105,6 +109,8 @@ class EphemeralJob:
         stubs: Keys of the stub tasks.
         extra_dependencies: The test-only dependencies passed to `job()` or `task()`, local wheels resolved to their
             uploaded copies.
+        pipelines: The pipeline copies that `pipelines="copy"` made, created just before the job and closed just after
+            it.
         job_id: The job's id, once created.
         runs: The outcome of each finished run, in order.
     """
@@ -119,6 +125,7 @@ class EphemeralJob:
         stubs: Collection[str] = (),
         *,
         extra_dependencies: Sequence[str] = (),
+        pipelines: Sequence[EphemeralPipeline] = (),
     ) -> None:
         self.lakeflow = lakeflow
         self.job_key = job_key
@@ -127,6 +134,7 @@ class EphemeralJob:
         self.capture_task_values = {key: list(keys) for key, keys in (capture_task_values or {}).items()}
         self.stubs = frozenset(stubs)
         self.extra_dependencies = list(extra_dependencies)
+        self.pipelines = list(pipelines)
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
         self._run_urls: dict[int, str] = {}
@@ -154,10 +162,11 @@ class EphemeralJob:
         self.close(failed=failed)
 
     def create(self) -> None:
-        """Create the job if it does not exist yet.
+        """Create the job if it does not exist yet, after the pipeline copies its pipeline tasks point at.
 
         Emits a `UserWarning` naming the notebook tasks that `extra_dependencies` does not reach, checked after
-        `modify_settings`, before `jobs.create`.
+        `modify_settings`, before `jobs.create`. `modify_settings` sees the deployed pipelines' ids, which are replaced
+        by the copies' ids after it.
 
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
@@ -179,6 +188,7 @@ class EphemeralJob:
         check_compute(self.settings)
         check_output_references(self.job_key, self.settings)
         self._warn_unreached_dependencies()
+        self._create_pipelines()
         self.job_id = self._create_job()
         log.info("Created job %s from %s: %s", self.job_id, self.job_key, self.url)
         item.user_properties.append(("lakeflow_job_url", self.url))
@@ -195,6 +205,15 @@ class EphemeralJob:
             "or run the task on an environment that lists them.",
             stacklevel=4,
         )
+
+    def _create_pipelines(self) -> None:
+        """Create the pipeline copies and point the job's pipeline tasks at them."""
+        copies: dict[str, str] = {}
+        for copy in self.pipelines:
+            copy.create()
+            assert copy.pipeline_id is not None
+            copies[copy.source_id] = copy.pipeline_id
+        rewire_pipelines(self.settings, copies)
 
     def _create_job(self) -> int | None:
         """Create the job, checking first that its creator may make it run as the service principal it names."""
@@ -267,7 +286,8 @@ class EphemeralJob:
                 applies to serverless tasks and leaves the job's settings unchanged. Defaults to the job's own.
             queue: Whether this run may queue behind other runs. Defaults to the job's own queue setting.
             full_refresh: Whether the job's pipeline tasks run a full refresh in this run. Defaults to what each
-                `pipeline_task` sets. The pipeline is the deployed one, not a copy.
+                `pipeline_task` sets. The pipeline is the deployed one, unless the job was made with
+                `pipelines="copy"`.
             full_refresh_selection: Tables that the job's pipeline tasks fully refresh in this run. Needs
                 databricks-sdk 0.110.0 or later.
             refresh_selection: Tables that the job's pipeline tasks refresh in this run. It applies to every
@@ -508,7 +528,7 @@ class EphemeralJob:
             stop_at = first_at + stop_after.total_seconds()
         # A snapshot older than one poll interval is polled again at once, without a sleep or the deadline check, so
         # a wait() long after start() neither sleeps on it nor times out a run that has finished since.
-        stale = first is not None and time.monotonic() - first_at >= self._poll_interval()
+        stale = first is not None and time.monotonic() - first_at >= _poll_seconds(self.lakeflow)
         polling = _Polling(run_id, item)
         run = self._poll(polling, deadline, first, stale, stop_at)
         if _terminated(run):
@@ -537,7 +557,7 @@ class EphemeralJob:
         checked only after a fresh poll, so a `stale` snapshot is polled again first.
         """
         ws = self.lakeflow.ws
-        interval = self._poll_interval()
+        interval = _poll_seconds(self.lakeflow)
         progress = polling.item.stash.setdefault(PROGRESS, [])
         run = first
         if run is None:
@@ -558,11 +578,6 @@ class EphemeralJob:
                 time.sleep(interval)
             stale = False
             run = ws.jobs.get_run(polling.run_id)
-
-    def _poll_interval(self) -> float:
-        if self.lakeflow.poll_interval is not None:
-            return self.lakeflow.poll_interval.total_seconds()
-        return POLL_SECONDS
 
     def _report_cancelled(self, polling: _Polling) -> None:
         """List a run the plugin cancelled in the report.json of the running test, with `--lakeflow-report-dir`.
@@ -729,12 +744,13 @@ class EphemeralJob:
         return notebook
 
     def close(self, failed: bool = False) -> None:
-        """Cancel active runs, then delete the job unless the keep rules say to keep it.
+        """Cancel active runs, then delete the job unless the keep rules say to keep it, then its pipeline copies.
 
         With `--lakeflow-report-dir`, each cancelled run is polled until it has ended, for at most 60 seconds, and
         listed in the report.json of the test that is running, whose report is still to be written: for a job that a
         module- or session-scoped fixture closes, the test being torn down. Outside a test the run is not polled.
-        The job is deleted even when the polling is interrupted.
+        The job is deleted even when the polling is interrupted. The pipeline copies go after the job, with the same
+        keep rules, so a kept job never points at a deleted pipeline, and they go even when deleting the job fails.
 
         Args:
             failed: Whether the test failed, which keeps the job when `keep_failed` is on.
@@ -753,7 +769,10 @@ class EphemeralJob:
             if failed and session.current().debug_notebook:
                 self._write_debug_notebooks()
         finally:
-            self._delete_unless_kept(failed)
+            try:
+                self._delete_unless_kept(failed)
+            finally:
+                _close_all(self.pipelines, failed)
 
     def _write_debug_notebooks(self) -> None:
         """Write a debug notebook for each notebook task that failed in the last run. Errors are only logged."""
@@ -878,6 +897,223 @@ class RunHandle:
     def cancel(self) -> None:
         """Cancel the run. It ends `CANCELED` shortly after, which a later `wait()` returns."""
         self.job._cancel(self.run_id)
+
+
+class EphemeralPipeline:
+    """A throwaway copy of a deployed pipeline, publishing to a schema that the test chose.
+
+    The copy is created on entering the `with` block, or by the first `run()` when used without `with`. It is
+    deleted with its tables on leaving the block, or at the end of the test that made it, unless `keep` is set or the
+    test failed and `keep_failed` is on. An update that is still running then is stopped first. The copies that
+    `pipelines="copy"` makes for a job are created and closed by that job instead.
+
+    Attributes:
+        lakeflow: The `Lakeflow` that made the copy.
+        pipeline_key: The bundle resource key of the pipeline it copies, or that pipeline's id when the bundle does
+            not define it.
+        source_id: The id of the pipeline it copies.
+        create_kwargs: The arguments the copy is created with, as `pipelines.create` takes them.
+        schema: The full name of the schema the copy publishes to.
+        pipeline_id: The copy's id, once created.
+        updates: The outcome of each update that `run()` waited for, in order.
+    """
+
+    def __init__(
+        self,
+        lakeflow: Lakeflow,
+        pipeline_key: str,
+        source_id: str,
+        create_kwargs: Mapping[str, Any],
+        schema: str,
+    ) -> None:
+        self.lakeflow = lakeflow
+        self.pipeline_key = pipeline_key
+        self.source_id = source_id
+        self.create_kwargs = dict(create_kwargs)
+        self.schema = schema
+        self.pipeline_id: str | None = None
+        self.updates: list[PipelineUpdate] = []
+        self._active_update: str | None = None
+        self._entered = False
+        self._closed = False
+
+    @property
+    def url(self) -> str | None:
+        """The copy's page in the workspace, or `None` before it is created."""
+        if self.pipeline_id is None:
+            return None
+        return f"{self.lakeflow.ws.config.host}/pipelines/{self.pipeline_id}"
+
+    def __enter__(self) -> EphemeralPipeline:
+        self.create()
+        self._entered = True
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        failed = exc_type is not None and not issubclass(exc_type, (pytest.skip.Exception, pytest.xfail.Exception))
+        self.close(failed=failed)
+
+    def create(self) -> None:
+        """Create the copy if it does not exist yet.
+
+        Raises:
+            LakeflowError: If the copy has been closed. Errors from `pipelines.create` are raised unchanged.
+        """
+        if self._closed:
+            raise LakeflowError(f"The ephemeral pipeline for {self.pipeline_key!r} has already been closed")
+        if self.pipeline_id is not None:
+            return
+        item = session.current_item()
+        self.pipeline_id = self.lakeflow.ws.pipelines.create(**self.create_kwargs).pipeline_id
+        log.info("Created pipeline %s from %s: %s", self.pipeline_id, self.pipeline_key, self.url)
+        item.user_properties.append(("lakeflow_pipeline_url", self.url))
+        item.user_properties.append(("lakeflow_pipeline_id", self.pipeline_id))
+
+    def run(
+        self,
+        *,
+        full_refresh: bool | None = None,
+        full_refresh_selection: Sequence[str] | None = None,
+        refresh_selection: Sequence[str] | None = None,
+        timeout: timedelta | None = None,
+    ) -> PipelineUpdate:
+        """Run an update of the copy and wait for it to end, creating the copy first if needed.
+
+        A failed update is returned, not raised: check its `state`, and read what went wrong with
+        `events(level="ERROR")`. Each change of the update's state is logged and shown in the `lakeflow` report
+        section of the test.
+
+        Args:
+            full_refresh: Whether the update refreshes every table from scratch.
+            full_refresh_selection: Tables that the update refreshes from scratch.
+            refresh_selection: Tables that the update refreshes.
+            timeout: How long to wait. Defaults to `Lakeflow`'s `timeout`.
+
+        Returns:
+            The update, which is also appended to `updates`.
+
+        Raises:
+            LakeflowError: If the copy has been closed, or a selection is a string rather than a list of names.
+            LakeflowTimeout: If the update did not end in time. It is stopped first.
+        """
+        check_selections({"full_refresh_selection": full_refresh_selection, "refresh_selection": refresh_selection})
+        self.create()
+        assert self.pipeline_id is not None
+        ws = self.lakeflow.ws
+        response = ws.pipelines.start_update(
+            self.pipeline_id,
+            full_refresh=full_refresh,
+            full_refresh_selection=_as_list(full_refresh_selection),
+            refresh_selection=_as_list(refresh_selection),
+        )
+        update_id = response.update_id
+        assert update_id is not None
+        self._active_update = update_id
+        self.lakeflow.active_updates[self.pipeline_id] = update_id
+        log.info("Started update %s of pipeline %s", update_id, self.pipeline_id)
+        if timeout is None:
+            timeout = self.lakeflow.timeout
+        info = self._wait(update_id, timeout)
+        self._forget_update()
+        update = PipelineUpdate.from_info(ws, info)
+        self.updates.append(update)
+        log.info("Update %s of pipeline %s finished %s: %s", update_id, self.pipeline_id, update.state, self.url)
+        return update
+
+    def _wait(self, update_id: str, timeout: timedelta) -> pipelines.UpdateInfo:
+        """Poll the update until it ends, logging each change of its state. On timeout, stop it and raise."""
+        assert self.pipeline_id is not None
+        ws = self.lakeflow.ws
+        progress = session.current_item().stash.setdefault(PROGRESS, [])
+        deadline = time.monotonic() + timeout.total_seconds()
+        previous: str | None = None
+        while True:
+            info = ws.pipelines.get_update(self.pipeline_id, update_id).update or pipelines.UpdateInfo()
+            state = info.state.value if info.state else None
+            if state is not None and state != previous:
+                line = f"pipeline {self.pipeline_key}: {state}"
+                if previous is not None:
+                    line = f"pipeline {self.pipeline_key}: {previous} -> {state}"
+                log.info("%s", line)
+                progress.append(line)
+                previous = state
+            if state in TERMINAL_UPDATE_STATES:
+                return info
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_poll_seconds(self.lakeflow))
+        stop_update(ws, self.pipeline_id)
+        self._forget_update()
+        raise LakeflowTimeout(
+            f"Update {update_id} of pipeline {self.pipeline_key!r} did not finish within {timeout} and was stopped: "
+            f"{self.url}"
+        )
+
+    def close(self, failed: bool = False) -> None:
+        """Stop an update that is still running, then delete the copy with its tables unless the keep rules say not to.
+
+        Args:
+            failed: Whether the test failed, which keeps the copy when `keep_failed` is on.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.pipeline_id is None:
+            return
+        if self._active_update is not None:
+            stop_update(self.lakeflow.ws, self.pipeline_id)
+            self._forget_update()
+        state = session.current()
+        if state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed):
+            log.warning("Keeping pipeline %s from %s: %s", self.pipeline_id, self.pipeline_key, self.url)
+            state.kept_pipelines.append(str(self.url))
+            return
+        session.delete_pipeline(self.lakeflow.ws, self.pipeline_id)
+        log.info("Deleted pipeline %s", self.pipeline_id)
+
+    def _teardown(self, item: pytest.Item) -> None:
+        """Close the copy at the end of the test that made it, unless a `with` block closes it."""
+        if not self._entered:
+            self.close(failed=item_failed(item.stash))
+
+    def _forget_update(self) -> None:
+        self._active_update = None
+        if self.pipeline_id is not None:
+            self.lakeflow.active_updates.pop(self.pipeline_id, None)
+
+
+def _as_list(names: Sequence[str] | None) -> list[str] | None:
+    if names is None:
+        return None
+    return list(names)
+
+
+def _close_all(copies: Sequence[EphemeralPipeline], failed: bool) -> None:
+    """Close every pipeline copy, even when closing one of them fails, and then raise the first error."""
+    errors: list[Exception] = []
+    for copy in copies:
+        try:
+            copy.close(failed=failed)
+        except Exception as e:
+            errors.append(e)
+    if errors:
+        raise errors[0]
+
+
+def _poll_seconds(lakeflow: Lakeflow) -> float:
+    if lakeflow.poll_interval is not None:
+        return lakeflow.poll_interval.total_seconds()
+    return POLL_SECONDS
+
+
+def stop_update(ws: WorkspaceClient, pipeline_id: str) -> None:
+    try:
+        ws.pipelines.stop(pipeline_id)
+        log.info("Stopped the update of pipeline %s", pipeline_id)
+    except DatabricksError as e:
+        log.warning("Could not stop the update of pipeline %s: %s", pipeline_id, e)
 
 
 def cancel_run(ws: WorkspaceClient, run_id: int) -> None:

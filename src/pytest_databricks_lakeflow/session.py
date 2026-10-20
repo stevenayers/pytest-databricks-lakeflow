@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -25,12 +26,12 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import BadRequest, NotFound, PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import iam, jobs, workspace
+from databricks.sdk.service import iam, pipelines, workspace
 from filelock import FileLock
 
 from pytest_databricks_lakeflow import bundle, helpers
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
-from pytest_databricks_lakeflow.settings import tag_value
+from pytest_databricks_lakeflow.settings import NAME_PREFIX, tag_value
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.client import Lakeflow
@@ -61,18 +62,23 @@ RUN_AS_FIX = (
     'use Lakeflow(sync="none").'
 )
 PYTEST_SCHEMA = re.compile(rf"pytest_[a-z0-9_]+_{SCHEMA_SUFFIX}")
+# list_pipelines filters only by notebook path or by `name LIKE '<pattern>'`, in which the brackets of the prefix are
+# literal. Its listing carries no tags and no creation time, so each pipeline it finds is read with `get`.
+PIPELINE_FILTER = f"name LIKE '{NAME_PREFIX}%'"
+# `cascade` came in databricks-sdk 0.110.0 and `force` in 0.80.0.
+PIPELINE_DELETE_PARAMETERS = frozenset(inspect.signature(pipelines.PipelinesAPI.delete).parameters)
 T = TypeVar("T")
 
 
 @dataclass(frozen=True)
 class SweepOptions:
-    """What `--lakeflow-sweep` deletes besides this user's old ephemeral jobs.
+    """What `--lakeflow-sweep` deletes besides this user's old ephemeral jobs and pipeline copies.
 
     Attributes:
-        scope: `mine` for jobs and schemas this user created, `all` for anyone's.
+        scope: `mine` for jobs, pipelines and schemas this user created, `all` for anyone's.
         schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas from other runs are dropped too.
         notebooks: Also delete old `setup_<hash>` and `teardown_<hash>` notebooks from the helpers folder.
-        branch: Delete only jobs whose `pytest_git_branch` tag is this branch.
+        branch: Delete only jobs and pipelines whose `pytest_git_branch` tag is this branch.
         dry_run: Delete nothing, and report what would be deleted.
         report: A file to write the report to, as JSON.
     """
@@ -95,6 +101,7 @@ class SweepReport:
     Attributes:
         dry_run: Whether the sweep only listed what it would delete.
         jobs: The ids of the jobs.
+        pipelines: The ids of the pipelines.
         schemas: The full names of the schemas.
         notebooks: The workspace paths of the notebooks.
         errors: What could not be listed or deleted.
@@ -102,6 +109,7 @@ class SweepReport:
 
     dry_run: bool
     jobs: tuple[int, ...] = ()
+    pipelines: tuple[str, ...] = ()
     schemas: tuple[str, ...] = ()
     notebooks: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
@@ -111,6 +119,7 @@ class SweepReport:
             "version": SWEEP_REPORT_VERSION,
             "dry_run": self.dry_run,
             "jobs": list(self.jobs),
+            "pipelines": list(self.pipelines),
             "schemas": list(self.schemas),
             "notebooks": list(self.notebooks),
             "errors": list(self.errors),
@@ -167,8 +176,9 @@ class SessionState:
         deployed: The root, target, profile and variables of each bundle target that this session deployed.
         swept: Whether this process has swept leftover jobs.
         sweep_dry_run: After a sweep dry run, in the process that ran it and on the xdist controller, a line for each
-            job, schema and notebook it would delete and for each error. `None` without a dry run.
+            job, pipeline, schema and notebook it would delete and for each error. `None` without a dry run.
         kept_jobs: The URL of each ephemeral job that was kept, for the terminal summary.
+        kept_pipelines: The URL of each pipeline copy that was kept.
         kept_schemas: The full name of each temporary schema that was kept.
         cancelled_runs: The number of runs cancelled at session end.
         warned_artifacts: The bundle targets whose wheel artifacts without `dynamic_version` have been warned about.
@@ -202,6 +212,7 @@ class SessionState:
     swept: bool = False
     sweep_dry_run: list[str] | None = None
     kept_jobs: list[str] = field(default_factory=list)
+    kept_pipelines: list[str] = field(default_factory=list)
     kept_schemas: list[str] = field(default_factory=list)
     cancelled_runs: int = 0
     warned_artifacts: set[BundleKey] = field(default_factory=set)
@@ -214,7 +225,7 @@ class SessionState:
     sp_user_roles: dict[tuple[str, str, str], bool | None] = field(default_factory=dict)
 
     def keeps(self, keep: bool, keep_failed: bool, failed: bool) -> bool:
-        """Decide whether to keep a job or schema. The command-line flags win over `Lakeflow`'s arguments.
+        """Decide whether to keep a job, pipeline or schema. The command-line flags win over `Lakeflow`'s arguments.
 
         Args:
             keep: `Lakeflow`'s `keep`.
@@ -240,8 +251,9 @@ class SessionState:
 
         Returns:
             The target's state: its job templates, the errors of jobs that cannot be used, the job ids by bundle key,
-                the helper paths, the workspace user, the wheel artifacts without `dynamic_version`, the bundle root
-                and artifact path, and the local libraries built after their uploaded copies.
+                the pipeline ids by bundle key and the errors of pipelines that are not deployed, the helper paths,
+                the workspace user, the wheel artifacts without `dynamic_version`, the bundle root and artifact path,
+                and the local libraries built after their uploaded copies.
 
         Raises:
             LakeflowError: If setting it up failed earlier in this session.
@@ -303,6 +315,8 @@ def _dry_run_lines(report: Mapping[str, Any], host: str | None) -> list[str]:
     lines: list[str] = []
     for job_id in report["jobs"]:
         lines.append(f"job {host}/jobs/{job_id}")
+    for pipeline_id in report["pipelines"]:
+        lines.append(f"pipeline {host}/pipelines/{pipeline_id}")
     for name in report["schemas"]:
         lines.append(f"schema {name}")
     for path in report["notebooks"]:
@@ -512,6 +526,7 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         check_host(key.target, _workspace_host(bundle_summary), ws.config.host)
         templates, errors = templates_from_summary(ws, bundle_summary)
         job_ids, _ = bundle.job_ids(bundle_summary)
+        pipeline_ids, pipeline_errors = bundle.pipeline_ids(bundle_summary)
         unversioned = bundle.unversioned_wheel_artifacts(bundle_summary)
         artifact_path = bundle.artifact_path_of(bundle_summary)
         stale: list[str] = []
@@ -522,6 +537,9 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         check_host(key.target, _workspace_host(config), ws.config.host)
         templates, errors = bundle.templates_from_validate(config, root, key.sync, lambda path: exists(ws, path))
         job_ids = {}
+        # Validate leaves `${resources.pipelines.<key>.id}` unresolved, and `Lakeflow.pipeline()` needs deploy.
+        pipeline_ids = {}
+        pipeline_errors = {}
         unversioned = bundle.unversioned_wheel_artifacts(config)
         artifact_path = bundle.artifact_path_of(config)
         stale = []
@@ -537,6 +555,8 @@ def setup(ws: WorkspaceClient, key: BundleKey) -> dict[str, Any]:
         "helpers": helper_paths,
         "user": user,
         "job_ids": job_ids,
+        "pipeline_ids": pipeline_ids,
+        "pipeline_errors": pipeline_errors,
         "unversioned_artifacts": unversioned,
         "artifact_path": artifact_path,
         "root": str(root),
@@ -761,18 +781,20 @@ def sweep(
     *,
     user: str | None = None,
 ) -> SweepReport:
-    """Delete ephemeral jobs from other runs that are older than `hours`, and what else `options` asks for.
+    """Delete ephemeral jobs and pipeline copies of other runs older than `hours`, and what else `options` asks for.
 
-    A job tagged `pytest_expires` is old once that time has passed, whatever its age. A failed delete or listing
-    is logged and recorded in the report's `errors`, and the sweep carries on.
+    A job or pipeline tagged `pytest_expires` is old once that time has passed, whatever its age. A pipeline reports
+    no creation time, so its last change counts as its age. A failed delete or listing is logged and recorded in the
+    report's `errors`, and the sweep carries on.
 
     Args:
         ws: The workspace client.
         run_id: The id of this run, whose jobs and schemas are kept.
-        hours: The age after which a job, schema or notebook is deleted.
+        hours: The age after which a job, pipeline, schema or notebook is deleted.
         helpers_folder: The folder of the helper notebooks, for `options.notebooks`.
         options: What else to sweep, and whether only to report it.
-        user: The workspace user whose jobs and schemas are swept with scope `mine`. Looked up when not given.
+        user: The workspace user whose jobs, pipelines and schemas are swept with scope `mine`. Looked up when not
+            given.
 
     Returns:
         What was deleted, or with `options.dry_run` what would have been. Written to `options.report` when set.
@@ -783,9 +805,13 @@ def sweep(
     now_ms = time.time() * 1000
     cutoff_ms = now_ms - hours * HOUR_MS
     errors: list[str] = []
+    rule = _SweepRule(run_id=run_id, user=me, cutoff_ms=cutoff_ms, now_ms=now_ms, branch=options.branch)
     # Each listing finishes before the first delete, so deleting does not disturb the paging.
-    stale_jobs = _stale_jobs(ws, run_id, me, cutoff_ms, now_ms, options.branch, errors)
+    stale_jobs = _stale_jobs(ws, rule, errors)
     deleted_jobs = _delete_each("job", stale_jobs, ws.jobs.delete, options.dry_run, errors)
+    stale_pipelines = _stale_pipelines(ws, rule, errors)
+    drop_pipeline = partial(delete_pipeline, ws)
+    deleted_pipelines = _delete_each("pipeline", stale_pipelines, drop_pipeline, options.dry_run, errors)
     deleted_schemas: list[str] = []
     if options.schemas_catalog:
         stale = _stale_schemas(ws, options.schemas_catalog, run_id, me, cutoff_ms, errors)
@@ -798,19 +824,21 @@ def sweep(
     report = SweepReport(
         dry_run=options.dry_run,
         jobs=tuple(deleted_jobs),
+        pipelines=tuple(deleted_pipelines),
         schemas=tuple(deleted_schemas),
         notebooks=tuple(deleted_notebooks),
         errors=tuple(errors),
     )
     if options.dry_run:
         log.info(
-            "Sweep dry run: would delete %d jobs, %d schemas and %d notebooks",
+            "Sweep dry run: would delete %d jobs, %d pipelines, %d schemas and %d notebooks",
             len(deleted_jobs),
+            len(deleted_pipelines),
             len(deleted_schemas),
             len(deleted_notebooks),
         )
     else:
-        log.info("Swept %d leftover ephemeral jobs", len(deleted_jobs))
+        log.info("Swept %d leftover ephemeral jobs and %d pipeline copies", len(deleted_jobs), len(deleted_pipelines))
         if options.schemas_catalog or options.notebooks:
             log.info("Swept %d leftover schemas and %d notebooks", len(deleted_schemas), len(deleted_notebooks))
     if options.report is not None:
@@ -819,45 +847,91 @@ def sweep(
     return report
 
 
-def _stale_jobs(
-    ws: WorkspaceClient,
-    run_id: str,
-    user: str | None,
-    cutoff_ms: float,
-    now_ms: float,
-    branch: str | None,
-    errors: list[str],
-) -> list[int]:
+@dataclass(frozen=True)
+class _SweepRule:
+    """Which tagged jobs and pipelines a sweep deletes.
+
+    Those of runs other than `run_id`, created by `user` unless it is `None`, tagged with `branch` unless it is
+    `None`, and past their `pytest_expires` time or, without one, created or last changed before the cutoff.
+    """
+
+    run_id: str
+    user: str | None
+    cutoff_ms: float
+    now_ms: float
+    branch: str | None
+
+    def matches(self, creator: str | None, tags: Mapping[str, str], age_from_ms: int | None) -> bool:
+        if self.user is not None and creator != self.user:
+            return False
+        if "pytest" not in tags or "pytest_run_id" not in tags:
+            return False
+        if tags["pytest_run_id"] == self.run_id:
+            return False
+        if self.branch is not None and tags.get("pytest_git_branch") != tag_value(self.branch):
+            return False
+        expiry_ms = _expiry_ms(tags.get(EXPIRES_TAG))
+        if expiry_ms is not None:
+            return expiry_ms < self.now_ms
+        return (age_from_ms or 0) < self.cutoff_ms
+
+
+def _stale_jobs(ws: WorkspaceClient, rule: _SweepRule, errors: list[str]) -> list[int]:
     stale: list[int] = []
     try:
         for job in ws.jobs.list(limit=100):
-            if job.job_id is not None and _is_stale(job, user, run_id, cutoff_ms, now_ms, branch):
+            tags = (job.settings.tags if job.settings else None) or {}
+            if job.job_id is not None and rule.matches(job.creator_user_name, tags, job.created_time):
                 stale.append(job.job_id)
     except DatabricksError as e:
         _record(errors, f"Could not list the jobs: {e}")
     return stale
 
 
-def _is_stale(
-    job: jobs.BaseJob, user: str | None, run_id: str, cutoff_ms: float, now_ms: float, branch: str | None
-) -> bool:
-    """Whether `job` is an ephemeral job from another run that is past its expiry, or else created before the cutoff.
+def _stale_pipelines(ws: WorkspaceClient, rule: _SweepRule, errors: list[str]) -> list[str]:
+    """The pipeline copies that `rule` matches, by the tags and the last change that `pipelines.get` reports."""
+    candidates: list[str] = []
+    try:
+        for info in ws.pipelines.list_pipelines(filter=PIPELINE_FILTER):
+            if info.pipeline_id is None:
+                continue
+            if rule.user is not None and info.creator_user_name != rule.user:
+                continue
+            candidates.append(info.pipeline_id)
+    except DatabricksError as e:
+        _record(errors, f"Could not list the pipelines: {e}")
+    stale: list[str] = []
+    for pipeline_id in candidates:
+        try:
+            pipeline = ws.pipelines.get(pipeline_id)
+        except NotFound:
+            continue
+        except DatabricksError as e:
+            _record(errors, f"Could not read pipeline {pipeline_id}: {e}")
+            continue
+        tags = (pipeline.spec.tags if pipeline.spec else None) or {}
+        if rule.matches(pipeline.creator_user_name, tags, pipeline.last_modified):
+            stale.append(pipeline_id)
+    return stale
 
-    `user` `None` stands for any creator, and `branch` `None` for any branch.
+
+def delete_pipeline(ws: WorkspaceClient, pipeline_id: str) -> None:
+    """Delete a pipeline and the tables it publishes.
+
+    Deleting a pipeline that publishes to Unity Catalog keeps its tables unless the request sets `cascade`, whatever
+    the SDK's docstring says: a materialised view was still there 27 seconds after a delete without it, and gone
+    3 seconds after one with `cascade=True`. `force` lets the delete go ahead when cleaning up the tables fails. Each
+    is passed when the installed databricks-sdk takes it.
+
+    Args:
+        ws: The workspace client.
+        pipeline_id: The pipeline's id.
     """
-    if user is not None and job.creator_user_name != user:
-        return False
-    tags = (job.settings.tags if job.settings else None) or {}
-    if "pytest" not in tags or "pytest_run_id" not in tags:
-        return False
-    if tags["pytest_run_id"] == run_id:
-        return False
-    if branch is not None and tags.get("pytest_git_branch") != tag_value(branch):
-        return False
-    expiry_ms = _expiry_ms(tags.get(EXPIRES_TAG))
-    if expiry_ms is not None:
-        return expiry_ms < now_ms
-    return (job.created_time or 0) < cutoff_ms
+    flags: dict[str, bool] = {}
+    for name in ("cascade", "force"):
+        if name in PIPELINE_DELETE_PARAMETERS:
+            flags[name] = True
+    ws.pipelines.delete(pipeline_id, **flags)
 
 
 def _expiry_ms(value: str | None) -> float | None:

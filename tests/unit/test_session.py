@@ -528,6 +528,8 @@ class TestSetup:
             "helpers": {"set_values": f"{folder}/set_values", "get_values": f"{folder}/get_values"},
             "user": "someone@example.com",
             "job_ids": {"my_job": fake_cli.deployed["my_job"]},
+            "pipeline_ids": {},
+            "pipeline_errors": {},
             "unversioned_artifacts": [],
             "artifact_path": "",
             "root": str(bundle_dir),
@@ -546,7 +548,7 @@ class TestSetup:
         assert [call[:2] for call in fake_cli.calls] == [["--version"], ["bundle", "validate"]]
         assert state["templates"] == {"other": {"name": "o", "tasks": [{"task_key": "t"}]}}
         assert state["helpers"]["get_values"] == "/Shared/helpers/get_values"
-        assert state["job_ids"] == {}
+        assert (state["job_ids"], state["pipeline_ids"], state["pipeline_errors"]) == ({}, {}, {})
 
     @pytest.mark.parametrize(("sync", "stale"), [("none", [f"dist/{WHEEL}"]), ("deploy", [])])
     def test_setup_records_artifact_path_and_stale_uploads(

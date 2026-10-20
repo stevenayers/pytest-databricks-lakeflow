@@ -25,15 +25,15 @@ All arguments are keyword-only.
 | `performance_optimized` | `False` | Run every ephemeral job with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. |
 | `side_effects` | `"neutralise"` | `"neutralise"` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral job, so test runs do not email snapshots or notify subscribers. `"keep"` leaves them as the template has them. Alert tasks and Power BI tasks are left as they are in both modes; disable them with `disable=`. Any other value raises `ValueError`. |
 | `environment_version` | `None` | The serverless environment version of every environment copied from the template, such as `"5"`. Environments whose spec sets `base_environment` keep it, and the helper environment `__pytest_serverless` keeps `helpers_environment_version`. A test overrides it for one copy with `environments=`, see [Change the settings before the job is created](job-tests.md#change-the-settings-before-the-job-is-created). |
-| `budget_policy_id` | `None` | The budget policy of every ephemeral job. |
+| `budget_policy_id` | `None` | The budget policy of every ephemeral job and pipeline copy. A pipeline copy without it keeps the deployed pipeline's. |
 | `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, stub, probe and nested `for_each_task` tasks included, so that tests skip cluster start-up. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. |
 | `single_node` | `False` | Make every job cluster and every task's `new_cluster`, nested `for_each_task` tasks and the `helpers_compute` cluster included, a single node cluster, so that runs start faster and cost one node: `num_workers` becomes 0, `autoscale` is removed, `spark.master` (`local[*, 4]`) and `spark.databricks.cluster.profile` (`singleNode`) are merged into `spark_conf` and `ResourceClass` (`SingleNode`) into `custom_tags`. Raises `LakeflowError` naming the cluster when one uses standard access mode (`USER_ISOLATION` or `DATA_SECURITY_MODE_STANDARD`), because single node compute needs dedicated access mode. Serverless tasks are left alone, and with `existing_cluster_id` there is no cluster left to change. |
 | `allow_undeclared_params` | `False` | Allow job parameters that the job does not declare. |
 | `test_marker` | `False` | Declare a `__pytest_test_id` job parameter on every ephemeral job, with the test node id as its default, so job code can tell that it runs under test. See [Writing job tests](job-tests.md#make-a-job). |
 | `notebook_export` | `"failed"` | Which notebook tasks to read with `jobs.export_run` after a run, into `TaskRun.notebook`: `"failed"` exports each notebook task that ran and did not succeed, `"always"` every notebook task that ran, `"never"` none. Any other value raises `ValueError`. See [Read what a notebook printed](job-tests.md#read-what-a-notebook-printed). |
-| `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs. |
-| `keep` | `False` | Keep every ephemeral job and temporary schema. |
-| `keep_failed` | `True` | Keep the ephemeral job when its test fails. |
+| `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs and pipeline copies. |
+| `keep` | `False` | Keep every ephemeral job, pipeline copy and temporary schema. |
+| `keep_failed` | `True` | Keep the ephemeral job and pipeline copies when their test fails. |
 | `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, or, with `sync="none"`, a local wheel built after its uploaded copy, instead of the `UserWarning` the plugin emits once per session for each. Later lookups fail with the same message. See [Limitations](limitations.md). |
 | `permissions` | `None` | The `access_control_list` given to every ephemeral job when it is created, so that people other than its creator can open it. Each entry is a `jobs.JobAccessControlRequest` or a dict such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. `IS_OWNER` raises `ValueError`: the creator owns every copy, so use `CAN_MANAGE`. See [Permissions](#permissions). |
 | `modify_settings` | `None` | Called with each job's `JobSettings` and the test's `pytest.Item` just before the job is created. |
@@ -64,15 +64,15 @@ These apply to one pytest run and win over the matching arguments.
 
 | Flag | Meaning |
 | --- | --- |
-| `--lakeflow-keep` | Keep every ephemeral job and temporary schema. |
-| `--lakeflow-keep-failed` | Keep the ephemeral job when its test fails, even with `Lakeflow(keep_failed=False)`. |
-| `--no-lakeflow-keep-failed` | Delete the ephemeral job even when its test fails. |
-| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job with `pytest_expires`, an ISO 8601 UTC time this far ahead, in whole hours (`h`) or days (`d`). The sweep keeps a tagged job until then, whatever its age, and deletes it once that time has passed. `--lakeflow-sweep-notebooks` does not read the tag, see [sweeping leftovers](#sweeping-leftovers). |
-| `--lakeflow-sweep` | At session start, delete your own jobs tagged `pytest` from other runs that are older than `sweep_hours`. |
-| `--lakeflow-sweep-scope=all` | Sweep jobs and schemas whoever created them, not only your own. The default is `mine`. |
+| `--lakeflow-keep` | Keep every ephemeral job, pipeline copy and temporary schema. |
+| `--lakeflow-keep-failed` | Keep the ephemeral job and pipeline copies when their test fails, even with `Lakeflow(keep_failed=False)`. |
+| `--no-lakeflow-keep-failed` | Delete the ephemeral job and pipeline copies even when their test fails. |
+| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job and pipeline copy with `pytest_expires`, an ISO 8601 UTC time this far ahead, in whole hours (`h`) or days (`d`). The sweep keeps a tagged job or pipeline until then, whatever its age, and deletes it once that time has passed. `--lakeflow-sweep-notebooks` does not read the tag, see [sweeping leftovers](#sweeping-leftovers). |
+| `--lakeflow-sweep` | At session start, delete your own jobs tagged `pytest`, and your own `[pytest]` pipeline copies, from other runs that are older than `sweep_hours`. |
+| `--lakeflow-sweep-scope=all` | Sweep jobs, pipeline copies and schemas whoever created them, not only your own. The default is `mine`. |
 | `--lakeflow-sweep-schemas=<catalog>` | Also drop the temporary `pytest_<run id>_<8 hex digits>` schemas of other runs in that catalog that are older than `sweep_hours`. |
 | `--lakeflow-sweep-notebooks` | Also delete the `setup_<hash>` and `teardown_<hash>` notebooks in the helpers folder that were last uploaded more than `sweep_hours` ago. |
-| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs whose `pytest_git_branch` tag is that branch. |
+| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs and pipeline copies whose `pytest_git_branch` tag is that branch. |
 | `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete. |
 | `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file, relative to the directory pytest was started in. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
@@ -84,15 +84,17 @@ These apply to one pytest run and win over the matching arguments.
 `--lakeflow-sweep` runs once per session, in the process that sets up the first bundle target, and every other `--lakeflow-sweep-*` flag needs it. It only ever deletes what the plugin makes, recognised by name and tags:
 
 - Jobs tagged `pytest` and `pytest_run_id`, from a run other than this one, created more than `sweep_hours` ago. A job tagged `pytest_expires` is deleted once that time has passed instead, whatever its age. With the default scope only jobs you created are considered; `--lakeflow-sweep-scope=all` considers everyone's, and a delete you are not allowed to make is recorded as an error.
+- Pipelines named `[pytest] ...` and tagged `pytest` and `pytest_run_id`, from a run other than this one, last changed more than `sweep_hours` ago, or past their `pytest_expires` time, by you unless the scope is `all`, and tagged with the branch under `--lakeflow-sweep-branch`. The Pipelines API lists pipelines without their tags or creation time, so the sweep lists those whose name starts with `[pytest] ` and reads each one, and a pipeline's age is the time since it last changed. A copy is deleted with its tables, as at teardown.
 - With `--lakeflow-sweep-schemas=<catalog>`, schemas named `pytest_<run id>_<8 hex digits>`, from another run, created more than `sweep_hours` ago, by you unless the scope is `all`. Schemas carry no tags, so `--lakeflow-keep-ttl` cannot protect them, and `--lakeflow-sweep-branch` cannot be combined with this flag.
 - With `--lakeflow-sweep-notebooks`, notebooks in the helpers folder named exactly `setup_` or `teardown_` followed by 12 hexadecimal digits, last uploaded more than `sweep_hours` ago. Every session that uses a setup or teardown function uploads its notebook again, so a notebook in use stays young. `set_values`, `get_values` and any other name are never deleted. `--lakeflow-sweep-branch` cannot be combined with this flag either. A notebook is judged by its upload time alone, not by the `pytest_expires` tag of the jobs that use it, so a job kept with `--lakeflow-keep-ttl` for longer than `sweep_hours` can lose its setup or teardown notebook to a later `--lakeflow-sweep-notebooks`, and a repair or rerun of it then fails. Leave the flag off while you still need such a job.
 
-A failed delete or listing is logged at WARNING and the sweep carries on. Any other error, such as a `--lakeflow-sweep-report` path that cannot be written, ends the sweep with a `UserWarning` (`Lakeflow sweep failed: ...`) in the warnings summary, raised once, by the process that swept. The sweep only tidies up, so no test fails because of it, and under xdist the other workers carry on as if it had succeeded. To see first what a sweep would delete, run it with `--lakeflow-sweep-dry-run`: nothing is deleted, and the terminal summary lists each job, schema and notebook it would delete, then any error:
+A failed delete or listing is logged at WARNING and the sweep carries on. Any other error, such as a `--lakeflow-sweep-report` path that cannot be written, ends the sweep with a `UserWarning` (`Lakeflow sweep failed: ...`) in the warnings summary, raised once, by the process that swept. The sweep only tidies up, so no test fails because of it, and under xdist the other workers carry on as if it had succeeded. To see first what a sweep would delete, run it with `--lakeflow-sweep-dry-run`: nothing is deleted, and the terminal summary lists each job, pipeline, schema and notebook it would delete, then any error:
 
 ```text
 =================================== lakeflow ===================================
 lakeflow: sweep dry run deleted nothing; it would delete:
   job https://adb-123.azuredatabricks.net/jobs/1001
+  pipeline https://adb-123.azuredatabricks.net/pipelines/0b9e2c1e-5d4f-4c3a-9b8e-7f6a5d4c3b2a
   schema dev_sandbox.pytest_ab12cd34_9f0e1d2c
   notebook /Users/someone@example.com/.pytest-databricks-lakeflow/setup_3f9a1c07b2d4
 ```
@@ -104,6 +106,7 @@ lakeflow: sweep dry run deleted nothing; it would delete:
   "version": 1,
   "dry_run": true,
   "jobs": [1001],
+  "pipelines": ["0b9e2c1e-5d4f-4c3a-9b8e-7f6a5d4c3b2a"],
   "schemas": ["dev_sandbox.pytest_ab12cd34_9f0e1d2c"],
   "notebooks": ["/Users/someone@example.com/.pytest-databricks-lakeflow/setup_3f9a1c07b2d4"],
   "errors": []

@@ -135,15 +135,34 @@ def job_ids(bundle_summary: Mapping[str, Any]) -> tuple[dict[str, int], dict[str
     Returns:
         The job ids by resource key, and an error for each job that is defined but not deployed.
     """
-    ids: dict[str, int] = {}
+    ids, errors = _deployed_ids(bundle_summary, "jobs", "Job")
+    return {key: int(job_id) for key, job_id in ids.items()}, errors
+
+
+def pipeline_ids(bundle_summary: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """Read deployed pipeline ids from `bundle summary` output, which prints a pipeline as it prints a job.
+
+    Args:
+        bundle_summary: The parsed output of `databricks bundle summary -o json`.
+
+    Returns:
+        The pipeline ids by resource key, and an error for each pipeline that is defined but not deployed.
+    """
+    return _deployed_ids(bundle_summary, "pipelines", "Pipeline")
+
+
+def _deployed_ids(bundle_summary: Mapping[str, Any], kind: str, noun: str) -> tuple[dict[str, str], dict[str, str]]:
+    ids: dict[str, str] = {}
     errors: dict[str, str] = {}
-    for key, job in bundle_summary.get("resources", {}).get("jobs", {}).items():
-        if job.get("modified_status") == "deleted":
+    for key, resource in bundle_summary.get("resources", {}).get(kind, {}).items():
+        if resource.get("modified_status") == "deleted":
             continue
-        if job.get("id"):
-            ids[key] = int(job["id"])
+        if resource.get("id"):
+            ids[key] = str(resource["id"])
         else:
-            errors[key] = f'Job {key!r} is not deployed. Run `databricks bundle deploy` or use Lakeflow(sync="deploy").'
+            errors[key] = (
+                f'{noun} {key!r} is not deployed. Run `databricks bundle deploy` or use Lakeflow(sync="deploy").'
+            )
     return ids, errors
 
 

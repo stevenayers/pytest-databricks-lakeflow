@@ -50,6 +50,9 @@ HTML_TAG = re.compile(r"<[^>]*>")
 HTML_RESULTS = frozenset({"html", "htmlSandbox"})
 SKIPPED_SUMMARY = "Command skipped"
 RUN_OUTPUT_PATH = "/api/2.2/jobs/runs/get-output"
+# An update's "started an update" event is logged a few milliseconds before the update's creation time (7 ms on the
+# workspace), so the events of an update are read from a margin before it.
+EVENT_LEAD_MS = 60_000
 
 
 def _first_line(text: str, limit: int = 200) -> str:
@@ -573,17 +576,18 @@ def _list(value: object) -> list[Any]:
 
 @dataclass(frozen=True)
 class PipelineUpdate:
-    """The update of a pipeline that a pipeline task started.
+    """An update of a pipeline: the one a pipeline task started, or one that `EphemeralPipeline.run()` started.
 
-    The pipeline is the deployed one, not a copy. The Jobs API does not say which update a pipeline task started, so
-    the plugin lists the pipeline's updates once the run finished and takes the one created while the task ran,
-    preferring one whose `cause` is `JOB_TASK`.
+    The Jobs API does not say which update a pipeline task started, so the plugin lists the pipeline's updates once
+    the run finished and takes the one created while the task ran, preferring one whose `cause` is `JOB_TASK`. The
+    pipeline is the one the task points at: the deployed one, or a copy with `pipelines="copy"`.
 
     Attributes:
         pipeline_id: The pipeline's id.
         update_id: The update's id.
         state: The update's state, such as `COMPLETED`, `FAILED` or `CANCELED`.
-        cause: What started the update: `JOB_TASK` for an update that a pipeline task started.
+        cause: What started the update: `JOB_TASK` for an update that a pipeline task started, `API_CALL` for one
+            that `EphemeralPipeline.run()` started.
         full_refresh: Whether the update was a full refresh of every table.
     """
 
@@ -594,6 +598,31 @@ class PipelineUpdate:
     full_refresh: bool
     _ws: WorkspaceClient = field(repr=False, compare=False)
     _since: int = field(repr=False, compare=False)
+
+    @classmethod
+    def from_info(cls, ws: WorkspaceClient, info: pipelines.UpdateInfo, *, since: int | None = None) -> PipelineUpdate:
+        """Build the update from what `pipelines.get_update` or `pipelines.list_updates` reports.
+
+        Args:
+            ws: The workspace client, which `events()` reads the events with.
+            info: The update as the Pipelines API reports it.
+            since: The time in epoch milliseconds before which the update logged no event, so `events()` stops
+                paging there. Defaults to a minute before the update was created.
+
+        Returns:
+            The update.
+        """
+        if since is None:
+            since = (info.creation_time or 0) - EVENT_LEAD_MS
+        return cls(
+            pipeline_id=info.pipeline_id or "",
+            update_id=info.update_id or "",
+            state=_enum(info.state),
+            cause=_enum(info.cause),
+            full_refresh=bool(info.full_refresh),
+            _ws=ws,
+            _since=since,
+        )
 
     def events(self, level: str | None = None) -> list[pipelines.PipelineEvent]:
         """Read the events the update logged, newest first, with `pipelines.list_pipeline_events`.
@@ -1590,15 +1619,7 @@ def _pipeline_update(ws: WorkspaceClient, task: jobs.RunTask, pipeline_id: str) 
         if info.cause == pipelines.UpdateInfoCause.JOB_TASK:
             chosen = info
             break
-    return PipelineUpdate(
-        pipeline_id=pipeline_id,
-        update_id=chosen.update_id or "",
-        state=_enum(chosen.state),
-        cause=_enum(chosen.cause),
-        full_refresh=bool(chosen.full_refresh),
-        _ws=ws,
-        _since=start,
-    )
+    return PipelineUpdate.from_info(ws, chosen, since=start)
 
 
 def _updates_since(ws: WorkspaceClient, pipeline_id: str, start: int) -> list[pipelines.UpdateInfo]:

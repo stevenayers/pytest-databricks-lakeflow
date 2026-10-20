@@ -194,6 +194,28 @@ class TestJobIds:
         assert bundle.job_ids({"resources": {}}) == ({}, {})
 
 
+class TestPipelineIds:
+    """Reading deployed pipeline ids from `bundle summary`, which prints a pipeline as it prints a job."""
+
+    def test_pipeline_ids_from_summary(self) -> None:
+        deployed = "0b9e2c1e-0000-4000-8000-000000000001"
+        summary = {
+            "resources": {
+                "pipelines": {
+                    "deployed": {"id": deployed, "url": f"https://host/pipelines/{deployed}", "name": "x"},
+                    "removed": {"id": "1", "url": "https://host/pipelines/1", "modified_status": "deleted"},
+                    "new": {"name": "y", "modified_status": "created"},
+                }
+            }
+        }
+        ids, errors = bundle.pipeline_ids(summary)
+        assert ids == {"deployed": deployed}
+        assert errors == {
+            "new": "Pipeline 'new' is not deployed. Run `databricks bundle deploy` or use Lakeflow(sync=\"deploy\")."
+        }
+        assert bundle.pipeline_ids({"resources": {}}) == ({}, {})
+
+
 class TestUnversionedWheelArtifacts:
     """Finding the wheel artifacts that serverless may run a cached build of, from `bundle summary` or `validate`."""
 
