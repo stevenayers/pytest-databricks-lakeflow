@@ -1,0 +1,24 @@
+resources:
+  jobs:
+    dbt_job:
+      name: dbt_job
+      description: A serverless dbt task for the pytest-databricks-lakeflow integration tests.
+      environments:
+        - environment_key: dbt
+          spec:
+            environment_version: "4"
+            dependencies:
+              - dbt-databricks>=1.8.0,<2.0.0
+      tasks:
+        - task_key: dbt_build
+          environment_key: dbt
+          dbt_task:
+            project_directory: ../dbt
+            # The platform writes profiles.yml from these. The tests build into a schema of their own through the
+            # target_schema dbt variable, which the project's generate_schema_name macro reads.
+            warehouse_id: ${var.warehouse_id}
+            catalog: ${var.catalog}
+            schema: lakeflow_dbt
+            commands:
+              - dbt deps
+              - dbt build

@@ -54,6 +54,14 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 
 ::: pytest_databricks_lakeflow.TaskRun
 
+## `DbtArtifacts`
+
+::: pytest_databricks_lakeflow.DbtArtifacts
+
+## `DbtResult`
+
+::: pytest_databricks_lakeflow.DbtResult
+
 ## `ForEachStats`
 
 ::: pytest_databricks_lakeflow.ForEachStats
