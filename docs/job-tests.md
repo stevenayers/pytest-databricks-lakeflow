@@ -998,7 +998,7 @@ Parameters that `modify_settings` declares are accepted by `params`. `run_finish
 
 ## Check a job without running it
 
-`lakeflow.check(key)` lints the job's template and returns one message per wiring mistake, without creating or running anything. Each message starts with `Task '<key>':`, in the order of the job's tasks:
+`lakeflow.check(key)` lints the job's template and returns one message per wiring mistake, without creating or running anything. The messages of tasks come first, each starting with `Task '<key>':`, in the order of the job's tasks, then those of environments (`Environment '<key>':`) and of job parameters (`Parameter '<name>':`):
 
 ```python
 def test_my_example_job_is_wired(lakeflow: Lakeflow) -> None:
@@ -1013,7 +1013,31 @@ It reports:
 - a `depends_on` entry naming a task that is not in the job;
 - `max_retries`, `min_retry_interval_millis` or `retry_on_timeout` on a `for_each_task`, which cannot be retried. Set them on its nested task.
 
-`bundle validate` passes all of these. `jobs/create` and `jobs/reset` refuse the first three and `max_retries` on a `for_each_task`, one at a time, so with the default `sync="deploy"` the deploy fails on them before any test runs; it accepts the other two retry settings there, to no effect. With `Lakeflow(sync="sync")` or `Lakeflow(sync="none")`, `check` lints the job as `bundle validate` reads it, so it finds them all at once before anything is deployed or created. It uses the template the session has already loaded and works outside a test too, for example in a session-scoped fixture. It raises `KeyError` and `LakeflowBundleError` as `lakeflow.template(key)` does.
+It also applies the rules that `rules=` names, from `ALL_RULES`. By default it applies `DEFAULT_RULES`, every rule but `equal_to`:
+
+| Rule | Reports | Skipped when |
+|---|---|---|
+| `wheel` | a `python_wheel_task` whose package has no wheel under the bundle's `dist/`, or whose `entry_point` is neither a `[console_scripts]` entry of the newest wheel of that package nor a name that its `<package_name>/__init__.py` defines, which the platform calls when there is no such entry point. Tasks nested in a `for_each_task` are checked too. | `dist/` holds no wheel, as when the dependencies come from PyPI or a Volume |
+| `library` | a `libraries` `whl` or `jar`, a `spark_python_task.python_file` or an environment dependency that starts with `/` and does not exist in the workspace or the Volume. Each path is looked up with one read call. | the path is relative or local, as `bundle validate` leaves wheel and JAR paths under `sync="sync"` and `"none"` |
+| `dash` | each task key with a dash that a task refers to with `{{tasks.<key>.…}}`, once per task, since task references do not support dashes | |
+| `trigger` | each distinct `{{job.trigger.*}}` reference in a task or a job parameter's default, which a test's run-now run does not resolve as the trigger would: set its value with `trigger=` on `job()` or `task()`, see [Simulate a trigger](#simulate-a-trigger) | |
+| `equal_to` | an `EQUAL_TO` or `NOT_EQUAL` condition with a number or a task value reference as an operand. Off by default: these operators compare text, so `"7"` equals `"7"` and only a number written another way, such as `7.0` or `07`, misfires, which the template cannot show | |
+
+```python
+from pytest_databricks_lakeflow import ALL_RULES, DEFAULT_RULES, Lakeflow
+
+
+def test_my_example_job_is_wired_without_trigger_references(lakeflow: Lakeflow) -> None:
+    assert lakeflow.check("my_example_job", rules=DEFAULT_RULES - {"trigger"}) == []
+
+
+def test_my_example_job_compares_text(lakeflow: Lakeflow) -> None:
+    assert lakeflow.check("my_example_job", rules=ALL_RULES) == []
+```
+
+A name outside `ALL_RULES` raises `LakeflowError`. `check` reads the workspace for the `library` rule and the bundle's `dist/` for the `wheel` rule, and writes nothing.
+
+`bundle validate` passes all of these, see [Why not rely on `bundle validate`?](limitations.md#why-not-rely-on-bundle-validate). Of the four that always apply, `jobs/create` and `jobs/reset` refuse the first three and `max_retries` on a `for_each_task`, one at a time, so with the default `sync="deploy"` the deploy fails on them before any test runs; it accepts the other two retry settings there, to no effect. With `Lakeflow(sync="sync")` or `Lakeflow(sync="none")`, `check` lints the job as `bundle validate` reads it, so it finds them all at once before anything is deployed or created. It uses the template the session has already loaded and works outside a test too, for example in a session-scoped fixture. It raises `KeyError` and `LakeflowBundleError` as `lakeflow.template(key)` does.
 
 `pytest --lakeflow-check` runs `check` on every job of the bundle without a test of your own. Each `databricks.yml` that pytest collects becomes one test per job, `databricks.yml::<key>`, that passes when `check` finds nothing and fails with its messages otherwise, or with the `LakeflowBundleError` of a job that cannot be used as a template, such as one that is not deployed. The tests get the `lakeflow` marker and create, run and delete no job, so `-k` and `--deselect` pick jobs by key:
 

@@ -62,6 +62,10 @@ These apply to one pytest run and win over the matching `Lakeflow` arguments. Th
 
 ::: pytest_databricks_lakeflow.ForEachError
 
+## `ALL_RULES` and `DEFAULT_RULES`
+
+The names of the rules that `Lakeflow.check(key, rules=...)` applies on top of the four it always applies, as frozensets: `ALL_RULES` is `wheel`, `library`, `dash`, `trigger` and `equal_to`, and `DEFAULT_RULES`, what `check` applies when `rules` is `None`, is every rule but `equal_to`. See [Check a job without running it](job-tests.md#check-a-job-without-running-it).
+
 ## `Stub`
 
 ::: pytest_databricks_lakeflow.Stub

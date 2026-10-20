@@ -30,6 +30,7 @@ from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport, build_job_run
 from pytest_databricks_lakeflow.settings import (
+    DEFAULT_RULES,
     SIDE_EFFECTS,
     Helpers,
     RunAs,
@@ -293,27 +294,41 @@ class Lakeflow:
             raise KeyError(f"No job {key!r} in the bundle. Available: {sorted(state['templates'])}")
         return jobs.JobSettings.from_dict(copy.deepcopy(state["templates"][key]))
 
-    def check(self, key: str) -> list[str]:
+    def check(self, key: str, rules: Collection[str] | None = None) -> list[str]:
         """Find the wiring mistakes in a bundle job's template, without creating or running anything.
 
         It reports a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose
         task is not upstream of the task that refers to it, a `depends_on` task that is not in the job, and retry
-        settings on a `for_each_task`, which belong on its nested task. `bundle validate` passes all of them. It
-        lints the template the session loaded: the deployed job, or the `bundle validate` output under
-        `sync="sync"` or `"none"`. It works outside a test, for example in a session-scoped fixture.
+        settings on a `for_each_task`, which belong on its nested task. `bundle validate` passes all of them. The
+        rules that `rules` names report more: `wheel` a `python_wheel_task` entry point that the newest built wheel
+        of its package under the bundle's `dist` does not have, `library` a library, Python file or environment
+        dependency path that starts with `/` and does not exist in the workspace, `dash` a task reference to a task
+        key with a dash, `trigger` a `{{job.trigger.*}}` reference, which a test's run does not resolve as its
+        trigger would, and the opt-in `equal_to` an `EQUAL_TO` or `NOT_EQUAL` condition on a number or a task
+        value, which compares text. It lints the template the session loaded: the deployed job, or the
+        `bundle validate` output under `sync="sync"` or `"none"`. It works outside a test, for example in a
+        session-scoped fixture, and only reads the workspace.
 
         Args:
             key: The bundle resource key of the job.
+            rules: The named rules to apply, from `ALL_RULES`. Defaults to `DEFAULT_RULES`, every rule but
+                `equal_to`.
 
         Returns:
-            One message per problem, each starting with `Task '<key>':`, in the order of the job's tasks. Empty if
-            there are none.
+            One message per problem, in the order of the job's tasks, each starting with `Task '<key>':`, then the
+            missing dependencies of its environments, each starting with `Environment '<key>':`, and the trigger
+            references in its job parameters, each starting with `Parameter '<name>':`. Empty if there are none.
 
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowBundleError: If the job cannot be used as a template, for example because it is not deployed.
+            LakeflowError: If `rules` names a rule that is not in `ALL_RULES`.
         """
-        return lint(self.template(key))
+        if rules is None:
+            rules = DEFAULT_RULES
+        template = self.template(key)
+        root = session.resolve_root(self.bundle_root, session.current().rootpath)
+        return lint(template, rules=rules, bundle_root=root, exists=partial(session.exists, self.ws))
 
     def job(
         self,
