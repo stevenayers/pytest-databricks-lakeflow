@@ -38,6 +38,12 @@ ALERT_FAILED = (
 # The one filter shape the plugin sends to `list_pipeline_events`. The platform refuses `level="ERROR"` with
 # "Invalid filter expression"; the value must be in single quotes.
 LEVEL_FILTER = re.compile(r"^level='(?P<level>[A-Z]+)'$")
+# The one filter shape the plugin sends to `list_pipelines`. The platform takes `[` and `]` in it literally.
+NAME_FILTER = re.compile(r"^name LIKE '(?P<prefix>[^%']*)%'$")
+# The platform refuses a longer pipeline name with "Name cannot be longer than 255 characters.", counting characters,
+# not bytes.
+MAX_PIPELINE_NAME_CHARS = 255
+PIPELINE_SPEC_FIELDS = frozenset(pipelines.PipelineSpec.__dataclass_fields__)
 
 
 class FakeJobs:
@@ -62,6 +68,7 @@ class FakeJobs:
         self.export_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.delete_log: Path | None = None
+        self.deletions: list[str] = []
         self.list_calls = 0
         self.gets: list[int] = []
         self.updated: list[tuple[int, jobs.JobSettings | None]] = []
@@ -121,6 +128,7 @@ class FakeJobs:
         if job_id in self.delete_errors:
             raise self.delete_errors[job_id]
         self.deleted.append(job_id)
+        self.deletions.append(f"job {job_id}")
         self.settings.pop(job_id, None)
         if self.delete_log is not None:
             with self.delete_log.open("a") as f:
@@ -337,6 +345,7 @@ class FakeSchemas:
         self.deleted: list[str] = []
         self.listed: list[catalog.SchemaInfo] = []
         self.list_errors: dict[str, Exception] = {}
+        self.deletions: list[str] = []
 
     def create(self, name: str, catalog_name: str, **kwargs: Any) -> SimpleNamespace:
         self.created.append(f"{catalog_name}.{name}")
@@ -345,6 +354,7 @@ class FakeSchemas:
     def delete(self, full_name: str, *, force: bool | None = None) -> None:
         assert force
         self.deleted.append(full_name)
+        self.deletions.append(f"schema {full_name}")
 
     def list(self, catalog_name: str, **kwargs: Any) -> Iterator[catalog.SchemaInfo]:
         if catalog_name in self.list_errors:
@@ -359,6 +369,11 @@ class FakePipelines:
     set; a `page_token` is the position of the page's first update. `events` holds the events `list_pipeline_events`
     yields, newest first as the platform returns them, applying a `level='...'` filter. `read_events` lists the id of
     every event yielded, so a test can tell how far a caller paged.
+
+    `specs` holds the spec `get` returns for each pipeline, which `create` adds to under the ids `p-1000`, `p-1001`
+    and so on, and `delete` removes from. `update_polls` holds the updates `get_update` reports for a pipeline, one
+    per call and then the last one again, like `FakeJobs.get_run`; without them every update has `COMPLETED`.
+    `listed` holds what `list_pipelines` lists, applying a `name LIKE '<prefix>%'` filter.
     """
 
     def __init__(self) -> None:
@@ -367,6 +382,92 @@ class FakePipelines:
         self.events: dict[str, list[pipelines.PipelineEvent]] = {}
         self.calls: list[dict[str, Any]] = []
         self.read_events: list[str | None] = []
+        self.specs: dict[str, pipelines.PipelineSpec] = {}
+        self.last_modified: dict[str, int] = {}
+        self.creators: dict[str, str] = {}
+        self.created: list[dict[str, Any]] = []
+        self.deleted: list[dict[str, Any]] = []
+        self.delete_errors: dict[str, Exception] = {}
+        self.deletions: list[str] = []
+        self.stopped: list[str] = []
+        self.start_update_calls: list[dict[str, Any]] = []
+        self.update_polls: dict[str, list[pipelines.UpdateInfo]] = {}
+        self.listed: list[pipelines.PipelineStateInfo] = []
+        self.list_filters: list[str | None] = []
+        self._ids = itertools.count(1000)
+        self._update_ids = itertools.count(1)
+
+    def get(self, pipeline_id: str) -> pipelines.GetPipelineResponse:
+        if pipeline_id not in self.specs:
+            raise NotFound(f"The specified pipeline {pipeline_id} was not found.")
+        spec = self.specs[pipeline_id]
+        return pipelines.GetPipelineResponse(
+            pipeline_id=pipeline_id,
+            name=spec.name,
+            spec=spec,
+            creator_user_name=self.creators.get(pipeline_id, "someone@example.com"),
+            last_modified=self.last_modified.get(pipeline_id),
+        )
+
+    def create(self, **kwargs: Any) -> pipelines.CreatePipelineResponse:
+        if len(kwargs.get("name") or "") > MAX_PIPELINE_NAME_CHARS:
+            raise InvalidParameterValue("Name cannot be longer than 255 characters.")
+        self.created.append(kwargs)
+        pipeline_id = f"p-{next(self._ids)}"
+        fields: dict[str, Any] = {key: value for key, value in kwargs.items() if key in PIPELINE_SPEC_FIELDS}
+        fields["id"] = pipeline_id
+        self.specs[pipeline_id] = pipelines.PipelineSpec(**fields)
+        self.last_modified[pipeline_id] = int(time.time() * 1000)
+        return pipelines.CreatePipelineResponse(pipeline_id=pipeline_id)
+
+    def delete(self, pipeline_id: str, *, cascade: bool | None = None, force: bool | None = None) -> None:
+        if pipeline_id in self.delete_errors:
+            raise self.delete_errors[pipeline_id]
+        self.deleted.append({"pipeline_id": pipeline_id, "cascade": cascade, "force": force})
+        self.deletions.append(f"pipeline {pipeline_id}")
+        self.specs.pop(pipeline_id, None)
+
+    def start_update(self, pipeline_id: str, **kwargs: Any) -> pipelines.StartUpdateResponse:
+        if pipeline_id not in self.specs:
+            raise NotFound(f"The specified pipeline {pipeline_id} was not found.")
+        self.start_update_calls.append({"pipeline_id": pipeline_id, **kwargs})
+        return pipelines.StartUpdateResponse(update_id=f"u-{next(self._update_ids)}")
+
+    def get_update(self, pipeline_id: str, update_id: str) -> pipelines.GetUpdateResponse:
+        polls = self.update_polls.get(pipeline_id)
+        if polls:
+            info = polls.pop(0) if len(polls) > 1 else polls[0]
+        else:
+            info = pipelines.UpdateInfo(state=pipelines.UpdateInfoState.COMPLETED)
+        update = replace(info, pipeline_id=pipeline_id, update_id=update_id)
+        return pipelines.GetUpdateResponse(update=update)
+
+    def stop(self, pipeline_id: str) -> SimpleNamespace:
+        self.stopped.append(pipeline_id)
+        return SimpleNamespace()
+
+    def list_pipelines(self, *, filter: str | None = None, **kwargs: Any) -> Iterator[pipelines.PipelineStateInfo]:
+        self.list_filters.append(filter)
+        if filter is None:
+            return iter(self.listed)
+        match = NAME_FILTER.match(filter)
+        if match is None:
+            raise InvalidParameterValue(f"Invalid filter expression: {filter}")
+        return iter([info for info in self.listed if (info.name or "").startswith(match["prefix"])])
+
+    def leftover(
+        self,
+        pipeline_id: str,
+        age_hours: float,
+        tags: dict[str, str],
+        creator: str = "someone@example.com",
+        name: str = "[pytest] test_x.py::test_x my_pipeline",
+    ) -> None:
+        """List a pipeline last modified `age_hours` ago by `creator`, with `tags`, as a sweep finds one."""
+        self.specs[pipeline_id] = pipelines.PipelineSpec(id=pipeline_id, name=name, tags=tags)
+        self.last_modified[pipeline_id] = int(time.time() * 1000 - age_hours * HOUR_MS)
+        self.creators[pipeline_id] = creator
+        self.listed.append(pipelines.PipelineStateInfo(pipeline_id=pipeline_id, name=name, creator_user_name=creator))
 
     def list_updates(
         self, pipeline_id: str, *, page_token: str | None = None, **kwargs: Any
@@ -462,6 +563,9 @@ class FakeWorkspaceClient:
         self.account_access_control_proxy = FakeAccountAccessControlProxy()
         self.config = SimpleNamespace(host=HOST, profile=None, account_id=ACCOUNT_ID)
         self.profiles: list[str | None] = []
+        # Every job, pipeline and schema deleted, in order, such as "job 1001", "pipeline p-1000" and "schema c.s".
+        self.deletions: list[str] = []
+        self.jobs.deletions = self.pipelines.deletions = self.schemas.deletions = self.deletions
 
 
 # What `WorkspaceClient(profile=...)` raises on a databricks-cli profile when another process refreshes the CLI's
@@ -845,6 +949,35 @@ def pipeline_settings() -> jobs.JobSettings:
                     "notebook_task": {"notebook_path": f"{nb}/check"},
                 },
             ],
+        }
+    )
+
+
+def pipeline_spec() -> pipelines.PipelineSpec:
+    """Build the spec of a deployed bundle pipeline, `abc`: what a copy must drop, and a glob library to keep.
+
+    `pipeline_settings()` points its pipeline task at it, so `fake_ws.pipelines.specs["abc"] = pipeline_spec()` wires
+    the two together.
+    """
+    files = "/Workspace/Users/someone@example.com/.bundle/example/test/files"
+    return pipelines.PipelineSpec.from_dict(
+        {
+            "id": "abc",
+            "name": "[dev someone] my_pipeline",
+            "catalog": "prod_catalog",
+            "schema": "prod",
+            "serverless": True,
+            "development": False,
+            "continuous": True,
+            "channel": "CURRENT",
+            "deployment": {"kind": "BUNDLE", "metadata_file_path": "/Workspace/x/state/metadata.json"},
+            "notifications": [{"email_recipients": ["someone@example.com"], "alerts": ["on-update-failure"]}],
+            "event_log": {"catalog": "prod_catalog", "schema": "ops", "name": "event_log"},
+            "trigger": {"cron": {"quartz_cron_schedule": "0 0 * * * ?", "timezone_id": "UTC"}},
+            "libraries": [{"glob": {"include": f"{files}/src/pipeline/**"}}],
+            "root_path": f"{files}/src/pipeline",
+            "configuration": {"schema": "prod"},
+            "tags": {"dev": "someone"},
         }
     )
 

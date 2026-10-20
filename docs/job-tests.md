@@ -523,7 +523,7 @@ def test_full_refresh(lakeflow: Lakeflow) -> None:
 
 They are sent as the run's `pipeline_params` and leave the job's settings unchanged. `full_refresh_selection` and `refresh_selection` list tables, `refresh_flow_selection` lists flows to refresh and `reset_checkpoint_selection` lists streaming flows whose checkpoints are reset, so that they read their source again from the start. The four selections need databricks-sdk 0.110.0 or later. A bare string in place of a list raises `LakeflowError`. Passing any of them to a job without a pipeline task, nested `for_each_task` tasks included, raises `LakeflowError` naming the job's tasks before the run starts.
 
-The pipeline is the deployed one, not a copy: every test that runs it updates the same pipeline and its tables, and the options apply to every pipeline task in the run.
+The options apply to every pipeline task in the run. Unless the job was made with `pipelines="copy"`, the pipeline is the deployed one: every test that runs it updates the same pipeline and its tables. See [Pipelines](#pipelines) to run a copy instead.
 
 ### The pipeline update
 
@@ -542,11 +542,69 @@ def test_pipeline_full_refresh(lakeflow: Lakeflow) -> None:
     assert update.events(level="ERROR") == []
 ```
 
-`pipeline_id` and `update_id` name the update, `state` is its state as a string, such as `COMPLETED`, `FAILED` or `CANCELED`, `cause` is what started it, `JOB_TASK` for a pipeline task, and `full_refresh` says whether it refreshed every table. `events(level=None)` reads the events the update logged, newest first, as `databricks.sdk.service.pipelines.PipelineEvent`s with `level`, `event_type`, `message` and, for an error, `error`; `level` keeps one level, such as `"ERROR"`, `"WARN"` or `"INFO"`. Each call to `events()` reads them again with `pipelines.list_pipeline_events`.
+`pipeline_id` and `update_id` name the update, `state` is its state as a string, such as `COMPLETED`, `FAILED` or `CANCELED`, `cause` is what started it, `JOB_TASK` for a pipeline task and `API_CALL` for [`EphemeralPipeline.run()`](#copy-a-pipeline), and `full_refresh` says whether it refreshed every table. `events(level=None)` reads the events the update logged, newest first, as `databricks.sdk.service.pipelines.PipelineEvent`s with `level`, `event_type`, `message` and, for an error, `error`; `level` keeps one level, such as `"ERROR"`, `"WARN"` or `"INFO"`. Each call to `events()` reads them again with `pipelines.list_pipeline_events`.
 
 The Jobs API does not say which update a pipeline task started, so once the run has finished the plugin lists the pipeline's updates with `pipelines.list_updates` and takes the one created between the task's start and end, preferring one whose `cause` is `JOB_TASK`. When none was created in that time, or the updates cannot be read, `pipeline_update` is `None` and a warning naming the task and the pipeline is logged; the run is built as usual. A pipeline task that did not run has no update.
 
 The Jobs API reports the error "Please refer to the logs for this pipeline in the pipelines page." for every pipeline task, also one that succeeded, so the plugin leaves it out when the task succeeded: `error` is `None` and the progress line shows no error. A failed pipeline task keeps it as its `error`; the update's `events(level="ERROR")` say what went wrong.
+
+## Pipelines
+
+A pipeline task updates the deployed pipeline, which publishes to the schema the bundle gave it, so a test that runs it changes the deployed pipeline's tables. The plugin can copy a pipeline instead: the copy is made from the deployed pipeline's spec, so it runs the code that the last `bundle deploy` uploaded, and it publishes to a schema the test chooses, usually one from [`lakeflow.schema()`](#temporary-schemas).
+
+### Copy a pipeline
+
+`lakeflow.pipeline(key, schema)` makes a copy of the bundle pipeline `key`, and `run()` starts an update of it and waits for it to end:
+
+```python
+def test_pipeline_copy(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema, lakeflow.pipeline("numbers", schema=schema) as pipeline:
+        update = pipeline.run(full_refresh=True)
+        assert update.state == "COMPLETED", update.events(level="ERROR")
+        catalog, _, name = schema.partition(".")
+        assert "numbers" in {table.name for table in lakeflow.ws.tables.list(catalog, name)}
+```
+
+`run()` takes `full_refresh`, `full_refresh_selection` and `refresh_selection`, all keyword-only, and `timeout`, which defaults to `Lakeflow`'s `timeout`. It returns the update as a [`PipelineUpdate`](#the-pipeline-update) and appends it to `pipeline.updates`. A failed update is returned, not raised: assert on its `state` and read `events(level="ERROR")`. Each change of the update's state is logged at INFO and shown in the test's `lakeflow` report section, such as `pipeline numbers: RUNNING -> COMPLETED`. An update that has not ended when the timeout expires is stopped, and `LakeflowTimeout` is raised: `Update <id> of pipeline 'numbers' did not finish within 0:30:00 and was stopped: <url>`.
+
+The copy is created on entering the `with` block, or by the first `run()`. Compared with the deployed spec it:
+
+- publishes to `schema`, a full `catalog.schema` name, in the deployed pipeline's publishing mode: `target` when the spec uses that legacy field, `schema` otherwise;
+- runs in development mode (`development: true`), and is named `[pytest] <test id>`, or `[pytest] <name>` with `name=`, cut to the 255 characters the platform allows;
+- has the job tags (`pytest`, `pytest_run_id`, `pytest_nodeid`, `pytest_expires` with `--lakeflow-keep-ttl`, and the attribution tags) added to the deployed pipeline's tags, 25 at most, and `Lakeflow(budget_policy_id=...)` when it is set;
+- leaves out the `deployment`, `continuous`, `trigger`, `notifications` and `event_log` settings, so it is not bundle-managed, does not run on its own, notifies nobody and does not write its events into the deployed pipeline's event log table;
+- runs as you: a pipeline spec has no `run_as`, so the copy runs as its creator, who owns the temporary schema.
+
+Everything else, its libraries, `root_path`, compute, `channel`, `edition` and `configuration`, is the deployed pipeline's. `configuration=` sets keys in the copy's configuration over the deployed ones, for pipeline code that reads its catalog or schema from `spark.conf`:
+
+```python
+with lakeflow.schema() as schema:
+    with lakeflow.pipeline("my_pipeline", schema=schema, configuration={"target_schema": schema}) as pipeline:
+        assert pipeline.run().state == "COMPLETED"
+```
+
+Only the tables that the pipeline's code names without a schema follow the copy's schema. A fully qualified name, such as `CREATE MATERIALIZED VIEW prod.sales.orders`, still writes where it says, so read such names from the configuration.
+
+`lakeflow.pipeline()` needs `Lakeflow(sync="deploy")`, because it finds the pipeline through `bundle summary`; any other `sync` raises `LakeflowBundleError`. An unknown key raises `KeyError` listing the bundle's pipelines, a pipeline that no longer exists `LakeflowBundleError`, and a `schema` without a catalog or a pipeline that publishes to the Hive metastore `LakeflowError`, all before anything is created.
+
+### Copy the pipelines of a job
+
+`pipelines="copy"` on `job()` and `task()` copies each pipeline that an enabled pipeline task of the copy updates, tasks nested in a `for_each_task` included, and points those tasks at the copies. It needs `schema=`:
+
+```python
+def test_job_copy_points_at_the_pipeline_copy(lakeflow: Lakeflow) -> None:
+    with lakeflow.schema() as schema, lakeflow.job("pipeline_job", pipelines="copy", schema=schema) as job:
+        [copy] = job.pipelines
+        run = job.run(full_refresh=True)
+        assert run.succeeded, run
+        assert run.task("refresh").pipeline_update.pipeline_id == copy.pipeline_id
+```
+
+Each pipeline is copied once, however many tasks update it, as `lakeflow.pipeline()` copies it, named `[pytest] <test id> <pipeline key>`; a pipeline that the bundle does not define is named by its id. The copies are created just before the job, after `modify_settings`, which still sees the deployed pipelines' ids, and closed just after the job with the same keep rules, so a kept job never points at a deleted pipeline. `job.pipelines` holds them as `EphemeralPipeline`s. `pipelines="copy"` without `schema`, `schema` without `pipelines="copy"`, and a job with no enabled pipeline task raise `LakeflowError` before anything is created. The default, `pipelines="deployed"`, leaves every pipeline task on the deployed pipeline. `configuration` is not offered on `job()`: pass the schema to pipeline code through `lakeflow.pipeline(configuration=...)`, or through the job parameter it already reads.
+
+### Deleting the copies
+
+A copy is deleted on leaving its `with` block, or at the end of the test, unless the keep rules keep it, as for a job: a kept copy is logged at WARNING and listed as `lakeflow: N pipelines kept` in the terminal summary. Deleting a pipeline that publishes to Unity Catalog keeps its tables unless the request asks for them to go, so the plugin deletes the copy with `cascade=True`, which drops its materialised views and streaming tables, and `force=True`, which lets the delete go ahead when cleaning up the tables fails. `cascade` needs databricks-sdk 0.110.0 or later; on an older one the copy's tables stay until the schema is dropped. Put `lakeflow.schema()` first in the `with` statement, so the copy is deleted before its schema is dropped with everything still in it. An update that is still running when the copy is deleted is stopped first, and so is one still running at session end. `--lakeflow-sweep` deletes the copies that a crashed session left, see [sweeping leftovers](configuration.md#sweeping-leftovers).
 
 ## Capture task values
 

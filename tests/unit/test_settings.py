@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -14,6 +15,7 @@ from pytest_databricks_lakeflow import settings as settings_module
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.settings import (
     ENV_KEY,
+    PIPELINE_CREATE_PARAMETERS,
     TASK_OVERRIDES,
     Helpers,
     add_dependencies,
@@ -32,8 +34,11 @@ from pytest_databricks_lakeflow.settings import (
     merge_environments,
     override_tasks,
     pipeline_params,
+    pipeline_task_ids,
+    rewire_pipelines,
     run_job_tasks,
     sanitise,
+    sanitise_pipeline,
     select,
     tag_value,
     unreached_notebook_tasks,
@@ -46,6 +51,7 @@ from .fakes import (
     example_settings,
     parent_settings,
     pipeline_settings,
+    pipeline_spec,
     reporting_settings,
 )
 
@@ -1220,6 +1226,123 @@ class TestPipelineParams:
         inner = {"task_key": "each_inner", "pipeline_task": {"pipeline_id": "abc"}}
         settings = jobs.JobSettings.from_dict({"tasks": [for_each(inner)]})
         assert self.refresh(settings, full_refresh=False) == jobs.PipelineParams(full_refresh=False)
+
+
+class TestSanitisePipeline:
+    """sanitise_pipeline turns a deployed pipeline's spec into a copy that publishes to the test's schema."""
+
+    def test_sanitise_pipeline_builds_the_create_kwargs(self) -> None:
+        spec = pipeline_spec()
+        kwargs = sanitise_pipeline(spec, "test_x", TAGS, schema="cat.pytest_x")
+        assert set(kwargs) <= PIPELINE_CREATE_PARAMETERS
+        assert (kwargs["catalog"], kwargs["schema"]) == ("cat", "pytest_x")
+        assert (kwargs["development"], kwargs["allow_duplicate_names"]) == (True, True)
+        assert kwargs["name"] == "[pytest] test_x"
+        for name in ("continuous", "trigger", "notifications", "event_log", "deployment", "id", "target"):
+            assert name not in kwargs
+        assert kwargs["libraries"] == spec.libraries
+        assert (kwargs["serverless"], kwargs["root_path"], kwargs["channel"]) == (True, spec.root_path, "CURRENT")
+        assert kwargs["tags"] == {"dev": "someone", **TAGS}
+        assert kwargs["configuration"] == {"schema": "prod"}
+        assert "budget_policy_id" not in kwargs
+        assert spec == pipeline_spec()
+
+    def test_sanitise_pipeline_keeps_the_publishing_mode(self) -> None:
+        spec = replace(pipeline_spec(), schema=None, target="prod")
+        kwargs = sanitise_pipeline(spec, "test_x", TAGS, schema="cat.pytest_x")
+        assert (kwargs["catalog"], kwargs["target"]) == ("cat", "pytest_x")
+        assert "schema" not in kwargs
+
+    @pytest.mark.parametrize(
+        ("catalog", "schema", "match"),
+        [
+            pytest.param(
+                None,
+                "cat.pytest_x",
+                r"Pipeline '\[dev someone\] my_pipeline' publishes to the Hive metastore \(no catalog\), so it cannot "
+                r"be copied into a Unity Catalog schema",
+                id="hive_metastore",
+            ),
+            pytest.param(
+                "prod_catalog",
+                "pytest_x",
+                r"schema must be a full name, catalog.schema, as lakeflow.schema\(\) yields: 'pytest_x'",
+                id="no_catalog_in_schema",
+            ),
+        ],
+    )
+    def test_sanitise_pipeline_refuses(self, catalog: str | None, schema: str, match: str) -> None:
+        spec = replace(pipeline_spec(), catalog=catalog)
+        with pytest.raises(LakeflowError, match=match):
+            sanitise_pipeline(spec, "test_x", TAGS, schema=schema)
+
+    def test_sanitise_pipeline_merges_configuration_and_sets_the_budget_policy(self) -> None:
+        configuration = {"schema": "cat.pytest_x", "rows": "3"}
+        kwargs = sanitise_pipeline(
+            pipeline_spec(), "test_x", TAGS, schema="cat.pytest_x", configuration=configuration, budget_policy_id="bp"
+        )
+        assert kwargs["configuration"] == configuration
+        assert kwargs["budget_policy_id"] == "bp"
+
+    def test_sanitise_pipeline_names_fit_the_limit(self) -> None:
+        nodeid = "tests/test_päth.py::test_rows[" + "é" * 300 + "]\nline two"
+        kwargs = sanitise_pipeline(pipeline_spec(), nodeid, {"pytest_nodeid": nodeid}, schema="cat.pytest_x")
+        assert len(kwargs["name"]) == 255
+        assert "\n" not in kwargs["name"]
+        assert kwargs["name"].startswith("[pytest] tests/test_päth.py::test_rows[é")
+        assert len(kwargs["tags"]["pytest_nodeid"].encode()) <= 256
+
+    def test_sanitise_pipeline_tags_share_the_job_limit(self) -> None:
+        spec = replace(pipeline_spec(), tags={f"t{i}": "" for i in range(20)})
+        tags = sanitise_pipeline(spec, "test_x", {**TAGS, **ATTRIBUTION}, schema="cat.pytest_x")["tags"]
+        assert len(tags) == 25
+        assert {key for key in tags if key in ATTRIBUTION} == {"pytest_ci_url", "pytest_user"}
+        spec.tags = {f"t{i}": "" for i in range(23)}
+        with pytest.raises(LakeflowError, match="The pipeline would have 26 tags, more than the 25 allowed. Remove 1"):
+            sanitise_pipeline(spec, "test_x", TAGS, schema="cat.pytest_x")
+
+
+class TestPipelineTasks:
+    """Which pipelines a job copy copies, and pointing its pipeline tasks at the copies."""
+
+    @staticmethod
+    def pipeline_job() -> jobs.JobSettings:
+        """Two tasks on `abc`, a disabled task and one downstream of it, and a loop over a pipeline task."""
+        return jobs.JobSettings.from_dict(
+            {
+                "tasks": [
+                    {"task_key": "refresh", "pipeline_task": {"pipeline_id": "abc"}},
+                    {
+                        "task_key": "again",
+                        "depends_on": [{"task_key": "refresh"}],
+                        "pipeline_task": {"pipeline_id": "abc"},
+                    },
+                    {"task_key": "off", "disabled": True, "pipeline_task": {"pipeline_id": "off"}},
+                    {
+                        "task_key": "after_off",
+                        "depends_on": [{"task_key": "off"}],
+                        "pipeline_task": {"pipeline_id": "after"},
+                    },
+                    for_each({"task_key": "each_inner", "pipeline_task": {"pipeline_id": "inner"}}),
+                    {"task_key": "check", "notebook_task": {"notebook_path": "/n"}},
+                ]
+            }
+        )
+
+    def test_pipeline_task_ids_leave_out_disabled_tasks_and_repeats(self) -> None:
+        assert pipeline_task_ids(self.pipeline_job()) == ["abc", "inner"]
+        assert pipeline_task_ids(example_settings()) == []
+
+    def test_rewire_pipelines_rewrites_nested_tasks_too(self) -> None:
+        settings = self.pipeline_job()
+        rewire_pipelines(settings, {"abc": "p-1000", "inner": "p-1001"})
+        pipeline_ids = []
+        for each in settings.tasks or []:
+            if each.pipeline_task is not None:
+                pipeline_ids.append(each.pipeline_task.pipeline_id)
+        assert pipeline_ids == ["p-1000", "p-1000", "off", "after"]
+        inner = nested_task(settings, "loop").pipeline_task
+        assert inner is not None and inner.pipeline_id == "p-1001"
 
 
 DEPS = ["faker==30.0.0"]
