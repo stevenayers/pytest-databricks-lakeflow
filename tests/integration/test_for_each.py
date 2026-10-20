@@ -4,7 +4,9 @@ The bundle has two serverless jobs. In ``fanout``, the for-each task ``loop`` re
 the deployed inputs ``["a", "b", "c"]``, passing each one as the ``item`` widget, which ``each`` returns as its output,
 and ``after`` runs once ``loop`` is done. ``fanout_objects`` iterates over objects: ``extract`` sets the task value
 ``rows``, then the body ``inner`` of ``loop`` reads the whole item, its ``id`` and ``rows`` and returns the three
-widgets as JSON, and ``after`` runs last. Run the tests with:
+widgets as JSON, and ``after`` runs last. In ``fanout``, ``each`` raises ``ValueError`` for an item starting with
+``fail`` and calls ``taskValues.set`` for the item ``set_value``, which the platform refuses in an iteration. Run the
+tests with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
         uv run pytest tests/integration/test_for_each.py -n 8 --dist loadgroup --lakeflow-sweep
@@ -17,7 +19,7 @@ import json
 import pytest
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import JobRun, Lakeflow
+from pytest_databricks_lakeflow import ForEachError, ForEachStats, JobRun, Lakeflow
 
 from .conftest import lakeflow_for
 
@@ -35,7 +37,7 @@ def test_for_each_inputs_replace_the_deployed_list(lakeflow: Lakeflow) -> None:
         loop = _task_settings(lakeflow, job.job_id, "loop").for_each_task
         assert loop is not None
         assert loop.inputs == '["x", "{\\u007by}}"]'
-        assert sorted(_iteration_outputs(lakeflow, run)) == ["x", "{{y}}"]
+        assert _iteration_outputs(run) == ["x", "{{y}}"]
         assert run.task("after").output == "after"
 
 
@@ -44,7 +46,7 @@ def test_an_empty_list_runs_no_iteration_and_the_downstream_task(lakeflow: Lakef
         run = job.run()
         assert run.succeeded, run
         assert run.task("loop").result_state == "SUCCESS"
-        assert _iteration_outputs(lakeflow, run) == []
+        assert _iteration_outputs(run) == []
         assert run.task("after").output == "after"
 
 
@@ -53,7 +55,40 @@ def test_for_each_inputs_on_a_task_job(lakeflow: Lakeflow) -> None:
         run = job.run()
         assert run.succeeded, run
         assert sorted(run.tasks) == ["loop"]
-        assert _iteration_outputs(lakeflow, run) == ["z"]
+        assert _iteration_outputs(run) == ["z"]
+
+
+def test_for_each_iterations(lakeflow: Lakeflow) -> None:
+    inputs = {"loop": ["a", "b"]}
+    with lakeflow.job("fanout", for_each_inputs=inputs, capture_task_values={"loop": ["seen"]}) as job:
+        run = job.run(performance_target="STANDARD")
+    assert run.succeeded, run
+    loop = run.task("loop")
+    assert [iteration.task_key for iteration in loop.iterations] == ["each", "each"]
+    assert [iteration.output for iteration in loop.iterations] == ["a", "b"]
+    assert [iteration.parameters for iteration in loop.iterations] == [{"item": "a"}, {"item": "b"}]
+    assert loop.for_each_stats == ForEachStats(total_iterations=2, succeeded_iterations=2, failed_iterations=0)
+    # A probe on the for-each task reads nothing: the loop sets no value, and an iteration cannot set one.
+    assert loop.task_values == {}
+    assert loop.missing_task_values == ["seen"]
+
+
+def test_a_failing_iteration(lakeflow: Lakeflow) -> None:
+    inputs = {"loop": ["a", "fail", "set_value"]}
+    with lakeflow.job("fanout", for_each_inputs=inputs, capture_task_values={"loop": ["seen"]}) as job:
+        run = job.run(performance_target="STANDARD")
+    assert run.failed
+    assert run.task("after").upstream_failed
+    loop = run.task("loop")
+    assert loop.result_state == "FAILED"
+    assert [iteration.result_state for iteration in loop.iterations] == ["SUCCESS", "FAILED", "FAILED"]
+    assert [iteration.parameters for iteration in loop.iterations] == [{"item": i} for i in inputs["loop"]]
+    assert loop.iterations[1].raised(ValueError)
+    refused = loop.iterations[2].error
+    assert refused is not None and "setting task values is not supported for iterations" in refused.message
+    errors = [ForEachError("Workload failed, see run output for details", 2, "RunExecutionError")]
+    assert loop.for_each_stats == ForEachStats(3, 1, 2, errors)
+    assert loop.missing_task_values == ["seen"]
 
 
 def test_nested_task_runs_once(lakeflow: Lakeflow) -> None:
@@ -79,7 +114,8 @@ def test_the_body_gets_an_object_input_as_the_loop_gives_it(lakeflow: Lakeflow) 
     with lakeflow.job("fanout_objects", for_each_inputs={"loop": [item]}) as job:
         looped = job.run()
         assert looped.succeeded, looped
-        [iteration] = _iteration_outputs(lakeflow, looped)
+        [iteration] = _iteration_outputs(looped)
+        assert iteration is not None
     upstream = {"extract": {"rows": 3}}
     with lakeflow.task("fanout_objects.loop.inner", input=item, upstream_task_values=upstream) as job:
         lifted = job.run()
@@ -95,13 +131,5 @@ def _task_settings(lakeflow: Lakeflow, job_id: int, task_key: str) -> jobs.Task:
     return next(t for t in settings.tasks or [] if t.task_key == task_key)
 
 
-def _iteration_outputs(lakeflow: Lakeflow, run: JobRun) -> list[str]:
-    # The plugin does not surface iterations yet: the for-each task run, fetched by its own id, lists them.
-    loop = lakeflow.ws.jobs.get_run(run.task("loop").run_id)
-    outputs: list[str] = []
-    for iteration in loop.iterations or []:
-        assert iteration.run_id is not None
-        notebook = lakeflow.ws.jobs.get_run_output(iteration.run_id).notebook_output
-        assert notebook is not None and notebook.result is not None, iteration
-        outputs.append(notebook.result)
-    return outputs
+def _iteration_outputs(run: JobRun) -> list[str | None]:
+    return [iteration.output for iteration in run.task("loop").iterations]

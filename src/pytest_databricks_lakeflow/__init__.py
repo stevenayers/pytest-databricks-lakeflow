@@ -7,6 +7,8 @@ from pytest_databricks_lakeflow.ephemeral import EphemeralJob, EphemeralPipeline
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError, LakeflowRunFailed, LakeflowTimeout
 from pytest_databricks_lakeflow.results import (
     DebugNotebook,
+    ForEachError,
+    ForEachStats,
     JobRun,
     NotebookCell,
     NotebookView,
@@ -23,6 +25,8 @@ __all__ = [
     "DebugNotebook",
     "EphemeralJob",
     "EphemeralPipeline",
+    "ForEachError",
+    "ForEachStats",
     "JobRun",
     "Lakeflow",
     "LakeflowBundleError",
