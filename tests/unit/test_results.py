@@ -542,6 +542,17 @@ class TestNotebookExport:
         assert [cell.output for cell in notebook.cells] == ["", printed, "", ""]
         assert notebook.stdout == printed
 
+    def test_parse_recorded_classic_export(self) -> None:
+        # Recorded from the classic bundle's printer task on a 17.3 job cluster. The 13.3 LTS export has the same shape:
+        # `listResults` of `ansi` items named "stdout" and "stderr", not legacy `<div class="ansiout">` html results.
+        notebook = parse_notebook_export((DATA / "notebook_export_classic.html").read_text())
+        [cell] = notebook.cells
+        assert cell.code.startswith("import sys\n\nrows = spark.range(3).count()\n")
+        assert cell.output == "printer: 3 rows\nprinter: to stderr\n"
+        assert cell.stdout == "printer: 3 rows\n"
+        assert notebook.stdout == "printer: 3 rows\n"
+        assert cell.error is None
+
     def test_failed_cell_names_the_exception(self) -> None:
         notebook = parse_notebook_export(FAILED_EXPORT)
         failed = notebook.failed_cell

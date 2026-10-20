@@ -445,7 +445,7 @@ def test_transform_prints_its_input(lakeflow: Lakeflow) -> None:
 A `NotebookView` has:
 
 - `cells`, the notebook's cells in order, each a `NotebookCell` with `index` (its position in `cells`), `code`, `output` (the text it printed or displayed, with HTML tags and ANSI colour codes removed), `output_html` (its results as exported), `error` (the exception it raised as `Name: message`, or `None`) and `stdout` (what it wrote to standard output, with ANSI colour codes removed).
-- `stdout`, what every cell wrote to standard output, in order, which is what `print()` produced. Standard error, displayed results and the `dbutils.notebook.exit()` value are in the cells' `output` but not in `stdout`.
+- `stdout`, what every cell wrote to standard output, in order, which is what `print()` produced. Standard error, displayed results and the `dbutils.notebook.exit()` value are in the cells' `output` but not in `stdout`. Python cells were checked on serverless compute and on classic job clusters running 17.3 LTS and 13.3 LTS: each exports what `print()` wrote as a standard output stream, apart from standard error.
 - `failed_cell`, the first cell that raised, or `None`. Cells skipped after it have no error.
 - `html`, the exported HTML, unchanged, and `save(path)`, which writes it to a file that opens in a browser like the run page.
 
