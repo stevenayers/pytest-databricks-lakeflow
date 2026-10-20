@@ -1433,6 +1433,28 @@ class TestTrigger:
         transform = next(t for t in created["tasks"] if t.task_key == "transform")
         assert transform.notebook_task.base_parameters["kind"] == "{{job.parameters.__pytest_trigger_type}}"
 
+    def test_a_trigger_reference_the_copy_cannot_resolve_fails_before_creation(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
+    ) -> None:
+        fake_cli.deployed["triggered"] = fake_ws.jobs.add(triggered_settings())
+        source = """
+            import pytest
+
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_job(lakeflow):
+                job = lakeflow.job("triggered", trigger={"type": "table"})
+                with pytest.raises(LakeflowError) as e:
+                    job.create()
+                assert str(e.value) == (
+                    "Task 'transform' of 'triggered' refers to {{job.trigger.table_update.updated_tables}}, but the "
+                    "copy has no table update trigger, and jobs/create refuses the reference without one. Set its "
+                    "value with trigger={'table_update.updated_tables': ...} on job() or task()."
+                )
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
+
     def test_an_unknown_trigger_key_fails_before_creation(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
     ) -> None:
@@ -3428,6 +3450,72 @@ class TestPipelineCopies:
         run_tests(pytester, source).assert_outcomes(passed=1)
         [job] = fake_ws.jobs.created
         assert pipeline_ids_by_task(job) == {"refresh": "p-1000"}
+
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            pytest.param(
+                "settings.tasks[0].pipeline_task.pipeline_id = 'xyz'",
+                ({"refresh": "p-1000"}, ["[pytest] test_jobs.py::test_job xyz"]),
+                id="repointed",
+            ),
+            pytest.param(
+                "settings.tasks.append(jobs.Task(task_key='more', pipeline_task=jobs.PipelineTask(pipeline_id='xyz')))",
+                (
+                    {"refresh": "p-1000", "more": "p-1001"},
+                    ["[pytest] test_jobs.py::test_job my_pipeline", "[pytest] test_jobs.py::test_job xyz"],
+                ),
+                id="added",
+            ),
+        ],
+    )
+    def test_copies_follow_the_pipeline_tasks_modify_settings_leaves(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        change: str,
+        expected: tuple[dict[str, str], list[str]],
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        fake_ws.pipelines.specs["xyz"] = replace(pipeline_spec(), id="xyz", name="other")
+        extra = f"\nfrom databricks.sdk.service import jobs\n\n\ndef change(settings, item):\n    {change}\n"
+        configure_lakeflow(pytester, "modify_settings=change", extra)
+        tasks, names = expected
+        source = f"""
+            def test_job(lakeflow):
+                with lakeflow.job("pipeline_job", pipelines="copy", schema="c.s") as job:
+                    assert [copy.pipeline_id for copy in job.pipelines] == {sorted(set(tasks.values()))!r}
+        """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        [job] = fake_ws.jobs.created
+        assert pipeline_ids_by_task(job) == tasks
+        assert [created["name"] for created in fake_ws.pipelines.created] == names
+
+    def test_copies_are_deleted_when_the_job_is_not_created(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        deploy_pipeline(fake_ws, fake_cli)
+        monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
+        source = """
+            def test_job(lakeflow):
+                with lakeflow.job("pipeline_job", pipelines="copy", schema="c.s"):
+                    pass
+        """
+        result = run_tests(pytester, source, "--log-level=INFO")
+        result.assert_outcomes(failed=1)
+        assert fake_ws.deletions == ["pipeline p-1000"]
+        result.stdout.fnmatch_lines(
+            [
+                "*The job copying 'pipeline_job' was not created, so no job points at its pipeline copies ?'p-1000'?, "
+                "and they are deleted whatever keep_failed says*"
+            ]
+        )
+        assert "lakeflow: 1 pipeline kept" not in result.stdout.str()
 
     def test_failed_test_keeps_the_job_and_its_copies(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

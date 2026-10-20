@@ -391,7 +391,9 @@ class Lakeflow:
                 every run updates those pipelines' tables. `"copy"` makes a copy of each pipeline that an enabled
                 pipeline task updates, as `pipeline()` does, publishing to `schema` and named after the job and the
                 pipeline's bundle key. The copies are created just before the job, after `modify_settings`, which
-                still sees the deployed pipelines' ids, and closed just after it with the same keep rules.
+                still sees the deployed pipelines' ids, and closed just after it with the same keep rules. The
+                pipelines to copy are chosen again then, so a pipeline task that `modify_settings` repoints or adds is
+                copied too. When the job is not created, the copies are deleted whatever `keep_failed` says.
             schema: The full name of the schema the pipeline copies publish to, as `schema()` yields it. Needed with
                 `pipelines="copy"`, and refused without it.
             for_each_inputs: The list each for-each task of the copy iterates over, by task key, such as
@@ -406,7 +408,8 @@ class Lakeflow:
                 declared with the value as its default. Each value is a string, passed as given, so a reference the
                 platform fills with a list, such as `table_update.updated_tables`, gets exactly the string the test
                 writes. A reference left out emits a `UserWarning`. The copy has no trigger, so jobs/create refuses
-                its `table_update` and `file_arrival` references unless `trigger` sets them. `JobRun.trigger_type`
+                its `table_update` and `file_arrival` references unless `trigger` sets them, and `LakeflowError` is
+                raised for them when the job is created. `JobRun.trigger_type`
                 stays `ONE_TIME`.
 
         Returns:
@@ -434,11 +437,14 @@ class Lakeflow:
                 name starting with `__pytest_`, or `upstream_task_values` names a task that is not in the job or holds
                 a value that is too large or not JSON-serialisable, an output that contains `{{` or is not
                 JSON-serialisable, or no output for a path that a task of the copy refers to. When the job is created,
-                also if a task of the copy refers to the output of a notebook task that is not a stub. Also if
+                also if a task of the copy refers to the output of a notebook task that is not a stub, or keeps a
+                `{{job.trigger.table_update.*}}` or `{{job.trigger.file_arrival.*}}` reference that `trigger` does not
+                set. Also if
                 `pipelines` is `"copy"` without `schema` or the copy has no enabled pipeline task, `schema` is passed
                 without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
                 Also if `for_each_inputs` names a task that is not in the job or has no `for_each_task`, or gives a
-                value that is not a list, is not JSON-serialisable or is longer than 5,000 characters as JSON.
+                value that is not a list, is not JSON-serialisable, is longer than 5,000 characters as JSON, holds
+                `None` or a nested list, or mixes objects with primitives.
                 Also if `trigger` names a path that no `{{job.trigger.<path>}}` reference of the copy uses, or gives a
                 value that is not a string.
             LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
@@ -846,6 +852,9 @@ class Lakeflow:
             extra_dependencies=extra_dependencies,
             pipelines=copies,
         )
+        if pipelines == "copy":
+            assert schema is not None
+            job._copy_pipeline = partial(self._job_pipeline_copy, item, schema, name or item.nodeid)
         item.addfinalizer(partial(job._teardown, item))
         return job
 
@@ -873,14 +882,18 @@ class Lakeflow:
         if not pipeline_ids:
             keys = sorted(task.task_key for task in settings.tasks or [] if not task.task_key.startswith(PREFIX))
             raise LakeflowError(f"Job {job_key!r} has no pipeline task to copy. Tasks: {keys}")
-        keys_by_id: dict[str, str] = {}
-        for pipeline_key, pipeline_id in self._state().get("pipeline_ids", {}).items():
-            keys_by_id[pipeline_id] = pipeline_key
         copies: list[EphemeralPipeline] = []
         for pipeline_id in pipeline_ids:
-            pipeline_key = keys_by_id.get(pipeline_id, pipeline_id)
-            copies.append(self._pipeline_copy(item, pipeline_key, pipeline_id, schema, name=f"{name} {pipeline_key}"))
+            copies.append(self._job_pipeline_copy(item, schema, name, pipeline_id))
         return copies
+
+    def _job_pipeline_copy(self, item: pytest.Item, schema: str, name: str, pipeline_id: str) -> EphemeralPipeline:
+        """Copy a pipeline for a job, named after the job and the bundle key of the pipeline, or its id."""
+        pipeline_key = pipeline_id
+        for key, known_id in self._state().get("pipeline_ids", {}).items():
+            if known_id == pipeline_id:
+                pipeline_key = key
+        return self._pipeline_copy(item, pipeline_key, pipeline_id, schema, name=f"{name} {pipeline_key}")
 
     def _pipeline_copy(
         self,

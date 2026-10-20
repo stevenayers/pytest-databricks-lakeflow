@@ -24,6 +24,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     check_references,
     check_task_params,
+    check_trigger_references,
     create_kwargs,
     disable_tasks,
     disabled_task_keys,
@@ -576,6 +577,52 @@ class TestCreateChecks:
         check_compute(example_settings())
         wheel = {"package_name": "pkg", "entry_point": "main"}
         check_compute(with_tasks({"task_key": "c", "existing_cluster_id": "c-1", "python_wheel_task": wheel}))
+
+    @pytest.mark.parametrize(
+        ("template", "match"),
+        [
+            pytest.param(
+                triggered_settings,
+                r"Task 'transform' of 'my_job' refers to \{\{job.trigger.table_update.updated_tables\}\}, but the "
+                r"copy has no table update trigger, and jobs/create refuses the reference without one. Set its value "
+                r"with trigger=\{'table_update.updated_tables': ...\} on job\(\) or task\(\).",
+                id="table-update",
+            ),
+            pytest.param(
+                lambda: with_tasks(
+                    for_each(
+                        {
+                            "task_key": "inner",
+                            "notebook_task": {
+                                "notebook_path": "/n",
+                                "base_parameters": {"at": "{{ job.trigger.file_arrival.location }}"},
+                            },
+                        }
+                    )
+                ),
+                r"Task 'inner' of 'my_job' refers to \{\{ job.trigger.file_arrival.location \}\}, but the copy has no "
+                r"file arrival trigger",
+                id="nested-file-arrival",
+            ),
+        ],
+    )
+    def test_check_trigger_references_refuses_references_the_copy_cannot_resolve(
+        self, template: Callable[[], jobs.JobSettings], match: str
+    ) -> None:
+        with pytest.raises(LakeflowError, match=match):
+            check_trigger_references("my_job", template())
+
+    def test_check_trigger_references_accepts_what_jobs_create_accepts(self) -> None:
+        run_now = {
+            "notebook_path": "/n",
+            "base_parameters": {"k": "{{job.trigger.type}}", "d": "{{job.trigger.time.iso_date}}"},
+        }
+        check_trigger_references("my_job", with_tasks({"task_key": "t", "notebook_task": run_now}))
+        settings = triggered_settings()
+        settings.trigger = jobs.TriggerSettings(
+            table_update=jobs.TableUpdateTriggerConfiguration(table_names=["c.s.t"])
+        )
+        check_trigger_references("my_job", settings)
 
     def test_create_kwargs(self) -> None:
         settings = sanitised()
@@ -1303,6 +1350,9 @@ class TestForEachInputs:
             pytest.param([], "[]", id="empty"),
             pytest.param(("a", 1), '["a", 1]', id="tuple"),
             pytest.param(["x" * 4996], json.dumps(["x" * 4996]), id="at-the-limit"),
+            # jobs/create accepts primitives of mixed types, and objects whose values are lists, objects or null.
+            pytest.param([1, "a", True, 1.5], '[1, "a", true, 1.5]', id="primitives"),
+            pytest.param([{"k": [1]}, {"j": {"x": None}}], '[{"k": [1]}, {"j": {"x": null}}]', id="objects"),
         ],
     )
     def test_for_each_inputs_are_escaped_json(self, inputs: Any, expected: str) -> None:
@@ -1349,6 +1399,32 @@ class TestForEachInputs:
                 {"loop": ["x" * 4997]},
                 r"Inputs for task 'loop' in for_each_inputs are 5001 characters as JSON. A for-each task allows 5000.",
                 id="too-long",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": ["a", None]},
+                r"Inputs for task 'loop' in for_each_inputs hold None at index 1. jobs/create takes a list of all "
+                r"primitives or all objects, without null or nested lists.",
+                id="null",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": [[1, 2]]},
+                r"Inputs for task 'loop' in for_each_inputs hold a nested list at index 0. jobs/create takes",
+                id="nested-list",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": [1, {"k": 1}]},
+                r"Inputs for task 'loop' in for_each_inputs hold an object at index 1 after a primitive at index 0. "
+                r"jobs/create takes",
+                id="object-after-primitive",
+            ),
+            pytest.param(
+                for_each_settings,
+                {"loop": [{"k": 1}, "a"]},
+                r"Inputs for task 'loop' in for_each_inputs hold a primitive at index 1 after an object at index 0.",
+                id="primitive-after-object",
             ),
         ],
     )

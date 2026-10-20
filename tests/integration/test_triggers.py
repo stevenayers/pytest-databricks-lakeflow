@@ -17,9 +17,8 @@ import os
 import re
 
 import pytest
-from databricks.sdk.errors import InvalidParameterValue
 
-from pytest_databricks_lakeflow import Lakeflow
+from pytest_databricks_lakeflow import Lakeflow, LakeflowError
 
 from .conftest import lakeflow_for
 
@@ -57,7 +56,14 @@ def test_a_simulated_trigger_reaches_the_task(lakeflow: Lakeflow) -> None:
 
 
 def test_a_copy_without_the_trigger_is_refused(lakeflow: Lakeflow) -> None:
-    # The copy has no trigger, so jobs/create refuses the file arrival reference that trigger= would rewrite.
+    # The copy has no trigger, so jobs/create would refuse the file arrival reference that trigger= rewrites. The
+    # plugin refuses it first, naming the task and trigger=.
     job = lakeflow.job("file_job")
-    with pytest.raises(InvalidParameterValue, match="Job does not have a file arrival trigger configured"):
+    with pytest.raises(LakeflowError) as e:
         job.create()
+    assert str(e.value) == (
+        "Task 'read_trigger' of 'file_job' refers to {{job.trigger.file_arrival.location}}, but the copy has no file "
+        "arrival trigger, and jobs/create refuses the reference without one. Set its value with "
+        "trigger={'file_arrival.location': ...} on job() or task()."
+    )
+    assert job.job_id is None
