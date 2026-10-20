@@ -3,6 +3,13 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.13.1](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.13.0...v0.13.1) (2026-10-20)
+
+
+### Documentation
+
+* add a dark mode to the docs site ([#213](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/213)) ([d5c3739](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/d5c3739c9fe9072f75375b50df36a0106f7bdfbb))
+
 ## [0.13.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.12.0...v0.13.0) (2026-10-20)
 
 
