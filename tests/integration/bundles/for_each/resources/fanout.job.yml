@@ -1,0 +1,21 @@
+resources:
+  jobs:
+    fanout:
+      name: fanout
+      description: For-each job for the pytest-databricks-lakeflow integration tests.
+      tasks:
+        - task_key: loop
+          for_each_task:
+            inputs: '["a", "b", "c"]'
+            concurrency: 3
+            task:
+              task_key: each
+              notebook_task:
+                notebook_path: ../src/notebooks/each.py
+                base_parameters:
+                  item: "{{input}}"
+        - task_key: after
+          depends_on:
+            - task_key: loop
+          notebook_task:
+            notebook_path: ../src/notebooks/after.py

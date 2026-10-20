@@ -79,6 +79,10 @@ tests/integration/
             databricks.yml
             resources/*.job.yml
             src/notebooks/*.py
+        for_each/                # name: lakeflow_for_each, a for-each task over a notebook task, then a downstream task
+            databricks.yml
+            resources/*.job.yml
+            src/notebooks/*.py
         pipelines/               # name: lakeflow_pipelines, a serverless pipeline in the LAKEFLOW_CATALOG catalog and a pipeline task
             databricks.yml
             resources/*.yml      # the pipeline's schema, the pipeline and the job
@@ -90,6 +94,7 @@ tests/integration/
     test_branches.py
     test_classic.py
     test_retries.py
+    test_for_each.py
     test_pipelines.py
 ```
 
