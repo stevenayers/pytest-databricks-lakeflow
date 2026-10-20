@@ -4,6 +4,7 @@ import json
 import warnings
 from dataclasses import fields, replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -11,6 +12,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs, pipelines
 
+from pytest_databricks_lakeflow import dbt
 from pytest_databricks_lakeflow.results import (
     ForEachError,
     ForEachStats,
@@ -27,10 +29,13 @@ from .fakes import (
     ALERT_FAILED,
     ALL_DISABLED,
     DATA,
+    DBT_LINK,
     HOST,
     ITERATION_FAILED,
     PIPELINE_LOGS,
+    FakeDbtLinks,
     FakeWorkspaceClient,
+    dbt_tarball,
     failed_alert_output,
     failed_alert_run,
     make_run,
@@ -502,6 +507,20 @@ class TestParameters:
         ws.jobs.resolved[100] = resolved
         assert build_from(ws, make_run(1, {"t": "SUCCESS"})).task("t").parameters == expected
 
+    def test_dbt_commands_of_the_run_replace_the_resolved_commands(self) -> None:
+        # Observed on the dbt bundle: a run started with run_now(dbt_commands=...) ran those commands, but the dbt task
+        # run's resolved_values still held the task's own commands. Only the run's overriding_parameters has them.
+        ws = FakeWorkspaceClient()
+        run = make_run(1, {"dbt_build": "SUCCESS", "check": "SUCCESS"})
+        run.overriding_parameters = jobs.RunParameters(dbt_commands=["dbt build --select tag:ci"])
+        ws.jobs.resolved[100] = jobs.ResolvedValues(
+            dbt_task=jobs.ResolvedDbtTaskValues(commands=["dbt deps", "dbt build"])
+        )
+        ws.jobs.resolved[101] = jobs.ResolvedValues(notebook_task=jobs.ResolvedNotebookTaskValues({"p": "1"}))
+        built = build_from(ws, run)
+        assert built.task("dbt_build").parameters == ["dbt build --select tag:ci"]
+        assert built.task("check").parameters == {"p": "1"}
+
 
 class TestTriggerType:
     """The run's trigger type is what really started it, not a trigger that trigger= simulated."""
@@ -746,6 +765,54 @@ class TestTaskOutputs:
         assert task.clean_rooms_notebook_output is None
         assert task.alert_state is None
         assert task.output is None
+
+
+class TestDbtArtifacts:
+    """The artefacts of dbt tasks, downloaded while the run is built when a directory for them is given."""
+
+    def test_each_dbt_task_is_downloaded_once_with_its_headers(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        links = FakeDbtLinks()
+        monkeypatch.setattr(dbt, "_open", links)
+        links.bodies["https://x/y.tgz"] = dbt_tarball({"model.proj.orders": "success"})
+        ws = FakeWorkspaceClient()
+        raw = make_run(1, {"dbt_build": "SUCCESS", "expired": "SUCCESS", "check": "SUCCESS"})
+        output = jobs.DbtOutput(artifacts_link="https://x/y.tgz", artifacts_headers={"a": "b"})
+        ws.jobs.outputs[run_id_of(raw, "dbt_build")] = jobs.RunOutput(dbt_output=output)
+        ws.jobs.outputs[run_id_of(raw, "expired")] = jobs.RunOutput(dbt_output=jobs.DbtOutput(artifacts_link=DBT_LINK))
+        run = build_from(ws, raw, dbt_artifacts_dir=tmp_path)
+        assert sorted(links.requests) == sorted([("https://x/y.tgz", {"a": "b"}), (DBT_LINK, {})])
+        built = run.task("dbt_build").dbt
+        assert built is not None and built.all_passed
+        assert built.results["model.proj.orders"].status == "success"
+        assert built.artifacts_dir.is_relative_to(tmp_path / str(run_id_of(raw, "dbt_build")))
+        # An expired link leaves `dbt` None with a warning, and the run still builds.
+        assert run.task("expired").dbt is None
+        assert "Could not read the dbt artefacts of task 'expired'" in caplog.text
+        assert run.task("check").dbt is None
+        assert repr(run.task("dbt_build")) == repr(replace(run.task("dbt_build"), dbt=None))
+        assert serialise(run)["tasks"]["dbt_build"]["dbt"] == {
+            "artifacts_dir": str(built.artifacts_dir),
+            "results": {
+                "model.proj.orders": {
+                    "unique_id": "model.proj.orders",
+                    "status": "success",
+                    "message": "OK",
+                    "failures": None,
+                    "execution_time": 0.5,
+                }
+            },
+            "failed_models": [],
+            "all_passed": True,
+        }
+
+    def test_without_a_directory_nothing_is_fetched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        links = FakeDbtLinks()
+        monkeypatch.setattr(dbt, "_open", links)
+        task = built_task(jobs.RunOutput(dbt_output=jobs.DbtOutput(artifacts_link=DBT_LINK)), "dbt_build")
+        assert links.requests == []
+        assert task.dbt is None
 
 
 class TestSqlResults:

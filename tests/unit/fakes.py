@@ -7,12 +7,15 @@ import itertools
 import json
 import os
 import re
+import tarfile
 import time
+import urllib.error
 import urllib.parse
 import zipfile
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
+from email.message import Message
 from email.utils import format_datetime
 from io import BytesIO
 from pathlib import Path
@@ -48,6 +51,9 @@ NAME_FILTER = re.compile(r"^name LIKE '(?P<prefix>[^%']*)%'$")
 # not bytes.
 MAX_PIPELINE_NAME_CHARS = 255
 PIPELINE_SPEC_FIELDS = frozenset(pipelines.PipelineSpec.__dataclass_fields__)
+# A pre-signed link to a dbt task's artefacts, with a signature that must never reach a log line or report.json.
+DBT_LINK = "https://storage.example.com/dbt/artifacts.tar.gz?sig=secret"
+DBT_HEADERS = {"x-ms-blob-type": "BlockBlob"}
 
 
 @dataclass
@@ -194,6 +200,7 @@ class FakeJobs:
         performance_target: jobs.PerformanceTarget | None = None,
         queue: jobs.QueueSettings | None = None,
         pipeline_params: jobs.PipelineParams | None = None,
+        dbt_commands: Sequence[str] | None = None,
     ) -> SimpleNamespace:
         self.run_now_calls.append(
             {
@@ -204,6 +211,7 @@ class FakeJobs:
                 "performance_target": performance_target,
                 "queue": queue,
                 "pipeline_params": pipeline_params,
+                "dbt_commands": dbt_commands,
             }
         )
         if idempotency_token is not None and idempotency_token in self.tokens:
@@ -214,8 +222,12 @@ class FakeJobs:
         polls = self.queued.pop(0) if self.queued else [make_run(next(self._ids), {"task": "SUCCESS"})]
         run_id = polls[-1].run_id
         assert run_id is not None
-        # Like the Jobs API, every snapshot of the run names the job it belongs to.
-        self.polls[run_id] = [replace(run, job_id=job_id) for run in polls]
+        # Like the Jobs API, every snapshot of the run names the job it belongs to, and the dbt_commands it was
+        # started with under overriding_parameters.
+        overriding = polls[-1].overriding_parameters
+        if dbt_commands is not None:
+            overriding = jobs.RunParameters(dbt_commands=list(dbt_commands))
+        self.polls[run_id] = [replace(run, job_id=job_id, overriding_parameters=overriding) for run in polls]
         self._add_iterations(polls[-1])
         if idempotency_token is not None:
             self.tokens[idempotency_token] = run_id
@@ -656,6 +668,78 @@ class FakeAccountAccessControlProxy:
 
 def sp_rule_set(application_id: str) -> str:
     return f"accounts/{ACCOUNT_ID}/servicePrincipals/{application_id}/ruleSets/default"
+
+
+class FakeDbtResponse(BytesIO):
+    """The body of a pre-signed link, with the headers the storage service sends with it."""
+
+    def __init__(self, body: bytes, headers: Mapping[str, str]) -> None:
+        super().__init__(body)
+        self.headers = dict(headers)
+
+
+class FakeDbtLinks:
+    """Stands in for `dbt._open`, serving the tarball in `bodies` for each link and recording every request.
+
+    A link without a body fails with HTTP 403, as an expired pre-signed link does, and one whose body is an exception
+    raises it. A link in `lengths` is served with that `Content-Length` header instead of the body's own length.
+    """
+
+    def __init__(self) -> None:
+        self.bodies: dict[str, bytes | Exception] = {}
+        self.lengths: dict[str, int] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
+
+    def __call__(self, url: str, headers: Mapping[str, str]) -> FakeDbtResponse:
+        self.requests.append((url, dict(headers)))
+        if url not in self.bodies:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", Message(), None)
+        body = self.bodies[url]
+        if isinstance(body, Exception):
+            raise body
+        return FakeDbtResponse(body, {"Content-Length": str(self.lengths.get(url, len(body)))})
+
+
+def dbt_tarball(
+    statuses: Mapping[str, str] | None, *, manifest: bool = True, extra: Mapping[str, bytes] | None = None
+) -> bytes:
+    """Build a dbt artefacts tarball whose `target/run_results.json` gives each node in `statuses` that status.
+
+    `statuses` of `None` leaves `run_results.json` out. `manifest` adds `target/manifest.json` naming the same nodes.
+    `extra` adds members by name, such as a path that climbs out of the archive.
+    """
+    members: dict[str, bytes] = {}
+    if statuses is not None:
+        members.update(_dbt_target(statuses, manifest=manifest))
+    members.update(extra or {})
+    buffer = BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, BytesIO(data))
+    return buffer.getvalue()
+
+
+def _dbt_target(statuses: Mapping[str, str], *, manifest: bool) -> dict[str, bytes]:
+    results = []
+    for unique_id, status in statuses.items():
+        results.append(
+            {
+                "unique_id": unique_id,
+                "status": status,
+                "message": "Database Error" if status in ("error", "fail") else "OK",
+                "failures": 1 if status == "fail" else None,
+                "execution_time": 0.5,
+            }
+        )
+    members = {
+        "target/run_results.json": json.dumps({"metadata": {"dbt_version": "1.9.0"}, "results": results}).encode()
+    }
+    if manifest:
+        nodes = {unique_id: {"unique_id": unique_id, "resource_type": "model"} for unique_id in statuses}
+        members["target/manifest.json"] = json.dumps({"nodes": nodes}).encode()
+    return members
 
 
 class FakeWorkspaceClient:
