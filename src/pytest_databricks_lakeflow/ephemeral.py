@@ -194,9 +194,9 @@ class EphemeralJob:
 
         Raises:
             LakeflowError: If the job has been closed, `params` names a parameter that the job does not
-                declare after `modify_settings` has run, a serverless task that needs an environment has none, or a
-                task refers to the output of a notebook task, or to a table update or file arrival trigger that the
-                copy does not have, which `jobs.create` refuses.
+                declare after `modify_settings` has run, a serverless task that needs an environment has none, a
+                task refers to the output of a notebook task, or a task or job parameter default refers to a table
+                update or file arrival trigger that the copy does not have, which `jobs.create` refuses.
                 Also if the job runs as a service principal and you do not have the Service Principal User role on
                 it, or `jobs.create` refuses the job with `PERMISSION_DENIED`, with the platform's error as its
                 cause. Without a service principal in `run_as`, errors from `jobs.create` are raised unchanged.
@@ -376,7 +376,7 @@ class EphemeralJob:
             _check_stop_after(self.job_key, stop_after, limit)
         if replay is not None:
             self._replay(replay, only)
-        handle = self.start(
+        handle = self._start(
             params,
             only,
             timeout=timeout,
@@ -387,8 +387,8 @@ class EphemeralJob:
             refresh_selection=refresh_selection,
             refresh_flow_selection=refresh_flow_selection,
             reset_checkpoint_selection=reset_checkpoint_selection,
+            stream=stream,
         )
-        handle._stream = stream
         return handle.wait(stop_after=stop_after)
 
     def start(
@@ -438,6 +438,36 @@ class EphemeralJob:
                 selection is set and the installed databricks-sdk cannot send it.
             ValueError: If `performance_target` is not a known performance target.
         """
+        return self._start(
+            params,
+            only,
+            timeout=timeout,
+            performance_target=performance_target,
+            queue=queue,
+            full_refresh=full_refresh,
+            full_refresh_selection=full_refresh_selection,
+            refresh_selection=refresh_selection,
+            refresh_flow_selection=refresh_flow_selection,
+            reset_checkpoint_selection=reset_checkpoint_selection,
+            stream=None,
+        )
+
+    def _start(
+        self,
+        params: Mapping[str, str] | None,
+        only: Sequence[str] | None,
+        *,
+        timeout: timedelta | None,
+        performance_target: jobs.PerformanceTarget | str | None,
+        queue: bool | None,
+        full_refresh: bool | None,
+        full_refresh_selection: Sequence[str] | None,
+        refresh_selection: Sequence[str] | None,
+        refresh_flow_selection: Sequence[str] | None,
+        reset_checkpoint_selection: Sequence[str] | None,
+        stream: bool | None,
+    ) -> RunHandle:
+        """Start a run as `start()` does, with the handle streaming as `stream` says, `None` following the flag."""
         target = _performance_target(performance_target)
         queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
@@ -460,7 +490,7 @@ class EphemeralJob:
         run_id, first = self._start_run(
             item, merged, selected, performance_target=target, queue=queue_settings, pipeline_params=refresh
         )
-        return RunHandle(self, run_id, item, first, timeout)
+        return RunHandle(self, run_id, item, first, timeout, stream=stream)
 
     def _selection(self, only: Sequence[str] | None) -> list[str] | None:
         """The `only` of a run: what `only` selects and the injected tasks it needs, less a teardown left to close."""
@@ -913,16 +943,25 @@ class EphemeralJob:
 
     def _close_pipelines(self, failed: bool) -> None:
         if self.job_id is None:
-            made = [copy.pipeline_id for copy in self.pipelines if copy.pipeline_id is not None]
-            if made:
-                log.warning(
-                    "The job copying %r was not created, so no job points at its pipeline copies %s, and they are "
-                    "deleted whatever keep_failed says",
-                    self.job_key,
-                    made,
-                )
+            self._warn_copies_not_kept(failed)
             failed = False
         _close_all(self.pipelines, failed)
+
+    def _warn_copies_not_kept(self, failed: bool) -> None:
+        """Warn when `keep_failed` alone would have kept the copies of a job that was never created."""
+        state = session.current()
+        kept_anyway = state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed=False)
+        kept_if_failed = state.keeps(self.lakeflow.keep, self.lakeflow.keep_failed, failed)
+        if kept_anyway or not kept_if_failed:
+            return
+        made = [copy.pipeline_id for copy in self.pipelines if copy.pipeline_id is not None]
+        if made:
+            log.warning(
+                "The job copying %r was not created, so no job points at its pipeline copies %s, and they are "
+                "deleted whatever keep_failed says",
+                self.job_key,
+                made,
+            )
 
     def _write_debug_notebooks(self) -> None:
         """Write a debug notebook for each notebook task that failed in the last run. Errors are only logged."""
@@ -976,7 +1015,14 @@ class RunHandle:
     """
 
     def __init__(
-        self, job: EphemeralJob, run_id: int, item: pytest.Item, first: jobs.Run, timeout: timedelta | None = None
+        self,
+        job: EphemeralJob,
+        run_id: int,
+        item: pytest.Item,
+        first: jobs.Run,
+        timeout: timedelta | None = None,
+        *,
+        stream: bool | None = None,
     ) -> None:
         self.job = job
         self.run_id = run_id
@@ -984,8 +1030,8 @@ class RunHandle:
         self._first = first
         self._first_at = time.monotonic()
         self._timeout = timeout
-        # Set by run(stream=...); None follows --lakeflow-live.
-        self._stream: bool | None = None
+        # From run(stream=...); None follows --lakeflow-live.
+        self._stream = stream
         self._result: JobRun | None = None
 
     @property
@@ -1033,7 +1079,7 @@ class RunHandle:
         if stream is None:
             stream = session.current().live
         if stream:
-            emit(self._item, f"Started run {self.run_id} of job {job.job_id}: {self.url}")
+            self._emit_start()
         first = self._first
         self._first = None
         run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at, stop_after, stream)
@@ -1053,6 +1099,13 @@ class RunHandle:
         if job.lakeflow.run_finished is not None:
             job.lakeflow.run_finished(result, self._item)
         return result
+
+    def _emit_start(self) -> None:
+        started = f"Started run {self.run_id} of job {self.job.job_id}"
+        # The first poll may not carry the run's page yet.
+        if self.url is not None:
+            started = f"{started}: {self.url}"
+        emit(self._item, started)
 
     def cancel(self) -> None:
         """Cancel the run. It ends `CANCELED` shortly after, which a later `wait()` returns."""
