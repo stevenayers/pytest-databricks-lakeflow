@@ -272,7 +272,8 @@ class Lakeflow:
         It reports a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose
         task is not upstream of the task that refers to it, a `depends_on` task that is not in the job, and retry
         settings on a `for_each_task`, which belong on its nested task. `bundle validate` passes all of them. It
-        lints the template as deployed, and works outside a test, for example in a session-scoped fixture.
+        lints the template the session loaded: the deployed job, or the `bundle validate` output under
+        `sync="sync"` or `"none"`. It works outside a test, for example in a session-scoped fixture.
 
         Args:
             key: The bundle resource key of the job.
@@ -468,7 +469,7 @@ class Lakeflow:
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
-        override_for_each_inputs(settings, for_each_inputs or {})
+        override_for_each_inputs(settings, for_each_inputs or {}, stubs=list(upstream_task_values or {}))
         settings = inject_trigger(settings, trigger or {})
         self._inject_lifecycle(settings, notebooks, params or {})
         return self._ephemeral(

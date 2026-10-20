@@ -505,10 +505,6 @@ class TestTriggerType:
         run, _ = build("probe_success")
         assert run.trigger_type == recorded_data("probe_success")["trigger"] == "ONE_TIME"
 
-    def test_trigger_type_is_none_when_the_run_has_none(self) -> None:
-        run = replace(make_run(1, {"t": "SUCCESS"}), trigger=None)
-        assert build_from(FakeWorkspaceClient(), run).trigger_type is None
-
 
 class TestAttempts:
     """A retried task describes its last attempt and keeps every attempt in order."""

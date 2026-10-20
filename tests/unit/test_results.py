@@ -29,6 +29,7 @@ from .fakes import DATA, FakeWorkspaceClient, notebook_export
 
 SAMPLES: list[dict[str, Any]] = json.loads((DATA / "task_errors.json").read_text())
 FAILED_EXPORT = (DATA / "notebook_export_failed.html").read_text()
+CLASSIC_EXPORT = (DATA / "notebook_export_classic.html").read_text()
 UNLINKED = [s for s in SAMPLES if not s["name"].endswith("_linked")]
 LINKED = [s for s in SAMPLES if s["name"].endswith("_linked")]
 LOWERCASE_TAGGED = [
@@ -545,7 +546,7 @@ class TestNotebookExport:
     def test_parse_recorded_classic_export(self) -> None:
         # Recorded from the classic bundle's printer task on a 17.3 job cluster. The 13.3 LTS export has the same shape:
         # `listResults` of `ansi` items named "stdout" and "stderr", not legacy `<div class="ansiout">` html results.
-        notebook = parse_notebook_export((DATA / "notebook_export_classic.html").read_text())
+        notebook = parse_notebook_export(CLASSIC_EXPORT)
         [cell] = notebook.cells
         assert cell.code.startswith("import sys\n\nrows = spark.range(3).count()\n")
         assert cell.output == "printer: 3 rows\nprinter: to stderr\n"
@@ -675,7 +676,7 @@ def event(event_id: str, update_id: str | None, timestamp: str, level: str = "IN
     return pipelines.PipelineEvent(id=event_id, origin=origin, timestamp=timestamp, level=pipelines.EventLevel(level))
 
 
-def pipeline_update(ws: FakeWorkspaceClient) -> PipelineUpdate:
+def failed_update(ws: FakeWorkspaceClient) -> PipelineUpdate:
     # The task run started at 2026-10-19T19:00:27Z, a second before the platform created the update.
     return PipelineUpdate(
         pipeline_id="abc",
@@ -708,7 +709,7 @@ class TestPipelineUpdate:
 
     def test_events_filter_by_level(self) -> None:
         ws = fake_with_events()
-        errors = pipeline_update(ws).events(level="ERROR")
+        errors = failed_update(ws).events(level="ERROR")
         assert [e.id for e in errors] == ["failed"]
         assert ws.pipelines.calls == [
             {"method": "list_pipeline_events", "pipeline_id": "abc", "filter": "level='ERROR'"}
@@ -716,12 +717,12 @@ class TestPipelineUpdate:
 
     def test_events_without_a_level_pass_no_filter(self) -> None:
         ws = fake_with_events()
-        assert [e.id for e in pipeline_update(ws).events()] == ["failed", "progress", "started"]
+        assert [e.id for e in failed_update(ws).events()] == ["failed", "progress", "started"]
         assert ws.pipelines.calls == [{"method": "list_pipeline_events", "pipeline_id": "abc", "filter": None}]
 
     def test_events_stop_paging_before_the_task_started(self) -> None:
         ws = fake_with_events()
-        pipeline_update(ws).events()
+        failed_update(ws).events()
         assert ws.pipelines.read_events == ["next", "failed", "progress", "started", "created"]
 
     def test_from_info_pages_events_from_a_minute_before_the_update(self) -> None:
@@ -743,8 +744,8 @@ class TestPipelineUpdate:
         assert ws.pipelines.read_events == ["next", "failed", "progress", "started", "created"]
 
     def test_workspace_client_stays_out_of_the_repr_and_equality(self) -> None:
-        first = pipeline_update(FakeWorkspaceClient())
-        assert first == pipeline_update(FakeWorkspaceClient())
+        first = failed_update(FakeWorkspaceClient())
+        assert first == failed_update(FakeWorkspaceClient())
         assert repr(first) == (
             "PipelineUpdate(pipeline_id='abc', update_id='mine', state='FAILED', cause='JOB_TASK', full_refresh=False)"
         )

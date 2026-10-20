@@ -98,11 +98,13 @@ DEBUG_HINT = (
     "# unless the notebook passes debugValue=."
 )
 CUT_WIDGETS_HINT = (
-    "# These widgets hold only the first 2048 bytes of their value: {names}. The notebook reads the\n"
+    f"# These widgets hold only the first {WIDGET_LIMIT_BYTES} bytes of their value: {{names}}. "
+    "The notebook reads the\n"
     "# truncated values; the full values are in the parameters dict in the next cell."
 )
 LONG_VALUES_HINT = (
-    "# Values longer than the 2048 bytes a text widget holds, in full. Their widgets hold a truncated copy, which is\n"
+    f"# Values longer than the {WIDGET_LIMIT_BYTES} bytes a text widget holds, in full. "
+    "Their widgets hold a truncated copy, which is\n"
     "# what the notebook reads."
 )
 
