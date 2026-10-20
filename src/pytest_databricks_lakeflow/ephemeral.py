@@ -606,7 +606,7 @@ class EphemeralJob:
         stale = first is not None and time.monotonic() - first_at >= _poll_seconds(self.lakeflow)
         polling = _Polling(run_id, item)
         run = self._poll(polling, deadline, first, stale, stop_at)
-        if _terminated(run):
+        if terminated(run):
             return run, polling.outputs
         if not polling.cancelled:
             cancel_run(self.lakeflow.ws, run_id)
@@ -640,7 +640,7 @@ class EphemeralJob:
         while True:
             self._record_url(polling.run_id, run, polling.item)
             self._log_progress(run, polling.logged, polling.outputs, progress)
-            if _terminated(run):
+            if terminated(run):
                 return run
             if not stale:
                 now = time.monotonic()
@@ -673,7 +673,7 @@ class EphemeralJob:
     def _read_cancelled(self, polling: _Polling) -> JobRun | None:
         """Poll a cancelled run until it terminates, for at most the grace period, and build its `JobRun`."""
         run = self._poll(polling, time.monotonic() + TIMEOUT_GRACE_SECONDS)
-        if _terminated(run):
+        if terminated(run):
             return self._job_run(run, polling.outputs)
         log.warning(
             "Run %s of %r had not ended %s seconds after it was cancelled, so report.json does not list it: %s",
@@ -1018,7 +1018,7 @@ class RunHandle:
         # Held on the test only for --lakeflow-report-dir, because a run can carry megabytes of logs and notebooks.
         if session.current().report_dir is not None:
             self._item.stash.setdefault(RUNS, []).append((job, result))
-        _record_outcome(self._item, result)
+        record_outcome(self._item, result)
         log.info("Run %s finished %s in %s: %s", self.run_id, result.result_state, result.duration, result.run_url)
         _warn_on_failed_teardown(result)
         if job.lakeflow.run_finished is not None:
@@ -1269,7 +1269,7 @@ def _performance_target(value: jobs.PerformanceTarget | str | None) -> jobs.Perf
     return jobs.PerformanceTarget(value)
 
 
-def _record_outcome(item: pytest.Item, result: JobRun) -> None:
+def record_outcome(item: pytest.Item, result: JobRun) -> None:
     """Record the run's outcome in the test's user properties, with its resolved parameters when it failed.
 
     The notebook lines of the failing tasks go to the stash instead, for the report section of a failed test.
@@ -1302,7 +1302,8 @@ def _warn_on_failed_teardown(result: JobRun) -> None:
     log.warning("The teardown task of run %s failed: %s %s", result.run_id, task_outcome(teardown), teardown.run_url)
 
 
-def _terminated(run: jobs.Run) -> bool:
+def terminated(run: jobs.Run) -> bool:
+    """Whether the run has ended, from its V2 status, or its legacy life cycle when it has none."""
     if run.status and run.status.state:
         return run.status.state == TERMINATED
     state = run.state.life_cycle_state if run.state else None

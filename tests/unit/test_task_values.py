@@ -21,6 +21,7 @@ from pytest_databricks_lakeflow.settings import (
     inject_lifecycle,
     inject_probes,
     merge_environments,
+    recover_injected,
     stub_upstream,
     upstream_values_from,
     wrap_task,
@@ -385,6 +386,25 @@ class TestInjectProbes:
         assert inject_probes(example_settings(), {}, HELPERS) == example_settings()
         with pytest.raises(LakeflowError, match=r"not in the job: \['nope'\]"):
             inject_probes(example_settings(), {"nope": ["k"]}, HELPERS)
+
+
+class TestRecoverInjected:
+    """`recover_injected` reads back the stubs and probes that a created copy carries."""
+
+    def test_recover_injected_from_wrapped_settings(self) -> None:
+        settings = wrap_task(example_settings(), "transform", UPSTREAM, ["row_count", "{{x}}"], HELPERS)
+        assert recover_injected(settings) == (frozenset({"extract"}), {"transform": ["row_count", "{{x}}"]})
+
+    def test_recover_injected_from_probed_job(self) -> None:
+        settings = inject_probes(example_settings(), {"transform": ["stage"], "load": ["rows", "bytes"]}, HELPERS)
+        stub_upstream(settings, {"extract": {"row_count": 1}}, HELPERS)
+        assert recover_injected(settings) == (
+            frozenset({"extract"}),
+            {"transform": ["stage"], "load": ["rows", "bytes"]},
+        )
+
+    def test_recover_injected_finds_nothing_in_a_plain_copy(self) -> None:
+        assert recover_injected(example_settings()) == (frozenset(), {})
 
 
 class TestHelperCompute:

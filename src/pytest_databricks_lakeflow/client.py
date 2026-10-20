@@ -18,10 +18,17 @@ from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
 from pytest_databricks_lakeflow import bundle, helpers, session
-from pytest_databricks_lakeflow.ephemeral import TEARDOWN_AT, EphemeralJob, EphemeralPipeline, TeardownAt
+from pytest_databricks_lakeflow.ephemeral import (
+    TEARDOWN_AT,
+    EphemeralJob,
+    EphemeralPipeline,
+    TeardownAt,
+    record_outcome,
+    terminated,
+)
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
-from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport
+from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport, build_job_run
 from pytest_databricks_lakeflow.settings import (
     SIDE_EFFECTS,
     Helpers,
@@ -35,6 +42,7 @@ from pytest_databricks_lakeflow.settings import (
     check_params,
     check_task_params,
     disable_tasks,
+    disabled_task_keys,
     inject_lifecycle,
     inject_probes,
     inject_test_marker,
@@ -44,6 +52,7 @@ from pytest_databricks_lakeflow.settings import (
     override_for_each_inputs,
     override_tasks,
     pipeline_task_ids,
+    recover_injected,
     require_task,
     run_job_tasks,
     sanitise,
@@ -69,6 +78,8 @@ UNVERSIONED_ARTIFACTS = (
     "the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
 )
 LOCAL_PREFIXES = ("./", "../")
+# The tag holding the bundle resource key of the job an ephemeral job copies, which attach() reads.
+JOB_KEY_TAG = "pytest_job_key"
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
@@ -629,6 +640,77 @@ class Lakeflow:
             teardown_at=teardown_at,
         )
 
+    def attach(self, run_id: int) -> JobRun:
+        """Rebuild the outcome of a finished run of a kept ephemeral job, without running anything.
+
+        The run's job must still exist, as `keep_failed`, `keep` and `--lakeflow-keep` leave it, because its settings
+        say which tasks were stubs and which values the probes captured. Nothing is deployed, created, cancelled or
+        deleted, so a test that only attaches needs no bundle. The outcome is recorded in the test's report section
+        as for a run the test started, but `run_finished` is not called. A child run of a Run Job task is named by
+        its job id, not its bundle key.
+
+            run = lakeflow.attach(5437110661)
+            assert run.task("transform").task_values == {"row_count": 3}
+
+        Args:
+            run_id: The job run id, the number at the end of the `Kept run:` URL. Not a task run id.
+
+        Returns:
+            The run's outcome, as `EphemeralJob.run()` returned it.
+
+        Raises:
+            LakeflowError: If called outside a test, the run does not exist, it is a task run, it has not finished,
+                its job no longer exists, or its job was not created by this plugin.
+        """
+        item = session.current_item()
+        run = self._finished_run(run_id)
+        if run.job_id is None:
+            raise LakeflowError(f"Run {run_id} belongs to no job, so pytest-databricks-lakeflow did not start it")
+        try:
+            job = self.ws.jobs.get(run.job_id)
+        except NotFound:
+            raise LakeflowError(
+                f"Job {run.job_id} of run {run_id} no longer exists, so the run cannot be rebuilt. attach() needs the "
+                "job the run belongs to, which keep_failed, keep and --lakeflow-keep preserve."
+            ) from None
+        settings = job.settings or jobs.JobSettings()
+        job_key = _attached_job_key(settings, run.job_id, run_id)
+        stubs, capture = recover_injected(settings)
+        # Passing no job_keys keeps attach() off the bundle, so a child run is named by its job id.
+        result = build_job_run(
+            self.ws,
+            run,
+            job_key=job_key,
+            job_id=run.job_id,
+            stubs=stubs,
+            capture_task_values=capture,
+            disabled=disabled_task_keys(settings),
+            job_keys={},
+            notebook_export=self.notebook_export,
+        )
+        item.user_properties.append(("lakeflow_job_url", f"{self.ws.config.host}/jobs/{run.job_id}"))
+        item.user_properties.append(("lakeflow_job_id", run.job_id))
+        item.user_properties.append(("lakeflow_run_url", run.run_page_url))
+        record_outcome(item, result)
+        log.info("Attached run %s of job %s: %s", run_id, run.job_id, result.result_state)
+        return result
+
+    def _finished_run(self, run_id: int) -> jobs.Run:
+        """Get the job run `run_id` for `attach()`, refusing a task run and a run that has not finished."""
+        try:
+            run = self.ws.jobs.get_run(run_id)
+        except NotFound:
+            raise LakeflowError(f"Run {run_id} does not exist in {self.ws.config.host}") from None
+        if run.job_run_id is not None and run.job_run_id != run.run_id:
+            raise LakeflowError(
+                f"Run {run_id} is a task run of job run {run.job_run_id}. Pass the job run id, the one in the Kept "
+                "run: URL."
+            )
+        if not terminated(run):
+            state = _run_state(run)
+            raise LakeflowError(f"Run {run_id} has not finished ({state}). attach() reads finished runs only.")
+        return run
+
     def pipeline(
         self,
         key: str,
@@ -836,7 +918,7 @@ class Lakeflow:
             if children == "refuse":
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
-        tags = self._tags(item)
+        tags = {**self._tags(item), JOB_KEY_TAG: key}
         sanitise(
             settings,
             name=name or item.nodeid,
@@ -942,6 +1024,30 @@ class Lakeflow:
             budget_policy_id=self.budget_policy_id,
         )
         return EphemeralPipeline(self, pipeline_key, pipeline_id, kwargs, schema)
+
+
+def _attached_job_key(settings: jobs.JobSettings, job_id: int, run_id: int) -> str:
+    """Get the bundle job key that the plugin tagged a job with, refusing a job that it did not create."""
+    tags = settings.tags or {}
+    if "pytest" not in tags:
+        raise LakeflowError(
+            f"Job {job_id} of run {run_id} was not created by pytest-databricks-lakeflow (no pytest tag)"
+        )
+    if JOB_KEY_TAG not in tags:
+        raise LakeflowError(
+            f"Job {job_id} of run {run_id} was created by a release of pytest-databricks-lakeflow that did not record "
+            "the bundle job key, so it cannot be attached"
+        )
+    return tags[JOB_KEY_TAG]
+
+
+def _run_state(run: jobs.Run) -> str:
+    """The state of a run that has not finished: its V2 status, or its legacy life cycle when it has none."""
+    if run.status and run.status.state:
+        return run.status.state.value
+    if run.state and run.state.life_cycle_state:
+        return run.state.life_cycle_state.value
+    return "unknown"
 
 
 def _check_deploy_flags(deploy_flags: Sequence[str]) -> None:

@@ -582,6 +582,183 @@ class TestKeepRules:
         assert fake_ws.jobs.deleted == deleted
 
 
+def queue_probed_transform(ws: FakeWorkspaceClient) -> None:
+    """Queue run 77 of a task job on transform, with a stub for extract and a probe that captured `row_count` 3."""
+    run = make_run(77, {"extract": "SUCCESS", "transform": "SUCCESS", "__pytest_probe__transform": "SUCCESS"})
+    probe_output = jobs.NotebookOutput(result=json.dumps({"values": {"row_count": 3}, "missing": []}))
+    ws.jobs.queue(run, {7702: jobs.RunOutput(notebook_output=probe_output)})
+
+
+def add_job_run(ws: FakeWorkspaceClient, run: jobs.Run, tags: dict[str, str]) -> int:
+    """Add a job with `tags` and make `get_run` report `run` as a run of it, returning the job's id."""
+    settings = example_settings()
+    settings.tags = tags
+    job_id = ws.jobs.add(settings)
+    ws.jobs.add_run(replace(run, job_id=job_id))
+    return job_id
+
+
+def junit_properties(path: Path, test: str) -> dict[str, str]:
+    """Read the junit properties of the test case `test` from a `--junitxml` report."""
+    pattern = rf'<testcase [^>]*name="{test}".*?</testcase>'
+    case = re.search(pattern, path.read_text(), re.DOTALL)
+    assert case is not None, f"no test case {test} in {path}"
+    return dict(re.findall(r'<property name="([^"]+)" value="([^"]*)"', case.group(0)))
+
+
+PLUGIN_TAGS = {"pytest": "", "pytest_job_key": "my_job"}
+
+
+class TestAttach:
+    """Rebuilding a JobRun from a kept job's run."""
+
+    def test_attach_rebuilds_a_kept_run(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        queue_probed_transform(fake_ws)
+        result = run_tests(
+            pytester,
+            """
+            def test_kept(lakeflow):
+                with lakeflow.task(
+                    "my_job.transform",
+                    upstream_task_values={"extract": {"row_count": 3}},
+                    capture_task_values=["row_count"],
+                ) as job:
+                    job.run()
+                    assert False, "keep the job"
+
+            def test_attach(lakeflow):
+                run = lakeflow.attach(77)
+                assert run.job_key == "my_job"
+                assert run.job_id == 1001
+                assert set(run.tasks) == {"transform"}
+                assert set(run.injected_tasks) == {"extract", "__pytest_probe__transform"}
+                assert run.task("transform").task_values == {"row_count": 3}
+            """,
+            "--junitxml=report.xml",
+        )
+        result.assert_outcomes(passed=1, failed=1)
+        assert fake_ws.jobs.deleted == []
+        assert fake_ws.jobs.cancelled == []
+        assert len(fake_ws.jobs.run_now_calls) == 1
+        properties = junit_properties(pytester.path / "report.xml", "test_attach")
+        assert properties["lakeflow_job_url"] == f"{HOST}/jobs/1001"
+        assert properties["lakeflow_job_id"] == "1001"
+        assert properties["lakeflow_run_url"] == f"{HOST}/jobs/runs/77"
+        assert properties["lakeflow_run_id"] == "77"
+        assert properties["lakeflow_result_state"] == "SUCCESS"
+
+    @pytest.mark.parametrize(
+        ("tags", "message"),
+        [
+            pytest.param(
+                {"dev": "someone"},
+                "Job 1001 of run 90 was not created by pytest-databricks-lakeflow (no pytest tag)",
+                id="foreign",
+            ),
+            pytest.param(
+                {"pytest": ""},
+                "Job 1001 of run 90 was created by a release of pytest-databricks-lakeflow that did not record the "
+                "bundle job key, so it cannot be attached",
+                id="no-job-key",
+            ),
+        ],
+    )
+    def test_attach_rejects_foreign_jobs(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, tags: dict[str, str], message: str
+    ) -> None:
+        add_job_run(fake_ws, make_run(90, {"extract": "SUCCESS"}), tags)
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(90)
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+
+    def test_attach_rejects_an_active_run(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        add_job_run(fake_ws, running_run(91, {"extract": "RUNNING"}), PLUGIN_TAGS)
+        message = "Run 91 has not finished (RUNNING). attach() reads finished runs only."
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(91)
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        assert fake_ws.jobs.gets == [], "the job is not read for a run that has not finished"
+
+    def test_attach_rejects_a_task_run(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        add_job_run(fake_ws, make_run(77, {"extract": "SUCCESS", "transform": "SUCCESS"}), PLUGIN_TAGS)
+        message = "Run 7701 is a task run of job run 77. Pass the job run id, the one in the Kept run: URL."
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(7701)
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+
+    def test_attach_to_a_run_that_does_not_exist(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(5)
+                assert str(excinfo.value) == "Run 5 does not exist in {HOST}"
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+
+    def test_attach_after_the_job_was_deleted(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        queue_probed_transform(fake_ws)
+        message = (
+            "Job 1001 of run 77 no longer exists, so the run cannot be rebuilt. attach() needs the job the run belongs "
+            "to, which keep_failed, keep and --lakeflow-keep preserve."
+        )
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_deleted(lakeflow):
+                with lakeflow.task("my_job.transform", upstream_task_values={{"extract": {{"row_count": 3}}}}) as job:
+                    job.run()
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(77)
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=2)
+        assert fake_ws.jobs.deleted == [1001]
+
+    def test_attach_outside_a_test(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        pytester.makepyfile(
+            """
+            from pytest_databricks_lakeflow import Lakeflow, LakeflowError
+
+            try:
+                Lakeflow().attach(1)
+            except LakeflowError as e:
+                ERROR = str(e)
+
+            def test_error():
+                assert "Use Lakeflow inside a test" in ERROR
+            """
+        )
+        pytester.runpytest().assert_outcomes(passed=1)
+        assert fake_ws.jobs.get_run_calls == []
+
+
 class TestCreateSettings:
     """What reaches `jobs.create`: the test marker, attribution, permissions, run_as and compute settings."""
 
@@ -648,12 +825,22 @@ class TestCreateSettings:
             "pytest": "",
             "pytest_run_id": "9",
             "pytest_nodeid": "test_jobs.py::test_job",
+            "pytest_job_key": "my_job",
             "pytest_ci_url": "https://github.com/o/r/actions/runs/9",
             "pytest_user": "someone",
             "pytest_git_sha": "abc",
             "pytest_git_branch": "main",
         }
         assert created["description"] == "test_jobs.py::test_job https://github.com/o/r/actions/runs/9"
+
+    @pytest.mark.parametrize(
+        "make", ['lakeflow.job("my_job")', 'lakeflow.task("my_job.transform", upstream_task_values={"extract": {}})']
+    )
+    def test_created_jobs_carry_the_job_key_tag(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, make: str
+    ) -> None:
+        run_tests(pytester, f"def test_job(lakeflow):\n    with {make}:\n        pass\n").assert_outcomes(passed=1)
+        assert fake_ws.jobs.created[0]["tags"]["pytest_job_key"] == "my_job"
 
     def test_attribution_user_falls_back_to_the_workspace_user(
         self, pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, fake_ws: FakeWorkspaceClient
