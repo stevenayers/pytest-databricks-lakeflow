@@ -1,14 +1,18 @@
 r"""Integration tests for the ``for_each`` bundle (tests/integration/bundles/for_each), run in a real workspace.
 
-The bundle has one serverless job, ``fanout``: the for-each task ``loop`` repeats the notebook task ``each`` over the
-deployed inputs ``["a", "b", "c"]``, passing each one as the ``item`` widget, which ``each`` returns as its output, and
-``after`` runs once ``loop`` is done. Run the tests with:
+The bundle has two serverless jobs. In ``fanout``, the for-each task ``loop`` repeats the notebook task ``each`` over
+the deployed inputs ``["a", "b", "c"]``, passing each one as the ``item`` widget, which ``each`` returns as its output,
+and ``after`` runs once ``loop`` is done. ``fanout_objects`` iterates over objects: ``extract`` sets the task value
+``rows``, then the body ``inner`` of ``loop`` reads the whole item, its ``id`` and ``rows`` and returns the three
+widgets as JSON, and ``after`` runs last. Run the tests with:
 
     LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
         uv run pytest tests/integration/test_for_each.py -n 8 --dist loadgroup --lakeflow-sweep
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 from databricks.sdk.service import jobs
@@ -50,6 +54,39 @@ def test_for_each_inputs_on_a_task_job(lakeflow: Lakeflow) -> None:
         assert run.succeeded, run
         assert sorted(run.tasks) == ["loop"]
         assert _iteration_outputs(lakeflow, run) == ["z"]
+
+
+def test_nested_task_runs_once(lakeflow: Lakeflow) -> None:
+    with lakeflow.task(
+        "fanout_objects.loop.inner",
+        input={"id": 7, "path": "/x"},
+        upstream_task_values={"extract": {"rows": 3}},
+    ) as job:
+        run = job.run()
+        assert run.succeeded, run
+        assert run.executed_tasks == ["inner"]
+        inner = run.task("inner")
+        assert isinstance(inner.parameters, dict)
+        # As an iteration would, the body gets the numbers of an object input as doubles.
+        assert inner.parameters["item_id"] == "7.0"
+        assert inner.parameters["rows"] == "3"
+        assert inner.output is not None
+        assert json.loads(inner.output) == {"item": '{"id":7.0,"path":"/x"}', "item_id": "7.0", "rows": "3"}
+
+
+def test_the_body_gets_an_object_input_as_the_loop_gives_it(lakeflow: Lakeflow) -> None:
+    item = {"id": 7, "path": "/x"}
+    with lakeflow.job("fanout_objects", for_each_inputs={"loop": [item]}) as job:
+        looped = job.run()
+        assert looped.succeeded, looped
+        [iteration] = _iteration_outputs(lakeflow, looped)
+    upstream = {"extract": {"rows": 3}}
+    with lakeflow.task("fanout_objects.loop.inner", input=item, upstream_task_values=upstream) as job:
+        lifted = job.run()
+        assert lifted.succeeded, lifted
+        output = lifted.task("inner").output
+        assert output is not None
+    assert json.loads(output) == json.loads(iteration)
 
 
 def _task_settings(lakeflow: Lakeflow, job_id: int, task_key: str) -> jobs.Task:

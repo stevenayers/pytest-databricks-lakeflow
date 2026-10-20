@@ -527,7 +527,7 @@ Each list replaces the task's `for_each_task.inputs` on the copy as JSON, here `
 
 A key that is not a task of the job, or a task without a `for_each_task` (a for-each task that `upstream_task_values` stubs has none), raises `LakeflowError` listing the job's for-each tasks, and so does a list that is not JSON-serialisable or is longer than 5,000 characters as JSON, the most `jobs/create` accepts. So does a list that `jobs/create` would refuse: one that mixes objects with strings, numbers or booleans, or holds `None` or a nested list, such as `Inputs for task 'loop' in for_each_inputs hold None at index 1. jobs/create takes a list of all primitives or all objects, without null or nested lists.` Objects may hold lists, objects and `None` as values. `lakeflow.task()` takes a list for the task under test, see [Make a task job](task-tests.md#make-a-task-job).
 
-`run.task("loop")` describes the for-each task as one task: its iterations are not in the result yet, and the nested task cannot be the target of `lakeflow.task()` or `run(only=...)`.
+`run.task("loop")` describes the for-each task as one task: its iterations are not in the result yet, and the nested task cannot be the target of `run(only=...)`. To run the nested task once, without its loop, with an item you choose, see [For-each bodies](task-tests.md#for-each-bodies).
 
 ## Simulate a trigger
 
