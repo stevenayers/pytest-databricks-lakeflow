@@ -19,7 +19,7 @@ import json
 import pytest
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import ForEachError, ForEachStats, JobRun, Lakeflow
+from pytest_databricks_lakeflow import ForEachError, ForEachStats, JobRun, Lakeflow, LakeflowError
 
 from .conftest import lakeflow_for
 
@@ -59,8 +59,11 @@ def test_for_each_inputs_on_a_task_job(lakeflow: Lakeflow) -> None:
 
 
 def test_for_each_iterations(lakeflow: Lakeflow) -> None:
+    # An iteration cannot set a task value, so a probe on the for-each task is refused before anything is created.
+    with pytest.raises(LakeflowError, match="the for-each task 'loop', whose iterations cannot set task values"):
+        lakeflow.job("fanout", capture_task_values={"loop": ["seen"]})
     inputs = {"loop": ["a", "b"]}
-    with lakeflow.job("fanout", for_each_inputs=inputs, capture_task_values={"loop": ["seen"]}) as job:
+    with lakeflow.job("fanout", for_each_inputs=inputs) as job:
         run = job.run(performance_target="STANDARD")
     assert run.succeeded, run
     loop = run.task("loop")
@@ -68,14 +71,11 @@ def test_for_each_iterations(lakeflow: Lakeflow) -> None:
     assert [iteration.output for iteration in loop.iterations] == ["a", "b"]
     assert [iteration.parameters for iteration in loop.iterations] == [{"item": "a"}, {"item": "b"}]
     assert loop.for_each_stats == ForEachStats(total_iterations=2, succeeded_iterations=2, failed_iterations=0)
-    # A probe on the for-each task reads nothing: the loop sets no value, and an iteration cannot set one.
-    assert loop.task_values == {}
-    assert loop.missing_task_values == ["seen"]
 
 
 def test_a_failing_iteration(lakeflow: Lakeflow) -> None:
     inputs = {"loop": ["a", "fail", "set_value"]}
-    with lakeflow.job("fanout", for_each_inputs=inputs, capture_task_values={"loop": ["seen"]}) as job:
+    with lakeflow.job("fanout", for_each_inputs=inputs) as job:
         run = job.run(performance_target="STANDARD")
     assert run.failed
     assert run.task("after").upstream_failed
@@ -88,7 +88,20 @@ def test_a_failing_iteration(lakeflow: Lakeflow) -> None:
     assert refused is not None and "setting task values is not supported for iterations" in refused.message
     errors = [ForEachError("Workload failed, see run output for details", 2, "RunExecutionError")]
     assert loop.for_each_stats == ForEachStats(3, 1, 2, errors)
-    assert loop.missing_task_values == ["seen"]
+
+
+def test_a_failing_iteration_is_not_retried(lakeflow: Lakeflow) -> None:
+    # Before sanitise set disable_auto_optimization on the nested task, serverless retried each failing iteration once.
+    with lakeflow.job("fanout", for_each_inputs={"loop": ["fail"]}) as job:
+        assert job.job_id is not None
+        loop = _task_settings(lakeflow, job.job_id, "loop").for_each_task
+        assert loop is not None and loop.task is not None
+        assert loop.task.disable_auto_optimization is True
+        run = job.run(performance_target="STANDARD")
+    assert run.failed
+    [iteration] = run.task("loop").iterations
+    assert iteration.raised(ValueError)
+    assert [attempt.attempt for attempt in iteration.attempts] == [0]
 
 
 def test_nested_task_runs_once(lakeflow: Lakeflow) -> None:
