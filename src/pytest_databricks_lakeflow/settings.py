@@ -75,6 +75,12 @@ TASK_VALUES_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.values\.")
 # literals its outputs give. The platform's paths after `output.` include rows, first_row, first_row.<column>,
 # alert_state, catalog_name, schema_name and response.
 OUTPUT_REFERENCE = re.compile(r"\{\{\s*tasks\.([\w-]+)\.output\.([\w.-]+)\s*\}\}")
+# A run-now run resolves {{job.trigger.type}} to one_time and {{job.trigger.time.*}} to the time of the run, and
+# jobs/create refuses a table_update or file_arrival reference in a job without that trigger ("Table update trigger
+# references can not be used unless the job has a table update trigger configured.", "Job does not have a file
+# arrival trigger configured.") and any other path ("Invalid reference: 'job.trigger.nope'. 'trigger' is unknown.").
+TRIGGER_REFERENCE = re.compile(r"\{\{\s*job\.trigger\.([\w.]+)\s*\}\}")
+TRIGGER_PARAM_PREFIX = f"{PREFIX}trigger_"
 TIMEOUT_GRACE_SECONDS = 60
 TASK_OVERRIDES = frozenset({"timeout_seconds", "max_retries", "min_retry_interval_millis", "retry_on_timeout"})
 PIPELINE_PARAMS_FIELDS = frozenset(f.name for f in fields(jobs.PipelineParams))
@@ -797,6 +803,64 @@ def _for_each_inputs(key: str, values: Sequence[object]) -> str:
             f"{MAX_FOR_EACH_INPUTS_CHARS}."
         )
     return text
+
+
+def inject_trigger(settings: jobs.JobSettings, trigger: Mapping[str, str]) -> jobs.JobSettings:
+    """Point `{{job.trigger.<path>}}` references at job parameters that hold simulated values.
+
+    No API starts a run as if a trigger fired, so each reference whose path is a key of `trigger` becomes
+    `{{job.parameters.__pytest_trigger_<path>}}`, with each `.` of the path as `_`, and that parameter is declared with
+    the value as its default. A reference whose path is not a key is left as it is and named in a `UserWarning`.
+
+    Args:
+        settings: The job's settings. They are not changed.
+        trigger: The value of each reference, by its path after `job.trigger.`, such as `"type"` or
+            `"table_update.updated_tables"`.
+
+    Returns:
+        The rewritten settings, with the parameters appended after the job's own, or `settings` when `trigger` is
+        empty.
+
+    Raises:
+        LakeflowError: If a key is not the path of a reference in the settings, or a value is not a string.
+    """
+    if not trigger:
+        return settings
+    text = json.dumps(settings.as_dict())
+    used = sorted(set(TRIGGER_REFERENCE.findall(text)))
+    for path, value in trigger.items():
+        if path not in used:
+            references = [f"{{{{job.trigger.{name}}}}}" for name in used]
+            raise LakeflowError(
+                f"trigger names {path!r}, but the job has no {{{{job.trigger.{path}}}}} reference. Trigger references "
+                f"in the job: {references}"
+            )
+        if not isinstance(value, str):
+            raise LakeflowError(f"trigger[{path!r}] must be a string, the value a job parameter holds, got {value!r}")
+    left = [f"job.trigger.{path}" for path in used if path not in trigger]
+    if left:
+        warnings.warn(
+            f"The job still refers to {left}, which trigger does not set. A run-now run resolves job.trigger.type to "
+            "one_time and job.trigger.time.* to the time of the run, and jobs/create refuses table_update and "
+            "file_arrival references in a job without that trigger. Add them to trigger to pin them.",
+            stacklevel=3,
+        )
+
+    def replacement(match: re.Match[str]) -> str:
+        if match[1] not in trigger:
+            return match[0]
+        return f"{{{{job.parameters.{_trigger_parameter(match[1])}}}}}"
+
+    rewritten = jobs.JobSettings.from_dict(json.loads(TRIGGER_REFERENCE.sub(replacement, text)))
+    definitions: list[jobs.JobParameterDefinition] = []
+    for path, value in trigger.items():
+        definitions.append(jobs.JobParameterDefinition(name=_trigger_parameter(path), default=value))
+    rewritten.parameters = [*(rewritten.parameters or []), *definitions]
+    return rewritten
+
+
+def _trigger_parameter(path: str) -> str:
+    return f"{TRIGGER_PARAM_PREFIX}{path.replace('.', '_')}"
 
 
 def pipeline_params(

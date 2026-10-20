@@ -87,6 +87,10 @@ tests/integration/
             databricks.yml
             resources/*.yml      # the pipeline's schema, the pipeline and the job
             src/pipelines/*.sql
+        triggers/                # name: lakeflow_triggers, a job with a paused file arrival trigger on a volume in the LAKEFLOW_CATALOG catalog
+            databricks.yml
+            resources/*.yml      # the schema, the volume and the job
+            src/notebooks/*.py
     test_example.py              # one module per bundle, named after it
     test_run_job.py              # child_run and the children= option against the run_job bundle
     test_sql.py
@@ -96,6 +100,7 @@ tests/integration/
     test_retries.py
     test_for_each.py
     test_pipelines.py
+    test_triggers.py
 ```
 
 `conftest.py` defines `BUNDLES = Path(__file__).parent / "bundles"` and `lakeflow_for(name)`, which returns `Lakeflow(bundle_root=BUNDLES / name, catalog=os.environ.get("LAKEFLOW_CATALOG"))`. The session `lakeflow` fixture points at the `example` bundle. To add a bundle:
