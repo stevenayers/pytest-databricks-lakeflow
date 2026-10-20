@@ -46,6 +46,10 @@ def hello_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
         yield job.run()
 
 
+def test_check_finds_no_problems_in_the_deployed_job(lakeflow: Lakeflow) -> None:
+    assert lakeflow.check("my_example_job") == []
+
+
 @pytest.mark.xdist_group("hello_run")
 def test_job_succeeds(lakeflow: Lakeflow, hello_run: JobRun) -> None:
     assert hello_run.succeeded
