@@ -3,6 +3,22 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.10.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.9.0...v0.10.0) (2026-10-20)
+
+
+### Features
+
+* add --lakeflow-live and run(stream=True) to print task progress to the terminal ([#185](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/185)) ([03b36be](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/03b36be6a991513f1d264c36693be6758b10645f))
+* add Lakeflow.attach(run_id) to rebuild a JobRun from a kept job's run ([#186](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/186)) ([be675cf](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/be675cf28e04a9677f6eadee3c6db0c867a2e190))
+* add teardown_at="close" to run the teardown task when the job closes ([fdf6825](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/fdf682581004f4b5b08d6589f3f0259643ade74d))
+* refuse an empty dbt command list, keep dbt artefact headers out of report.json and document dbt tasks ([#188](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/188)) ([7cffc0d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/7cffc0d0938241496d3bfc9d9f4bfa37e1c709d2))
+
+
+### Bug Fixes
+
+* land the wave 6 and wave 7 review notes ([#189](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/189)) ([ff08b27](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/ff08b27410c66328285835ab5997d090ebbd3870))
+* refuse running a disabled task through only= ([#190](https://github.com/stevenayers/pytest-databricks-lakeflow/issues/190)) ([725256a](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/725256a6415debcd384f228a38b7330913b49b0c))
+
 ## [0.9.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.8.0...v0.9.0) (2026-10-20)
 
 
