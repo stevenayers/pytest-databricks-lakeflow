@@ -17,63 +17,62 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import bundle, helpers, session
-from pytest_databricks_lakeflow.ephemeral import (
-    TEARDOWN_AT,
-    EphemeralJob,
-    EphemeralPipeline,
-    TeardownAt,
-    record_outcome,
-    terminated,
-)
+from pytest_databricks_lakeflow import bundle, deployment, helpers, session, workspace_api
+from pytest_databricks_lakeflow.ephemeral.job import TEARDOWN_AT, EphemeralJob, TeardownAt
+from pytest_databricks_lakeflow.ephemeral.outcome import record_outcome
+from pytest_databricks_lakeflow.ephemeral.pipeline import EphemeralPipeline
+from pytest_databricks_lakeflow.ephemeral.polling import terminated
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
-from pytest_databricks_lakeflow.results import NOTEBOOK_EXPORTS, PREFIX, JobRun, NotebookExport, build_job_run
-from pytest_databricks_lakeflow.settings import (
-    DEFAULT_RULES,
-    SIDE_EFFECTS,
+from pytest_databricks_lakeflow.naming import JOB_KEY_TAG, default_folder, schema_prefix, tag_value
+from pytest_databricks_lakeflow.results.build import NOTEBOOK_EXPORTS, NotebookExport, build_job_run
+from pytest_databricks_lakeflow.results.models import JobRun
+from pytest_databricks_lakeflow.settings.compute import (
     Helpers,
-    RunAs,
-    SideEffects,
-    Stub,
-    Upstream,
     add_dependencies,
-    apply_task_params,
     check_environments,
+    merge_environments,
+)
+from pytest_databricks_lakeflow.settings.for_each import (
     check_input_size,
-    check_lifecycle_params,
+    inject_input,
+    lift_nested_task,
+    override_for_each_inputs,
+)
+from pytest_databricks_lakeflow.settings.lifecycle import check_lifecycle_params, inject_lifecycle
+from pytest_databricks_lakeflow.settings.lint import DEFAULT_RULES, lint
+from pytest_databricks_lakeflow.settings.params import (
+    apply_task_params,
     check_params,
     check_task_params,
-    disable_tasks,
-    disabled_task_keys,
-    inject_input,
-    inject_lifecycle,
-    inject_probes,
     inject_test_marker,
     inject_trigger,
-    inline_saved_query,
-    lift_nested_task,
-    lint,
-    merge_environments,
-    override_for_each_inputs,
-    override_tasks,
-    pipeline_task_ids,
+)
+from pytest_databricks_lakeflow.settings.saved_queries import inline_saved_query, saved_query_id, saved_query_tasks
+from pytest_databricks_lakeflow.settings.stubs import (
+    Stub,
+    Upstream,
+    inject_probes,
     recover_injected,
-    require_task,
-    run_job_tasks,
-    sanitise,
-    sanitise_pipeline,
-    saved_query_id,
-    saved_query_tasks,
     stub_upstream,
-    tag_value,
     upstream_values_from,
     wrap_task,
 )
-from pytest_databricks_lakeflow.settings import force_conditions as force_condition_outcomes
+from pytest_databricks_lakeflow.settings.tasks import (
+    disable_tasks,
+    disabled_task_keys,
+    override_tasks,
+    pipeline_task_ids,
+    require_task,
+    run_job_tasks,
+    user_task_keys,
+)
+from pytest_databricks_lakeflow.settings.tasks import force_conditions as force_condition_outcomes
+from pytest_databricks_lakeflow.settings.template import SIDE_EFFECTS, RunAs, SideEffects, sanitise, sanitise_pipeline
+from pytest_databricks_lakeflow.sweep import SWEEP_SCOPES, SweepOptions, SweepReport, SweepScope
+from pytest_databricks_lakeflow.sweep import sweep as run_sweep
 
 log = logging.getLogger("pytest_databricks_lakeflow")
-
 Sync = Literal["deploy", "sync", "none"]
 SYNC_STRATEGIES: tuple[str, ...] = get_args(Sync)
 Children = Literal["warn", "refuse"]
@@ -89,8 +88,6 @@ UNVERSIONED_ARTIFACTS = (
     "the same version may not be picked up. Set artifacts.<name>.dynamic_version: true in databricks.yml."
 )
 LOCAL_PREFIXES = ("./", "../")
-# The tag holding the bundle resource key of the job an ephemeral job copies, which attach() reads.
-JOB_KEY_TAG = "pytest_job_key"
 PLUGIN_DEPLOY_FLAGS = {
     "-t": "Pass target= to Lakeflow instead",
     "--target": "Pass target= to Lakeflow instead",
@@ -101,6 +98,31 @@ PLUGIN_DEPLOY_FLAGS = {
     "--var": "Pass variables= to Lakeflow instead",
     "--auto-approve": "The plugin always passes --auto-approve",
 }
+
+
+@dataclass(frozen=True)
+class _CopyOptions:
+    """The options of one `job()` or `task()` call that `Lakeflow`'s fields default, resolved and checked.
+
+    Attributes:
+        run_as: Who the copy runs as.
+        children: What to do about the copy's Run Job tasks.
+        teardown_at: When the teardown task runs.
+        notebooks: The setup and teardown notebooks asked for, by role, with the job parameters each reads.
+        extra_dependencies: The test-only dependencies, local wheels pointed at their uploaded copies.
+        pipelines: What the copy's pipeline tasks update.
+        schema: The schema the pipeline copies publish to, with `pipelines="copy"`.
+        saved_queries: What the copy's saved query tasks run.
+    """
+
+    run_as: RunAs
+    children: Children
+    teardown_at: TeardownAt
+    notebooks: Mapping[str, Notebook]
+    extra_dependencies: Sequence[str]
+    pipelines: Pipelines
+    schema: str | None
+    saved_queries: SavedQueries
 
 
 @dataclass(kw_only=True, eq=False)
@@ -200,12 +222,12 @@ class Lakeflow:
             `"refuse"` in CI. Anything else raises `ValueError`.
         setup: The default of `setup` on `job()` and `task()`, checked here as far as it can be without a test: a
             string, an empty list, a statement with a stray `$`, a path that is not a `.py` file and a function the
-            plugin cannot ship raise `LakeflowError`.
+            plugin cannot ship raise `ValueError`.
         teardown: The default of `teardown` on `job()` and `task()`, checked here as `setup` is.
         environments: The default of `environments` on `job()` and `task()`, such as
             `{"default": {"environment_version": "5"}}`. Each copy takes the overrides of the environments its job
             has, and an environment key the job does not have is skipped, whereas `environments` on the call adds
-            one. A reserved key, an entry that is not a mapping or an unknown field raises `LakeflowError` here.
+            one. A reserved key, an entry that is not a mapping or an unknown field raises `ValueError` here.
         saved_queries: The default of `saved_queries` on `job()` and `task()`: `"deployed"` or `"inline"`, for
             example `"inline"` to read the rows of every saved query task. Anything else raises `ValueError`.
 
@@ -268,20 +290,15 @@ class Lakeflow:
     _warned_performance_override: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.sync not in SYNC_STRATEGIES:
-            raise ValueError(f"sync must be one of {', '.join(SYNC_STRATEGIES)}, got {self.sync!r}")
-        if self.side_effects not in SIDE_EFFECTS:
-            raise ValueError(f"side_effects must be one of {', '.join(SIDE_EFFECTS)}, got {self.side_effects!r}")
-        if self.notebook_export not in NOTEBOOK_EXPORTS:
-            raise ValueError(
-                f"notebook_export must be one of {', '.join(NOTEBOOK_EXPORTS)}, got {self.notebook_export!r}"
-            )
+        _choice("sync", self.sync, SYNC_STRATEGIES)
+        _choice("side_effects", self.side_effects, SIDE_EFFECTS)
+        _choice("notebook_export", self.notebook_export, NOTEBOOK_EXPORTS)
+        _choice("children", self.children, CHILDREN)
+        _choice("saved_queries", self.saved_queries, SAVED_QUERIES)
         if self.poll_interval is not None and self.poll_interval <= timedelta(0):
             raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
         if self.max_concurrent_runs is not None and self.max_concurrent_runs < 1:
             raise ValueError(f"max_concurrent_runs must be 1 or more, got {self.max_concurrent_runs}")
-        _check_children(self.children)
-        _check_saved_queries(self.saved_queries)
         _check_deploy_flags(self.deploy_flags)
         _check_permissions(self.access_control_list())
         if self.setup is not None:
@@ -297,7 +314,7 @@ class Lakeflow:
         if self.workspace_client is not None:
             return self.workspace_client
         if self._ws is None:
-            self._ws = session.make_workspace_client(self.profile)
+            self._ws = workspace_api.make_workspace_client(self.profile)
         return self._ws
 
     def access_control_list(self) -> list[jobs.JobAccessControlRequest] | None:
@@ -347,7 +364,7 @@ class Lakeflow:
             raise KeyError(f"No job {key!r} in the bundle. Available: {sorted(state['templates'])}")
         return jobs.JobSettings.from_dict(copy.deepcopy(state["templates"][key]))
 
-    def check(self, key: str, rules: Collection[str] | None = None) -> list[str]:
+    def check(self, key: str, *, rules: Collection[str] | None = None) -> list[str]:
         """Find the wiring mistakes in a bundle job's template, without creating or running anything.
 
         It reports a `{{job.parameters.<name>}}` the job does not declare, a `{{tasks.<key>.values.<name>}}` whose
@@ -375,23 +392,23 @@ class Lakeflow:
         Raises:
             KeyError: If the bundle has no job `key`.
             LakeflowBundleError: If the job cannot be used as a template, for example because it is not deployed.
-            LakeflowError: If `rules` names a rule that is not in `ALL_RULES`.
+            ValueError: If `rules` names a rule that is not in `ALL_RULES`.
         """
         if rules is None:
             rules = DEFAULT_RULES
         template = self.template(key)
-        root = session.resolve_root(self.bundle_root, session.current().rootpath)
-        return lint(template, rules=rules, bundle_root=root, exists=partial(session.exists, self.ws))
+        root = bundle.resolve_root(self.bundle_root, session.current().rootpath)
+        return lint(template, rules=rules, bundle_root=root, exists=partial(workspace_api.exists, self.ws))
 
     def job(
         self,
         key: str,
         params: Mapping[str, str] | None = None,
+        *,
         capture_task_values: Mapping[str, Sequence[str]] | None = None,
         name: str | None = None,
         run_as: RunAs = None,
         disable: Sequence[str] | None = None,
-        *,
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         force_conditions: Mapping[str, bool] | None = None,
         children: Children | None = None,
@@ -538,99 +555,91 @@ class Lakeflow:
 
         Raises:
             KeyError: If the bundle has no job `key`.
-            LakeflowError: If called outside a test, `capture_task_values`, `disable` or `task_overrides` names a task
-                that is not in the job, `capture_task_values` names a for-each task or the task nested in one,
-                `task_overrides` sets a field it does not take, `force_conditions` names a task that is not a condition
-                task, is disabled or downstream of a disabled task, or has an outcome that is not a bool, a parameter
-                name is reserved, an entry of `extra_dependencies` is a local path that does not start with `./` or
-                `../`, matches no file, has no uploaded copy or is used with `sync="sync"`, or is a wheel with extras
-                while the copy has a Python task on a cluster, `children` is `"refuse"` and the copy has a Run Job task
-                that is not disabled, downstream of a disabled task nor
-                inside a disabled `for_each_task`, `environments` names a key starting with `__pytest_`, holds an
-                entry that is not a mapping or a field that a serverless environment does not take, sets both
-                `environment_version` and `base_environment` on one environment, or brings the job past 10
-                environments, or `setup` or `teardown` is not a plain function with its source in a file, uses
-                variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params`, or
-                has a decorator. Also if `teardown_at` is not `"run"` or `"close"`, or is `"close"` without
-                `teardown`. Also if `setup` or `teardown` is a string or an
-                empty list, a statement has a `$` that is neither a placeholder nor `$$` or a `${name}` that is neither
-                declared nor in `params`, or a path is missing or not a `.py` file.
-                Also if `task_params` names a task that is not in the job or is not a notebook, Python script, JAR,
-                Python wheel, SQL or dbt task, gives a task a value that does not fit its type or a dbt task no
-                commands, or holds a parameter name starting with `__pytest_`, or `upstream_task_values` names a task
-                that is not in the job or holds a value that is too large or not JSON-serialisable, an output that
-                contains `{{` or is not JSON-serialisable, or no output for a path that a task of the copy refers to.
-                When the job is created, also if a task of the copy refers to the output of a notebook task that is not
-                a stub, or keeps a `{{job.trigger.table_update.*}}` or `{{job.trigger.file_arrival.*}}` reference that
-                `trigger` does not set. Also if
-                `pipelines` is `"copy"` without `schema` or the copy has no enabled pipeline task, `schema` is passed
-                without `pipelines="copy"`, or a pipeline cannot be copied, as for `pipeline()`.
-                Also if `for_each_inputs` names a task that is not in the job or has no `for_each_task`, or gives a
-                value that is not a list, is not JSON-serialisable, is longer than 5,000 characters as JSON, holds
-                `None` or a nested list, or mixes objects with primitives.
-                Also if `trigger` names a path that no `{{job.trigger.<path>}}` reference of the copy uses, or gives a
-                value that is not a string.
-                Also, with `saved_queries="inline"`, if a saved query does not exist, or has a parameter that neither
-                the task nor a job parameter sets whose default is a date, a date range, several enum values or
-                query-backed: set it through `task_params`.
+            ValueError: If an argument is wrong on its own: `children`, `pipelines`, `saved_queries` or `teardown_at`
+                is not one of its choices, `teardown_at` is `"close"` without `teardown`, `pipelines` is `"copy"`
+                without `schema` or `schema` is passed without it, a parameter name starts with `__pytest_`, `setup` or
+                `teardown` is a string, an empty list, a list with a statement that is not a string or has a stray `$`,
+                a path that is missing or not a `.py` file, or a function that is a lambda, has a decorator, uses
+                variables of an enclosing function, takes a parameter other than `spark`, `dbutils` and `params` or has
+                no source, `task_params` has a value that does not fit its task's type or gives a dbt task no commands,
+                `task_overrides` sets a field it does not take, `force_conditions` has an outcome that is not a bool, an
+                entry of `extra_dependencies` is a local path that does not start with `./` or `../`, `environments`
+                names a key starting with `__pytest_`, holds an entry that is not a mapping or a field that a
+                serverless environment does not take, `upstream_task_values` holds a value that is too large or not
+                JSON-serialisable or an output that contains `{{` or is not JSON-serialisable, `for_each_inputs` gives
+                a value that is not a list, is not JSON-serialisable, is longer than 5,000 characters as JSON, holds
+                `None` or a nested list or mixes objects with primitives, or `trigger` gives a value that is not a
+                string.
+            LakeflowError: If called outside a test, or an argument does not fit the job: `capture_task_values`,
+                `disable`, `task_params`, `task_overrides`, `force_conditions`, `for_each_inputs` or
+                `upstream_task_values` names a task that is not in the job, `capture_task_values` names a for-each task
+                or the task nested in one, `task_params` names a task that is not a notebook, Python script, JAR,
+                Python wheel, SQL or dbt task, `force_conditions` names a task that is not a condition task or is
+                disabled or downstream of a disabled task, `for_each_inputs` names a task without a `for_each_task`, a
+                `${name}` of `setup` or `teardown` is neither declared by the job nor in `params`, an entry of
+                `extra_dependencies` matches no file, has no uploaded copy, is used with `sync="sync"` or is a wheel
+                with extras while the copy has a Python task on a cluster, `children` is `"refuse"` and the copy has a
+                Run Job task that is not disabled, downstream of a disabled task nor inside a disabled `for_each_task`,
+                `environments` sets both `environment_version` and `base_environment` on one environment or brings the
+                job past 10 environments, a task of the copy refers to an output its stub does not give, `trigger`
+                names a path that no `{{job.trigger.<path>}}` reference of the copy uses, `pipelines` is `"copy"` and
+                the copy has no enabled pipeline task, or, with `saved_queries="inline"`, a saved query does not exist
+                or has a parameter that neither the task nor a job parameter sets whose default is a date, a date
+                range, several enum values or query-backed. When the job is created, also if a task of the copy refers
+                to the output of a notebook task that is not a stub, or keeps a `{{job.trigger.table_update.*}}` or
+                `{{job.trigger.file_arrival.*}}` reference that `trigger` does not set.
             LakeflowBundleError: If `pipelines` is `"copy"` and a pipeline that a pipeline task updates does not
                 exist.
-            ValueError: If `children` is not `"warn"` or `"refuse"`, `pipelines` is not `"deployed"` or `"copy"`, or
-                `saved_queries` is not `"deployed"` or `"inline"`.
         """
-        children = self._option("children", children)
-        setup = self._option("setup", setup)
-        teardown = self._option("teardown", teardown)
-        saved_queries = self._option("saved_queries", saved_queries)
-        _check_children(children)
-        _check_saved_queries(saved_queries)
-        _check_pipelines(pipelines, schema)
-        _check_teardown_at(teardown_at, teardown)
-        notebooks = _lifecycle_notebooks(setup, teardown)
+        options = self._copy_options(
+            run_as=run_as,
+            children=children,
+            setup=setup,
+            teardown=teardown,
+            teardown_at=teardown_at,
+            extra_dependencies=extra_dependencies,
+            pipelines=pipelines,
+            schema=schema,
+            saved_queries=saved_queries,
+        )
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
-        _check_lifecycle_params(key, settings, params or {}, notebooks)
+        _check_lifecycle_params(key, settings, params or {}, options.notebooks)
         # Applied first, so a task key or value it rejects gives no collision warning before the error.
         apply_task_params(key, settings, task_params or {})
         check_task_params(key, settings, task_params or {}, params or {})
         disable_tasks(settings, self._disable(settings, disable))
         force_condition_outcomes(settings, force_conditions or {})
-        dependencies = self._resolve_local_wheels(self._option("extra_dependencies", extra_dependencies) or [])
-        add_dependencies(settings, dependencies)
+        add_dependencies(settings, options.extra_dependencies)
         override_tasks(settings, task_overrides or {})
         stub_upstream(settings, upstream_task_values or {}, self._helpers())
         inject_probes(settings, capture_task_values or {}, self._helpers())
         override_for_each_inputs(settings, for_each_inputs or {}, stubs=list(upstream_task_values or {}))
         settings = inject_trigger(settings, trigger or {})
-        self._inject_lifecycle(settings, notebooks, params or {})
+        self._inject_lifecycle(settings, options.notebooks, params or {})
         return self._ephemeral(
             item,
             key,
             settings,
+            options,
             params=params,
             capture_task_values=capture_task_values,
             stubs=list(upstream_task_values or {}),
             name=name,
-            run_as=self._option("run_as", run_as),
-            children=children,
             method="job",
             environments=self._environments(settings, environments),
-            extra_dependencies=dependencies,
-            pipelines=pipelines,
-            schema=schema,
-            teardown_at=teardown_at,
-            saved_queries=saved_queries,
         )
 
     def task(
         self,
         ref: str,
         params: Mapping[str, str] | None = None,
+        *,
         upstream_task_values: Upstream | None = None,
         capture_task_values: Sequence[str] | None = None,
+        name: str | None = None,
         run_as: RunAs = None,
-        *,
         task_params: Mapping[str, Mapping[str, str] | Sequence[str]] | None = None,
         upstream_from: JobRun | None = None,
         children: Children | None = None,
@@ -674,6 +683,7 @@ class Lakeflow:
                 and `outputs`. An entry replaces the values `upstream_from` holds for that task.
             capture_task_values: The task value keys to capture from the task. For a three-part `ref`, emits a
                 `UserWarning`, because the body cannot set task values when it runs in its loop.
+            name: Replaces the test node id in the job name, as for `job()`.
             run_as: Who the job runs as, as for `job()`.
             task_params: Parameters for the task, as for `job()`. Only the task under test can be named.
             upstream_from: A run of the same job whose captured task values stub the task's upstream tasks.
@@ -705,43 +715,39 @@ class Lakeflow:
 
         Raises:
             KeyError: If the bundle has no such job.
-            LakeflowError: If called outside a test, the job has no such task, the task refers to a task that is
-                not stubbed (its task values or any other `{{tasks.<key>.` reference) or to an output that its stub
-                does not give, `upstream_from` is a run of another job or lacks the captured values of an upstream
-                task, a value is too large or not JSON-serialisable, an output contains `{{` or is not
-                JSON-serialisable, an entry of `extra_dependencies` cannot be used as for `job()`, `children` is
-                `"refuse"` and the task is a Run Job task, `task_params` or `task_overrides` names another task, or
-                `capture_task_values` is given for a for-each task.
-                Also in the cases where `job()` raises it because `task_params`, `environments` or `task_overrides`
-                cannot be applied, `setup` or `teardown` cannot run, `teardown_at` cannot be used, `pipelines` and
-                `schema` do not fit the task,
-                or `for_each_inputs` is given and the task has no `for_each_task` or the list cannot be used, or
-                `trigger` cannot be applied. Also if `ref` has neither two nor three parts, a three-part `ref` names
-                no task nested in a for-each task, `input` is given with a two-part `ref` or for a nested task that
-                does not refer to `{{input}}`, is missing for one that does, is not a string, number, boolean or
-                mapping, lacks a key a reference names, contains `{{` or is not JSON-serialisable, or makes the job
-                parameters longer than the 10,000 characters as JSON that `jobs/create` accepts. Also when
-                `saved_queries="inline"` cannot inline the task's saved query, as for `job()`.
+            ValueError: If `ref` has neither two nor three parts, `input` is given with a two-part `ref`, is not a
+                string, number, boolean or mapping, contains `{{` or is not JSON-serialisable, `upstream_task_values`
+                names the task under test, `upstream_from` is a run of another job, `task_overrides` names another
+                task, or an argument is wrong on its own, as for `job()`.
+            LakeflowError: If called outside a test, the job has no such task, a three-part `ref` names no task nested
+                in a for-each task, the task refers to a task that is not stubbed (its task values or any other
+                `{{tasks.<key>.` reference) or to an output that its stub does not give, `upstream_from` lacks the
+                captured values of an upstream task, `task_params` names another task, `children` is `"refuse"` and
+                the task is a Run Job task, `capture_task_values` is given for a for-each task, `input` is missing for
+                a nested task that refers to `{{input}}`, is given for one that does not, lacks a key a reference names
+                or makes the job parameters longer than the 10,000 characters as JSON that `jobs/create` accepts,
+                `for_each_inputs` is given and the task has no `for_each_task`, or an argument does not fit the job,
+                as for `job()`.
             LakeflowBundleError: If `pipelines` is `"copy"` and the task's pipeline does not exist.
-            ValueError: If `children` is not `"warn"` or `"refuse"`, `pipelines` is not `"deployed"` or `"copy"`, or
-                `saved_queries` is not `"deployed"` or `"inline"`.
         """
-        children = self._option("children", children)
-        setup = self._option("setup", setup)
-        teardown = self._option("teardown", teardown)
-        saved_queries = self._option("saved_queries", saved_queries)
-        _check_children(children)
-        _check_saved_queries(saved_queries)
-        _check_pipelines(pipelines, schema)
-        _check_teardown_at(teardown_at, teardown)
-        notebooks = _lifecycle_notebooks(setup, teardown)
+        options = self._copy_options(
+            run_as=run_as,
+            children=children,
+            setup=setup,
+            teardown=teardown,
+            teardown_at=teardown_at,
+            extra_dependencies=extra_dependencies,
+            pipelines=pipelines,
+            schema=schema,
+            saved_queries=saved_queries,
+        )
         item = session.current_item()
         parts = ref.split(".")
         if len(parts) not in (2, 3) or not all(parts):
-            raise LakeflowError(f"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key', got {ref!r}")
+            raise ValueError(f"Expected 'job_key.task_key' or 'job_key.loop_key.nested_key', got {ref!r}")
         nested = len(parts) == 3
         if input is not None and not nested:
-            raise LakeflowError(
+            raise ValueError(
                 "input= gives the iteration input of a for_each_task body, so ref must be "
                 f"'job_key.loop_key.nested_key', got {ref!r}"
             )
@@ -761,7 +767,7 @@ class Lakeflow:
         # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
-        _check_lifecycle_params(job_key, settings, params or {}, notebooks)
+        _check_lifecycle_params(job_key, settings, params or {}, options.notebooks)
         # Applied first, as in job().
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
         check_task_params(job_key, settings, task_params or {}, params or {})
@@ -770,9 +776,8 @@ class Lakeflow:
             inject_input(settings, task_key, input)
         others = sorted(set(task_overrides or {}) - {task_key})
         if others:
-            raise LakeflowError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
-        dependencies = self._resolve_local_wheels(self._option("extra_dependencies", extra_dependencies) or [])
-        add_dependencies(settings, dependencies)
+            raise ValueError(f"task_overrides can only name {task_key!r}, the task under test, not {others}")
+        add_dependencies(settings, options.extra_dependencies)
         explicit = dict(upstream_task_values or {})
         upstream: dict[str, Mapping[str, object] | Stub] = {}
         if upstream_from is not None:
@@ -783,7 +788,7 @@ class Lakeflow:
         if for_each_inputs is not None:
             override_for_each_inputs(settings, {task_key: for_each_inputs})
         settings = inject_trigger(settings, trigger or {})
-        self._inject_lifecycle(settings, notebooks, params or {})
+        self._inject_lifecycle(settings, options.notebooks, params or {})
         if input is not None:
             # Last, because jobs/create limits the job parameters as a whole. `_ephemeral` declares the test marker
             # again, in the same place.
@@ -797,19 +802,13 @@ class Lakeflow:
             item,
             job_key,
             settings,
+            options,
             params=params,
             capture_task_values=capture,
             stubs=upstream,
-            name=None,
-            run_as=self._option("run_as", run_as),
-            children=children,
+            name=name,
             method="task",
             environments=self._environments(settings, environments),
-            extra_dependencies=dependencies,
-            pipelines=pipelines,
-            schema=schema,
-            teardown_at=teardown_at,
-            saved_queries=saved_queries,
         )
 
     def _option(self, name: str, value: Any) -> Any:
@@ -817,6 +816,46 @@ class Lakeflow:
         if value is not None:
             return value
         return getattr(self, name)
+
+    def _copy_options(
+        self,
+        *,
+        run_as: RunAs,
+        children: Children | None,
+        setup: LifecycleStep | None,
+        teardown: LifecycleStep | None,
+        teardown_at: TeardownAt,
+        extra_dependencies: Sequence[str] | None,
+        pipelines: Pipelines,
+        schema: str | None,
+        saved_queries: SavedQueries | None,
+    ) -> _CopyOptions:
+        """Resolve the options of a `job()` or `task()` call against this `Lakeflow`'s defaults, and check them."""
+        children = self._option("children", children)
+        setup = self._option("setup", setup)
+        teardown = self._option("teardown", teardown)
+        saved_queries = self._option("saved_queries", saved_queries)
+        _choice("children", children, CHILDREN)
+        _choice("saved_queries", saved_queries, SAVED_QUERIES)
+        _choice("pipelines", pipelines, PIPELINES)
+        _choice("teardown_at", teardown_at, TEARDOWN_AT)
+        if pipelines == "copy" and schema is None:
+            raise ValueError('pipelines="copy" needs schema: pass the name that lakeflow.schema() yields')
+        if pipelines == "deployed" and schema is not None:
+            raise ValueError('schema applies to pipeline copies: pass pipelines="copy" as well')
+        if teardown_at == "close" and teardown is None:
+            raise ValueError('teardown_at="close" runs the teardown task when the job closes, so it needs teardown=')
+        dependencies = self._option("extra_dependencies", extra_dependencies) or []
+        return _CopyOptions(
+            run_as=self._option("run_as", run_as),
+            children=children,
+            teardown_at=teardown_at,
+            notebooks=_lifecycle_notebooks(setup, teardown),
+            extra_dependencies=self._resolve_local_wheels(dependencies),
+            pipelines=pipelines,
+            schema=schema,
+            saved_queries=saved_queries,
+        )
 
     def _disable(self, settings: jobs.JobSettings, disable: Sequence[str] | None) -> Sequence[str]:
         """Get the tasks to disable: the call's `disable`, or this `Lakeflow`'s less the tasks the job lacks."""
@@ -894,7 +933,7 @@ class Lakeflow:
         item.user_properties.append(("lakeflow_job_id", run.job_id))
         item.user_properties.append(("lakeflow_run_url", run.run_page_url))
         record_outcome(item, result)
-        log.info("Attached run %s of job %s: %s", run_id, run.job_id, result.result_state)
+        log.info(f"Attached run {run_id} of job {run.job_id}: {result.result_state}")
         return result
 
     def _finished_run(self, run_id: int) -> jobs.Run:
@@ -947,9 +986,10 @@ class Lakeflow:
 
         Raises:
             KeyError: If the bundle has no pipeline `key`.
+            ValueError: If `schema` is not a full name.
             LakeflowBundleError: If `sync` is not `"deploy"`, the pipeline is not deployed, or it no longer exists.
-            LakeflowError: If called outside a test, `schema` is not a full name, the pipeline publishes to the Hive
-                metastore, or the copy would have more than 25 tags without the attribution tags.
+            LakeflowError: If called outside a test, the pipeline publishes to the Hive metastore, or the copy would
+                have more than 25 tags without the attribution tags.
         """
         item = session.current_item()
         if self.sync != "deploy":
@@ -983,40 +1023,40 @@ class Lakeflow:
             The schema's full name.
 
         Raises:
-            LakeflowError: If there is no catalog.
+            ValueError: If there is no catalog.
         """
         catalog = catalog or self.catalog
         if not catalog:
-            raise LakeflowError("Lakeflow.schema() needs a catalog. Pass catalog to Lakeflow or to schema().")
+            raise ValueError("Lakeflow.schema() needs a catalog. Pass catalog to Lakeflow or to schema().")
         state = session.current()
-        name = f"{session.schema_prefix(state.run_id)}{secrets.token_hex(4)}"
+        name = f"{schema_prefix(state.run_id)}{secrets.token_hex(4)}"
         full_name = f"{catalog}.{name}"
         properties = state.expiry_tag()
         branch = state.attribution.get("pytest_git_branch")
         if branch:
             properties["pytest_git_branch"] = tag_value(branch)
         self.ws.schemas.create(name=name, catalog_name=catalog, properties=properties or None)
-        log.info("Created schema %s", full_name)
+        log.info(f"Created schema {full_name}")
         try:
             yield full_name
         finally:
             if state.keeps(self.keep, keep_failed=False, failed=False):
-                log.warning("Keeping schema %s", full_name)
+                log.warning(f"Keeping schema {full_name}")
                 state.kept_schemas.append(full_name)
             else:
                 self.ws.schemas.delete(full_name, force=True)
-                log.info("Dropped schema %s", full_name)
+                log.info(f"Dropped schema {full_name}")
 
     def sweep(
         self,
         *,
-        scope: session.SweepScope = "mine",
+        scope: SweepScope = "mine",
         schemas_catalog: str | None = None,
         notebooks: bool = False,
         branch: str | None = None,
         dry_run: bool = False,
         report: str | Path | None = None,
-    ) -> session.SweepReport:
+    ) -> SweepReport:
         """Delete leftover ephemeral jobs, pipeline copies, schemas and notebooks, as `--lakeflow-sweep` does.
 
         It needs no pytest session, no bundle and no test, so a nightly job can call it from a script. It uses this
@@ -1039,10 +1079,9 @@ class Lakeflow:
         Raises:
             ValueError: If `scope` is not `mine` or `all`.
         """
-        if scope not in session.SWEEP_SCOPES:
-            raise ValueError(f"scope must be one of {', '.join(session.SWEEP_SCOPES)}, got {scope!r}")
+        _choice("scope", scope, SWEEP_SCOPES)
         user = self.ws.current_user.me().user_name
-        options = session.SweepOptions(
+        options = SweepOptions(
             scope=scope,
             schemas_catalog=schemas_catalog,
             notebooks=notebooks,
@@ -1050,8 +1089,8 @@ class Lakeflow:
             dry_run=dry_run,
             report=None if report is None else Path(report),
         )
-        folder = self.helpers_path or helpers.default_folder(user)
-        return session.sweep(self.ws, None, self.sweep_hours, folder, options, user=user)
+        folder = self.helpers_path or default_folder(user)
+        return run_sweep(self.ws, None, self.sweep_hours, folder, options, user=user)
 
     def _state(self) -> dict[str, Any]:
         current = session.current()
@@ -1064,7 +1103,7 @@ class Lakeflow:
         if self.sync == "deploy":
             deploy_flags = tuple(self.deploy_flags)
         key = session.BundleKey(
-            root=session.resolve_root(self.bundle_root, current.rootpath),
+            root=bundle.resolve_root(self.bundle_root, current.rootpath),
             target=self.target,
             profile=profile,
             sync=self.sync,
@@ -1124,7 +1163,9 @@ class Lakeflow:
                 resolved.append(dep)
                 continue
             try:
-                resolved.extend(bundle.uploaded(dep, root, state["artifact_path"], partial(session.exists, self.ws)))
+                resolved.extend(
+                    bundle.uploaded(dep, root, state["artifact_path"], partial(workspace_api.exists, self.ws))
+                )
             except LakeflowBundleError as e:
                 raise LakeflowBundleError(f"extra_dependencies: {e}") from e
         return resolved
@@ -1146,7 +1187,7 @@ class Lakeflow:
     ) -> None:
         if not notebooks:
             return
-        folder = session.folder_of_helpers(self._state())
+        folder = deployment.folder_of_helpers(self._state())
         uploaded = session.current().uploaded_notebooks
         paths: dict[str, str] = {}
         for role, (source, _) in notebooks.items():
@@ -1158,21 +1199,16 @@ class Lakeflow:
         item: pytest.Item,
         key: str,
         settings: jobs.JobSettings,
+        options: _CopyOptions,
         *,
         params: Mapping[str, str] | None,
         capture_task_values: Mapping[str, Sequence[str]] | None,
         stubs: Collection[str],
         name: str | None,
-        run_as: RunAs,
-        children: Children,
         method: str,
         environments: Mapping[str, Mapping[str, Any]],
-        extra_dependencies: Sequence[str],
-        pipelines: Pipelines,
-        schema: str | None,
-        teardown_at: TeardownAt,
-        saved_queries: SavedQueries,
     ) -> EphemeralJob:
+        """Finish the copy's settings and wrap them in an `EphemeralJob` that the test's finaliser closes."""
         if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
             warnings.warn(
                 f"Job {key!r} has performance_target STANDARD, which adds 3 to 4 minutes to every run. "
@@ -1181,11 +1217,11 @@ class Lakeflow:
             )
         for task in run_job_tasks(settings):
             message = _child_message(key, task)
-            if children == "refuse":
+            if options.children == "refuse":
                 raise LakeflowError(message)
             warnings.warn(f'{message} Pass children="refuse" to Lakeflow.{method}() to fail instead.', stacklevel=3)
         query_files: dict[str, str] = {}
-        if saved_queries == "inline":
+        if options.saved_queries == "inline":
             query_files = self._inline_saved_queries(key, settings)
         tags = {**self._tags(item), JOB_KEY_TAG: key}
         sanitise(
@@ -1195,7 +1231,7 @@ class Lakeflow:
             description=f"{item.nodeid} {tags.get('pytest_ci_url', '')}".strip(),
             disable_auto_optimization=self.disable_auto_optimization,
             performance_optimized=self.performance_optimized,
-            run_as=run_as,
+            run_as=options.run_as,
             timeout=self.timeout,
             side_effects=self.side_effects,
             environment_version=self.environment_version,
@@ -1207,9 +1243,9 @@ class Lakeflow:
         if self.test_marker:
             inject_test_marker(settings, item.nodeid)
         copies: list[EphemeralPipeline] = []
-        if pipelines == "copy":
-            assert schema is not None
-            copies = self._pipeline_copies(item, key, settings, schema, name or item.nodeid)
+        if options.pipelines == "copy":
+            assert options.schema is not None
+            copies = self._pipeline_copies(item, key, settings, options.schema, name or item.nodeid)
         job = EphemeralJob(
             self,
             key,
@@ -1217,14 +1253,14 @@ class Lakeflow:
             params,
             capture_task_values,
             stubs,
-            extra_dependencies=extra_dependencies,
-            pipelines=copies,
-            teardown_at=teardown_at,
+            extra_dependencies=options.extra_dependencies,
+            pipeline_copies=copies,
+            teardown_at=options.teardown_at,
             query_files=query_files,
         )
-        if pipelines == "copy":
-            assert schema is not None
-            job._copy_pipeline = partial(self._job_pipeline_copy, item, schema, name or item.nodeid)
+        if options.pipelines == "copy":
+            assert options.schema is not None
+            job._copy_pipeline = partial(self._job_pipeline_copy, item, options.schema, name or item.nodeid)
         item.addfinalizer(partial(job._teardown, item))
         return job
 
@@ -1238,7 +1274,7 @@ class Lakeflow:
         tasks = saved_query_tasks(settings)
         if not tasks:
             return files
-        folder = session.folder_of_helpers(self._state())
+        folder = deployment.folder_of_helpers(self._state())
         for task in tasks:
             query_id = saved_query_id(task)
             assert query_id is not None
@@ -1275,7 +1311,7 @@ class Lakeflow:
         """Copy each pipeline that an enabled pipeline task of the job updates, for `pipelines="copy"`."""
         pipeline_ids = pipeline_task_ids(settings)
         if not pipeline_ids:
-            keys = sorted(task.task_key for task in settings.tasks or [] if not task.task_key.startswith(PREFIX))
+            keys = user_task_keys(settings)
             raise LakeflowError(f"Job {job_key!r} has no pipeline task to copy. Tasks: {keys}")
         copies: list[EphemeralPipeline] = []
         for pipeline_id in pipeline_ids:
@@ -1372,13 +1408,6 @@ def _flag_name(flag: str) -> str:
     return name[:2]
 
 
-def _check_teardown_at(teardown_at: str, teardown: LifecycleStep | None) -> None:
-    if teardown_at not in TEARDOWN_AT:
-        raise LakeflowError(f"teardown_at must be 'run' or 'close', not {teardown_at!r}")
-    if teardown_at == "close" and teardown is None:
-        raise LakeflowError('teardown_at="close" runs the teardown task when the job closes, so it needs teardown=')
-
-
 def _lifecycle_notebooks(setup: LifecycleStep | None, teardown: LifecycleStep | None) -> dict[str, Notebook]:
     """Build the setup and teardown notebooks that were asked for, by role, checking both before anything else."""
     notebooks: dict[str, Notebook] = {}
@@ -1406,23 +1435,10 @@ def _check_lifecycle_params(
         check_lifecycle_params(job_key, settings, params, role, names)
 
 
-def _check_children(children: str) -> None:
-    if children not in CHILDREN:
-        raise ValueError(f"children must be one of {', '.join(CHILDREN)}, got {children!r}")
-
-
-def _check_saved_queries(saved_queries: str) -> None:
-    if saved_queries not in SAVED_QUERIES:
-        raise ValueError(f"saved_queries must be one of {', '.join(SAVED_QUERIES)}, got {saved_queries!r}")
-
-
-def _check_pipelines(pipelines: str, schema: str | None) -> None:
-    if pipelines not in PIPELINES:
-        raise ValueError(f"pipelines must be one of {', '.join(PIPELINES)}, got {pipelines!r}")
-    if pipelines == "copy" and schema is None:
-        raise LakeflowError('pipelines="copy" needs schema: pass the name that lakeflow.schema() yields')
-    if pipelines == "deployed" and schema is not None:
-        raise LakeflowError('schema applies to pipeline copies: pass pipelines="copy" as well')
+def _choice(name: str, value: object, choices: Sequence[str]) -> None:
+    """Refuse a value that is not one of the few an argument takes."""
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {', '.join(choices)}, got {value!r}")
 
 
 def _child_message(job_key: str, task: jobs.Task) -> str:

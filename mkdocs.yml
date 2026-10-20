@@ -12,28 +12,54 @@ exclude_docs: |
   notes.md
   *.log
 
+# A broken page link or heading anchor fails `mkdocs build --strict`.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
 theme:
   name: material
   features:
     - content.code.copy
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
 
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - Writing job tests: job-tests.md
-  - Writing task tests: task-tests.md
-  - Configuration: configuration.md
+  - Job tests: job-tests.md
+  - Task tests: task-tests.md
+  - Recipes:
+      - recipes/index.md
+      - Change the job settings: recipes/job-settings.md
+      - Control the run: recipes/runs.md
+      - Task types: recipes/task-types.md
+      - Test data: recipes/data.md
+      - Debug a failure: recipes/debugging.md
+      - Compute and cost: recipes/compute.md
+      - Bundle deployments: recipes/deployments.md
+      - CI and housekeeping: recipes/ci.md
+  - Reference:
+      - Lakeflow arguments: reference/lakeflow.md
+      - Command-line flags and environment variables: reference/flags.md
+      - Logs and reports: reference/output.md
+      - API: reference/api.md
+      - Limitations: reference/limitations.md
+  - FAQ: faq.md
   - How it works: how-it-works.md
-  - Limitations and FAQ: limitations.md
-  - API reference: api.md
   - Changelog: changelog.md
 
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - tables
   - toc:
       permalink: true
+  - pymdownx.details
   - pymdownx.highlight
   - pymdownx.inlinehilite
   - pymdownx.superfences
