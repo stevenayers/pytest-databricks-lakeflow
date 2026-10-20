@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import tempfile
 import time
 import uuid
 import warnings
@@ -9,6 +11,8 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import timedelta
+from functools import partial
+from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
@@ -315,6 +319,7 @@ class EphemeralJob:
         reset_checkpoint_selection: Sequence[str] | None = None,
         replay: JobRun | None = None,
         stream: bool | None = None,
+        dbt_commands: Sequence[str] | None = None,
     ) -> JobRun:
         """Run the job and wait for it to finish, creating it first if needed.
 
@@ -357,6 +362,11 @@ class EphemeralJob:
                 terminal while waiting, as `lakeflow: <line>`, whatever the output capture and `--log-cli-level`.
                 Defaults to whether `--lakeflow-live` is set. An xdist worker cannot write to the terminal, so there
                 the lines are only logged.
+            dbt_commands: The commands of every dbt task in this run, such as `["dbt deps", "dbt build --select
+                tag:ci"]`, in place of each task's own `commands`, which the job's settings keep. `TaskRun.parameters`
+                of each dbt task shows them. The Jobs API refuses them on a job with job parameters, including the
+                ones the plugin declares for `test_marker`, `trigger=` and `input=`. To change the commands of one dbt
+                task in the copy, pass `task_params` to `job()` or `task()` instead.
 
         Returns:
             The run's outcome.
@@ -368,9 +378,9 @@ class EphemeralJob:
                 and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
                 is set and the installed databricks-sdk cannot send it, or `stop_after` is longer than `timeout`.
                 Also if `replay` is passed without `only` or to a job that has been created, is a run of another job, or
-                lacks the captured values of a task it would stub. Each is raised before the run starts. Also if
-                no run ends within `timeout` while the process has as many runs active as `max_concurrent_runs`
-                allows, as for `start()`.
+                lacks the captured values of a task it would stub, and if `dbt_commands` is empty, a string, or passed
+                to a job with job parameters. Each is raised before the run starts. Also if no run ends within
+                `timeout` while the process has as many runs active as `max_concurrent_runs` allows, as for `start()`.
             LakeflowTimeout: If the run did not finish in time. The run is cancelled first.
             ValueError: If `performance_target` is not a known performance target.
         """
@@ -393,6 +403,7 @@ class EphemeralJob:
             refresh_flow_selection=refresh_flow_selection,
             reset_checkpoint_selection=reset_checkpoint_selection,
             stream=stream,
+            dbt_commands=dbt_commands,
         )
         return handle.wait(stop_after=stop_after)
 
@@ -409,6 +420,7 @@ class EphemeralJob:
         refresh_selection: Sequence[str] | None = None,
         refresh_flow_selection: Sequence[str] | None = None,
         reset_checkpoint_selection: Sequence[str] | None = None,
+        dbt_commands: Sequence[str] | None = None,
     ) -> RunHandle:
         """Start a run of the job without waiting for it, creating the job first if needed.
 
@@ -435,6 +447,7 @@ class EphemeralJob:
             refresh_flow_selection: Flows that the job's pipeline tasks refresh in this run, as for `run()`.
             reset_checkpoint_selection: Streaming flows whose checkpoints the job's pipeline tasks reset in this run,
                 as for `run()`.
+            dbt_commands: The commands of every dbt task in this run, as for `run()`.
 
         Returns:
             A handle to wait for the run or cancel it.
@@ -443,9 +456,11 @@ class EphemeralJob:
             LakeflowError: If the job has been closed, a parameter is not declared, `only` names an unknown
                 task or a task that is disabled in the copy or downstream of a disabled task, which the platform
                 would run, a selected task refers to the task values or the output of a task that `only` leaves out
-                and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, or a
-                selection is set and the installed databricks-sdk cannot send it. Also if no run ends within `timeout`
-                while the process has as many runs active as `max_concurrent_runs` allows.
+                and no stub replaces, a pipeline refresh option is set and the job has no pipeline task, a selection
+                is set and the installed databricks-sdk cannot send it, or `dbt_commands` is empty, a string, or
+                passed to a job with job parameters. Also
+                if no run ends within `timeout` while the process has as many runs active as `max_concurrent_runs`
+                allows.
             ValueError: If `performance_target` is not a known performance target.
         """
         return self._start(
@@ -460,6 +475,7 @@ class EphemeralJob:
             refresh_flow_selection=refresh_flow_selection,
             reset_checkpoint_selection=reset_checkpoint_selection,
             stream=None,
+            dbt_commands=dbt_commands,
         )
 
     def _start(
@@ -476,14 +492,18 @@ class EphemeralJob:
         refresh_flow_selection: Sequence[str] | None,
         reset_checkpoint_selection: Sequence[str] | None,
         stream: bool | None,
+        dbt_commands: Sequence[str] | None,
     ) -> RunHandle:
         """Start a run as `start()` does, with the handle streaming as `stream` says, `None` following the flag."""
+        commands = _dbt_commands(dbt_commands)
         target = _performance_target(performance_target)
         if queue is None:
             queue = self.lakeflow.queue
         queue_settings = None if queue is None else jobs.QueueSettings(enabled=queue)
         self.create()
         assert self.job_id is not None
+        if commands is not None:
+            self._check_dbt_commands_allowed()
         item = session.current_item()
         run_params = dict(params or {})
         check_params(self.job_key, self.settings, run_params, self.lakeflow.allow_undeclared_params)
@@ -507,8 +527,21 @@ class EphemeralJob:
             queue=queue_settings,
             pipeline_params=refresh,
             timeout=timeout,
+            dbt_commands=commands,
         )
         return RunHandle(self, run_id, item, first, timeout, stream=stream)
+
+    def _check_dbt_commands_allowed(self) -> None:
+        # run_now refuses dbt_commands, a legacy run parameter, on a job that declares job parameters, with
+        # InvalidParameterValue "Cannot use legacy parameters (...) because the job has job parameters configured."
+        names = [parameter.name for parameter in self.settings.parameters or []]
+        if not names:
+            return
+        raise LakeflowError(
+            f"dbt_commands cannot be passed to a run of {self.job_key!r}, because the job has job parameters {names}, "
+            "and the Jobs API then refuses them. Pass task_params={'<dbt task key>': [...]} to job() or task() "
+            "instead, which sets the commands of one dbt task in the copy."
+        )
 
     def _selection(self, only: Sequence[str] | None) -> list[str] | None:
         """The `only` of a run: what `only` selects and the injected tasks it needs, less a teardown left to close."""
@@ -540,6 +573,7 @@ class EphemeralJob:
         queue: jobs.QueueSettings | None = None,
         pipeline_params: jobs.PipelineParams | None = None,
         timeout: timedelta | None = None,
+        dbt_commands: list[str] | None = None,
     ) -> tuple[int, jobs.Run]:
         """Start a run with a fresh idempotency token, track it until it ends, and return its id and first poll.
 
@@ -560,6 +594,7 @@ class EphemeralJob:
                 performance_target=performance_target,
                 queue=queue,
                 pipeline_params=pipeline_params,
+                dbt_commands=dbt_commands,
             )
         except BaseException:
             if slots is not None:
@@ -800,20 +835,44 @@ class EphemeralJob:
         return None
 
     def _job_run(self, run: jobs.Run, outputs: Mapping[int, jobs.RunOutput]) -> JobRun:
-        """Build the `JobRun` of a terminated run of this job, from the task outputs read while polling."""
+        """Build the `JobRun` of a terminated run of this job, from the task outputs read while polling.
+
+        With `dbt_artifacts`, the artefacts of its dbt tasks are downloaded into a temporary directory of the run's.
+        """
         assert self.job_id is not None
-        return build_job_run(
-            self.lakeflow.ws,
-            run,
-            job_key=self.job_key,
-            job_id=self.job_id,
-            stubs=self.stubs,
-            capture_task_values=self.capture_task_values,
-            disabled=disabled_task_keys(self.settings),
-            outputs=outputs,
-            job_keys=self.lakeflow._job_keys(),
-            notebook_export=self.lakeflow.notebook_export,
-        )
+        dbt_dir = None
+        if self.lakeflow.dbt_artifacts:
+            dbt_dir = Path(tempfile.mkdtemp(prefix="lakeflow-dbt-"))
+        try:
+            return build_job_run(
+                self.lakeflow.ws,
+                run,
+                job_key=self.job_key,
+                job_id=self.job_id,
+                stubs=self.stubs,
+                capture_task_values=self.capture_task_values,
+                disabled=disabled_task_keys(self.settings),
+                outputs=outputs,
+                job_keys=self.lakeflow._job_keys(),
+                notebook_export=self.lakeflow.notebook_export,
+                dbt_artifacts_dir=dbt_dir,
+            )
+        finally:
+            if dbt_dir is not None:
+                self._settle_dbt_artifacts(dbt_dir, run.run_id)
+
+    def _settle_dbt_artifacts(self, directory: Path, run_id: int | None) -> None:
+        """Remove an empty artefacts directory now, keep it under `keep`, or remove it at the end of the session.
+
+        Not at the end of the test: a run that a module-scoped fixture makes is read by every test that uses it.
+        """
+        if not any(directory.iterdir()):
+            directory.rmdir()
+            return
+        if session.current().keeps(self.lakeflow.keep, keep_failed=False, failed=False):
+            log.warning("Keeping the dbt artefacts of run %s in %s", run_id, directory)
+            return
+        session.current_item().config.add_cleanup(partial(shutil.rmtree, directory, ignore_errors=True))
 
     def _record_url(self, run_id: int, run: jobs.Run, item: pytest.Item) -> None:
         if run_id in self._run_urls or not run.run_page_url:
@@ -1435,6 +1494,20 @@ def emit(item: pytest.Item, line: str) -> None:
         suspended = capture.global_and_fixture_disabled()
     with suspended:
         reporter.write_line(f"lakeflow: {line}")
+
+
+def _dbt_commands(commands: Sequence[str] | None) -> list[str] | None:
+    """Check the `dbt_commands` of a run, which `run_now` would send as a list of characters if given a string."""
+    if commands is None:
+        return None
+    if isinstance(commands, str):
+        raise LakeflowError(f"dbt_commands must be a list of commands, not a string: {commands!r}")
+    if not commands:
+        raise LakeflowError(
+            "dbt_commands must not be empty. Pass at least one command, such as ['dbt build'], or leave dbt_commands "
+            "out to run each dbt task's own commands."
+        )
+    return list(commands)
 
 
 def _check_stop_after(job_key: str, stop_after: timedelta, timeout: timedelta) -> None:
