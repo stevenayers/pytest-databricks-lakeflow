@@ -854,6 +854,19 @@ A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pyt
 
 Every kept job and schema is listed in a `lakeflow` block at the end of the run, with a hint to run `pytest --lakeflow-sweep` when jobs were kept, so you do not need `--log-cli-level` to find them.
 
+### Read a kept run again
+
+`lakeflow.attach(run_id)` rebuilds the `JobRun` of a finished run of a kept job without running anything, so you can refine assertions against real output instead of running the job again. Pass the job run id, the number at the end of the `Kept run:` URL:
+
+```python
+def test_transform_again(lakeflow):
+    run = lakeflow.attach(5437110661)
+    assert run.job_key == "my_example_job"
+    assert run.task("transform").raised(PermissionError)
+```
+
+The run's job must still exist, which `keep_failed`, `keep` and `--lakeflow-keep` see to: its `pytest_job_key` tag names the bundle job, and its settings say which tasks were stubs and which task values the probes captured, so `tasks`, `injected_tasks` and `task_values` come back as `run()` returned them. `attach` deploys nothing and needs no bundle, only the workspace client, and it never cancels or deletes anything: the job stays until `--lakeflow-sweep` removes it. The run's outcome goes to the test's report section as for a run the test started, but `run_finished` is not called, and a child run of a Run Job task is named by its job id rather than its bundle key. `attach` raises `LakeflowError` when the run does not exist, is a task run, has not finished, or belongs to a job that no longer exists or that the plugin did not create.
+
 ### Reproduce a failed notebook task
 
 `job.debug_notebook("transform")` writes a notebook to your workspace that reproduces a notebook task of the job's last run: a first cell sets the task's resolved parameters as text widgets, and a second cell runs the task's notebook with `%run`. Open it, change a widget if you like, and run all cells to step through the failure on interactive compute. Pass `run=` to replay an earlier run of the same job.

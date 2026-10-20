@@ -192,7 +192,8 @@ class FakeJobs:
         polls = self.queued.pop(0) if self.queued else [make_run(next(self._ids), {"task": "SUCCESS"})]
         run_id = polls[-1].run_id
         assert run_id is not None
-        self.polls[run_id] = polls
+        # Like the Jobs API, every snapshot of the run names the job it belongs to.
+        self.polls[run_id] = [replace(run, job_id=job_id) for run in polls]
         if idempotency_token is not None:
             self.tokens[idempotency_token] = run_id
         return SimpleNamespace(response=jobs.RunNowResponse(run_id=run_id))
@@ -207,21 +208,30 @@ class FakeJobs:
         if run_id in self.polls:
             polls = self.polls[run_id]
             return polls.pop(0) if len(polls) > 1 else polls[0]
-        task = self._task_run(run_id)
-        if task is None:
+        found = self._task_run(run_id)
+        if found is None:
             raise NotFound(f"Run {run_id} does not exist.")
-        # Like the Jobs API, a task run fetched by its own id is a run with that one task, and `resolved_values`
-        # is filled only then and only with `include_resolved_values`. On a job run it is always null.
+        parent, task = found
+        # Like the Jobs API, a task run fetched by its own id is a run with that one task, which names the job and
+        # the job run it belongs to, and `resolved_values` is filled only then and only with
+        # `include_resolved_values`. On a job run it is always null.
         resolved = self.resolved.get(run_id) if kwargs.get("include_resolved_values") else None
         if isinstance(resolved, Exception):
             raise resolved
-        return jobs.Run(run_id=run_id, tasks=[replace(task, resolved_values=resolved)])
+        return jobs.Run(
+            run_id=run_id,
+            job_id=parent.job_id,
+            job_run_id=parent.run_id,
+            tasks=[replace(task, resolved_values=resolved)],
+        )
 
-    def _task_run(self, run_id: int) -> jobs.RunTask | None:
+    def _task_run(self, run_id: int) -> tuple[jobs.Run, jobs.RunTask] | None:
+        """Find the task run `run_id`, with the last snapshot of the job run it belongs to."""
         for polls in self.polls.values():
-            for task in polls[-1].tasks or []:
+            parent = polls[-1]
+            for task in parent.tasks or []:
                 if task.run_id == run_id:
-                    return task
+                    return parent, task
         return None
 
     def get_run_output(self, run_id: int) -> jobs.RunOutput:
@@ -747,6 +757,7 @@ def make_run(
             )
     return jobs.Run(
         run_id=run_id,
+        job_run_id=run_id,
         state=jobs.RunState(result_state=jobs.RunResultState(result_state)),
         status=jobs.RunStatus(state=TERMINATED, termination_details=_details(code)),
         tasks=tasks,
@@ -850,7 +861,9 @@ def running_run(run_id: int, states: dict[str, str]) -> jobs.Run:
             )
         )
     status = jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING)
-    return jobs.Run(run_id=run_id, status=status, tasks=tasks, run_page_url=f"{HOST}/jobs/runs/{run_id}")
+    return jobs.Run(
+        run_id=run_id, job_run_id=run_id, status=status, tasks=tasks, run_page_url=f"{HOST}/jobs/runs/{run_id}"
+    )
 
 
 def _condition(outcomes: Mapping[str, str] | None, key: str) -> jobs.RunConditionTask | None:

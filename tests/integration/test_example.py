@@ -284,6 +284,33 @@ def test_stub_values_are_not_templated(lakeflow: Lakeflow) -> None:
         assert run.task("transform").task_values["source_path"] == source_path
 
 
+def test_attach_rebuilds_a_kept_run(lakeflow: Lakeflow) -> None:
+    kept = dataclasses.replace(lakeflow, keep=True)
+    job = kept.task(
+        "my_example_job.transform",
+        upstream_task_values={"extract": {"row_count": 3, "source_path": "/Volumes/{{job.id}}/landing"}},
+        capture_task_values=["stage", "source_path", "{{never_set}}"],
+    )
+    try:
+        with job:
+            run = job.run()
+        again = lakeflow.attach(run.run_id)
+    finally:
+        if job.job_id is not None:
+            lakeflow.ws.jobs.delete(job.job_id)
+    assert run.succeeded, run
+    assert again.job_key == run.job_key == "my_example_job"
+    assert again.job_id == run.job_id
+    assert set(again.tasks) == set(run.tasks) == {"transform"}
+    assert set(again.injected_tasks) == set(run.injected_tasks) == {"extract", "__pytest_probe__transform"}
+    transform = again.task("transform")
+    original = run.task("transform")
+    assert dict(transform.task_values) == dict(original.task_values)
+    assert transform.task_values["source_path"] == "/Volumes/{{job.id}}/landing"
+    assert transform.missing_task_values == original.missing_task_values == ["{{never_set}}"]
+    assert transform.parameters == original.parameters
+
+
 @pytest.fixture(scope="module")
 def captured_run(lakeflow: Lakeflow) -> Iterator[JobRun]:
     with lakeflow.job("my_example_job", capture_task_values={"extract": ["row_count", "source_path"]}) as job:
