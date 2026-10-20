@@ -678,9 +678,24 @@ class TestAttach:
             """
         run_tests(pytester, source).assert_outcomes(passed=1)
 
-    def test_attach_rejects_an_active_run(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        add_job_run(fake_ws, running_run(91, {"extract": "RUNNING"}), PLUGIN_TAGS)
-        message = "Run 91 has not finished (RUNNING). attach() reads finished runs only."
+    @pytest.mark.parametrize(
+        ("status", "state", "shown"),
+        [
+            pytest.param(jobs.RunStatus(state=jobs.RunLifecycleStateV2State.RUNNING), None, "RUNNING", id="v2"),
+            pytest.param(None, jobs.RunState(life_cycle_state=jobs.RunLifeCycleState.PENDING), "PENDING", id="legacy"),
+            pytest.param(None, None, "unknown", id="no-state"),
+        ],
+    )
+    def test_attach_rejects_an_active_run(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        status: jobs.RunStatus | None,
+        state: jobs.RunState | None,
+        shown: str,
+    ) -> None:
+        add_job_run(fake_ws, replace(running_run(91, {"extract": "RUNNING"}), status=status, state=state), PLUGIN_TAGS)
+        message = f"Run 91 has not finished ({shown}). attach() reads finished runs only."
         source = f"""
             import pytest
             from pytest_databricks_lakeflow import LakeflowError
@@ -706,6 +721,21 @@ class TestAttach:
                 assert str(excinfo.value) == {message!r}
             """
         run_tests(pytester, source).assert_outcomes(passed=1)
+
+    def test_attach_rejects_a_run_of_no_job(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.add_run(replace(make_run(92, {"extract": "SUCCESS"}), job_id=None))
+        message = "Run 92 belongs to no job, so pytest-databricks-lakeflow did not start it"
+        source = f"""
+            import pytest
+            from pytest_databricks_lakeflow import LakeflowError
+
+            def test_attach(lakeflow):
+                with pytest.raises(LakeflowError) as excinfo:
+                    lakeflow.attach(92)
+                assert str(excinfo.value) == {message!r}
+            """
+        run_tests(pytester, source).assert_outcomes(passed=1)
+        assert fake_ws.jobs.gets == []
 
     def test_attach_to_a_run_that_does_not_exist(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
         source = f"""
@@ -3003,6 +3033,17 @@ class TestLive:
         assert result.stdout.str().count("PENDING -> RUNNING") == 1
         assert result.stdout.str().count("RUNNING -> FAILED") == 1
 
+    def test_start_line_leaves_out_a_url_not_reported_yet(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
+    ) -> None:
+        first = replace(running_run(77, {"extract": "PENDING"}), run_page_url=None)
+        fake_ws.jobs.queue_polls([first, make_run(77, {"extract": "SUCCESS"})])
+        source = 'def test_job(lakeflow):\n    assert lakeflow.job("my_job").run(stream=True).succeeded\n'
+        result = run_tests(pytester, source)
+        result.assert_outcomes(passed=1)
+        assert "lakeflow: Started run 77 of job 1001" in result.stdout.lines
+        result.stdout.fnmatch_lines([f"lakeflow: Run 77 finished SUCCESS in *: {HOST}/jobs/runs/77"])
+
     @pytest.mark.parametrize(
         ("call", "flags", "printed"),
         [
@@ -3767,30 +3808,66 @@ class TestPipelineCopies:
         assert pipeline_ids_by_task(job) == tasks
         assert [created["name"] for created in fake_ws.pipelines.created] == names
 
-    def test_copies_are_deleted_when_the_job_is_not_created(
+    @pytest.mark.parametrize(
+        ("arguments", "body", "outcome", "kept"),
+        [
+            pytest.param("", "with copying_job(lakeflow):\n        pass", "failed", None, id="keep_failed"),
+            pytest.param("keep=True", "with copying_job(lakeflow):\n        pass", "failed", True, id="keep"),
+            pytest.param(
+                "keep_failed=False", "with copying_job(lakeflow):\n        pass", "failed", False, id="keep_failed off"
+            ),
+            pytest.param(
+                "",
+                "with pytest.raises(PermissionDenied):\n        copying_job(lakeflow).create()",
+                "passed",
+                False,
+                id="test passed",
+            ),
+        ],
+    )
+    def test_copies_of_a_job_not_created_are_kept_only_by_keep(
         self,
         pytester: pytest.Pytester,
         fake_ws: FakeWorkspaceClient,
         fake_cli: FakeCli,
         monkeypatch: pytest.MonkeyPatch,
+        arguments: str,
+        body: str,
+        outcome: str,
+        kept: bool | None,
     ) -> None:
+        """`kept` is None when only `keep_failed` would have kept the copies, the one case the warning is for."""
         deploy_pipeline(fake_ws, fake_cli)
         monkeypatch.setattr(fake_ws.jobs, "create", deny_create)
-        source = """
-            def test_job(lakeflow):
-                with lakeflow.job("pipeline_job", pipelines="copy", schema="c.s"):
-                    pass
-        """
-        result = run_tests(pytester, source, "--log-level=INFO")
-        result.assert_outcomes(failed=1)
-        assert fake_ws.deletions == ["pipeline p-1000"]
-        result.stdout.fnmatch_lines(
-            [
-                "*The job copying 'pipeline_job' was not created, so no job points at its pipeline copies ?'p-1000'?, "
-                "and they are deleted whatever keep_failed says*"
-            ]
+        configure_lakeflow(pytester, arguments)
+        source = f"""
+import pytest
+from databricks.sdk.errors import PermissionDenied
+
+
+def copying_job(lakeflow):
+    return lakeflow.job("pipeline_job", pipelines="copy", schema="c.s")
+
+
+def test_job(lakeflow):
+    {body}
+"""
+        result = run_tests(pytester, source, "--log-level=INFO", "-rA")
+        result.assert_outcomes(**{outcome: 1})
+        warning = (
+            "*The job copying 'pipeline_job' was not created, so no job points at its pipeline copies ?'p-1000'?, "
+            "and they are deleted whatever keep_failed says*"
         )
-        assert "lakeflow: 1 pipeline kept" not in result.stdout.str()
+        if kept is None:
+            result.stdout.fnmatch_lines([warning])
+        else:
+            result.stdout.no_fnmatch_line(warning)
+        if kept:
+            assert fake_ws.deletions == []
+            result.stdout.fnmatch_lines(["lakeflow: 1 pipeline kept"])
+        else:
+            assert fake_ws.deletions == ["pipeline p-1000"]
+            assert "lakeflow: 1 pipeline kept" not in result.stdout.str()
 
     def test_failed_test_keeps_the_job_and_its_copies(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli

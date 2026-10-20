@@ -168,7 +168,9 @@ def sanitise(
         settings: A copy of a template. It is changed in place.
         name: The job name, without the `[pytest] ` prefix.
         tags: Tags to add. Values are made acceptable as tag values. The attribution tags in `ATTRIBUTION_TAGS`
-            are added only while the job has fewer than 25 tags, in that order; the others must fit.
+            are added only while the job has fewer than 25 tags, in that order; the others must fit. The plugin's
+            `pytest`, `pytest_run_id`, `pytest_nodeid` and `pytest_job_key` leave room for 21 tags of the
+            template's own, or 20 with `--lakeflow-keep-ttl`, which adds `pytest_expires`.
         disable_auto_optimization: Stop serverless from retrying failed code tasks.
         performance_optimized: Override the performance target with `PERFORMANCE_OPTIMIZED`.
         run_as: `None` removes the template's `run_as`, so the job runs as its creator. `"keep"` keeps it. A
@@ -1357,7 +1359,7 @@ def check_references(settings: jobs.JobSettings, selected: Collection[str], stub
 
 
 def check_trigger_references(job_key: str, settings: jobs.JobSettings) -> None:
-    """Fail early when a task keeps a table update or file arrival trigger reference that the copy cannot resolve.
+    """Fail early when the copy keeps a table update or file arrival trigger reference that it cannot resolve.
 
     `sanitise` strips the template's trigger, so jobs/create refuses `{{job.trigger.table_update.*}}` and
     `{{job.trigger.file_arrival.*}}` in the copy unless `trigger=` rewrote them or `modify_settings` set that trigger.
@@ -1367,20 +1369,27 @@ def check_trigger_references(job_key: str, settings: jobs.JobSettings) -> None:
         settings: The job's settings, as they will be created.
 
     Raises:
-        LakeflowError: If a task, nested tasks included, refers to a trigger of a kind the settings do not have.
+        LakeflowError: If a task, nested tasks included, or a job parameter's default refers to a trigger of a kind
+            the settings do not have.
     """
     configured = _configured_triggers(settings.trigger)
     for task in _with_nested(settings.tasks):
-        for match in TRIGGER_REFERENCE.finditer(json.dumps(_own_fields(task))):
-            path = match[1]
-            kind = path.split(".")[0]
-            if kind not in TRIGGER_KINDS or kind in configured:
-                continue
-            raise LakeflowError(
-                f"Task {task.task_key!r} of {job_key!r} refers to {match[0]}, but the copy has no "
-                f"{TRIGGER_KINDS[kind]} trigger, and jobs/create refuses the reference without one. Set its value with "
-                f"trigger={{{path!r}: ...}} on job() or task()."
-            )
+        _check_trigger_kinds(f"Task {task.task_key!r} of {job_key!r}", _own_fields(task), configured)
+    # jobs/create was seen refusing these references in tasks; a job parameter default is assumed to be checked alike.
+    for parameter in settings.parameters or []:
+        _check_trigger_kinds(f"Job parameter {parameter.name!r} of {job_key!r}", parameter.default, configured)
+
+
+def _check_trigger_kinds(owner: str, fields: Any, configured: set[str]) -> None:
+    for match in TRIGGER_REFERENCE.finditer(json.dumps(fields)):
+        path = match[1]
+        kind = path.split(".")[0]
+        if kind not in TRIGGER_KINDS or kind in configured:
+            continue
+        raise LakeflowError(
+            f"{owner} refers to {match[0]}, but the copy has no {TRIGGER_KINDS[kind]} trigger, and jobs/create "
+            f"refuses the reference without one. Set its value with trigger={{{path!r}: ...}} on job() or task()."
+        )
 
 
 def _configured_triggers(trigger: jobs.TriggerSettings | None) -> set[str]:
