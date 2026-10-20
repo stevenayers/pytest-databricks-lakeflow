@@ -67,8 +67,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     group.addoption(
         "--lakeflow-keep-ttl",
         metavar="DURATION",
-        help="Tag every ephemeral job and pipeline copy with a pytest_expires time this far ahead, such as 48h or 7d. "
-        "The sweep keeps a tagged job or pipeline until then, whatever its age.",
+        help="Tag every ephemeral job and pipeline copy, and every temporary schema, with a pytest_expires time this "
+        "far ahead, such as 48h or 7d. The sweep keeps them, and the notebooks the jobs use, until then, whatever "
+        "their age.",
     )
     group.addoption(
         "--lakeflow-sweep", action="store_true", help="Delete leftover ephemeral jobs and pipelines at session start."
@@ -88,12 +89,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--lakeflow-sweep-notebooks",
         action="store_true",
         default=None,
-        help="Also delete old setup_<hash> and teardown_<hash> notebooks from the helpers folder.",
+        help="Also delete old setup_<hash>, teardown_<hash> and debug notebooks from the helpers folder that no job "
+        "the sweep keeps uses. With scope all, from every user's default helpers folder.",
     )
     group.addoption(
         "--lakeflow-sweep-branch",
         metavar="BRANCH",
-        help="Sweep only jobs and pipelines whose pytest_git_branch tag is this branch.",
+        help="Sweep only jobs, pipelines and schemas of this pytest_git_branch, and only the notebooks that their "
+        "jobs alone use.",
     )
     group.addoption(
         "--lakeflow-sweep-dry-run",
@@ -209,22 +212,12 @@ def _sweep_options(config: pytest.Config) -> SweepOptions:
     if given and not config.getoption("lakeflow_sweep"):
         verb = "needs" if len(given) == 1 else "need"
         raise pytest.UsageError(f"{', '.join(given)} {verb} --lakeflow-sweep")
-    branch = config.getoption("lakeflow_sweep_branch")
-    schemas_catalog = config.getoption("lakeflow_sweep_schemas")
-    notebooks = bool(config.getoption("lakeflow_sweep_notebooks"))
-    if branch is not None and (schemas_catalog or notebooks):
-        untagged = [SWEEP_FLAGS[dest] for dest in ("lakeflow_sweep_schemas", "lakeflow_sweep_notebooks")]
-        combined = [flag for flag in untagged if flag in given]
-        raise pytest.UsageError(
-            f"--lakeflow-sweep-branch cannot be combined with {' or '.join(combined)}: schemas and notebooks carry "
-            "no tags, so the branch cannot be told."
-        )
     report = config.getoption("lakeflow_sweep_report")
     return SweepOptions(
         scope=config.getoption("lakeflow_sweep_scope") or "mine",
-        schemas_catalog=schemas_catalog,
-        notebooks=notebooks,
-        branch=branch,
+        schemas_catalog=config.getoption("lakeflow_sweep_schemas"),
+        notebooks=bool(config.getoption("lakeflow_sweep_notebooks")),
+        branch=config.getoption("lakeflow_sweep_branch"),
         dry_run=bool(config.getoption("lakeflow_sweep_dry_run")),
         report=None if report is None else config.invocation_params.dir / report,
     )

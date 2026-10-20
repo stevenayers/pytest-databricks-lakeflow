@@ -60,6 +60,7 @@ from pytest_databricks_lakeflow.settings import (
     sanitise,
     sanitise_pipeline,
     stub_upstream,
+    tag_value,
     upstream_values_from,
     wrap_task,
 )
@@ -163,7 +164,7 @@ class Lakeflow:
             in the job name. Tests cannot pass the parameter themselves.
         notebook_export: Which notebook tasks to read with `jobs.export_run` after a run, into `TaskRun.notebook`:
             `failed` for those that ran and did not succeed, `always` for every one that ran, `never` for none.
-        sweep_hours: The age after which `--lakeflow-sweep` deletes leftover jobs.
+        sweep_hours: The age after which `--lakeflow-sweep` and `sweep()` delete leftover jobs.
         keep: Keep every ephemeral job and temporary schema. `--lakeflow-keep` also turns this on.
         keep_failed: Keep the ephemeral job when its test fails. `--lakeflow-keep-failed` and
             `--no-lakeflow-keep-failed` override it.
@@ -819,7 +820,8 @@ class Lakeflow:
 
         The schema is named `<catalog>.pytest_<run id>_<random>`. Pass it to jobs as a job parameter, because
         bundle variables cannot change per test. It is dropped even when the block fails, unless `keep` or
-        `--lakeflow-keep` is set.
+        `--lakeflow-keep` is set. It carries the `pytest_expires` property of `--lakeflow-keep-ttl` and the
+        `pytest_git_branch` property, when they have a value, which the sweep reads as it reads a job's tags.
 
         Args:
             catalog: The catalog to create it in. Defaults to `catalog`.
@@ -836,7 +838,11 @@ class Lakeflow:
         state = session.current()
         name = f"{session.schema_prefix(state.run_id)}{secrets.token_hex(4)}"
         full_name = f"{catalog}.{name}"
-        self.ws.schemas.create(name=name, catalog_name=catalog)
+        properties = state.expiry_tag()
+        branch = state.attribution.get("pytest_git_branch")
+        if branch:
+            properties["pytest_git_branch"] = tag_value(branch)
+        self.ws.schemas.create(name=name, catalog_name=catalog, properties=properties or None)
         log.info("Created schema %s", full_name)
         try:
             yield full_name
@@ -847,6 +853,51 @@ class Lakeflow:
             else:
                 self.ws.schemas.delete(full_name, force=True)
                 log.info("Dropped schema %s", full_name)
+
+    def sweep(
+        self,
+        *,
+        scope: session.SweepScope = "mine",
+        schemas_catalog: str | None = None,
+        notebooks: bool = False,
+        branch: str | None = None,
+        dry_run: bool = False,
+        report: str | Path | None = None,
+    ) -> session.SweepReport:
+        """Delete leftover ephemeral jobs, pipeline copies, schemas and notebooks, as `--lakeflow-sweep` does.
+
+        It needs no pytest session, no bundle and no test, so a nightly job can call it from a script. It uses this
+        instance's workspace client, `sweep_hours` and `helpers_path`, or your default helpers folder, and spares no
+        run: every job older than `sweep_hours` goes, unless its `pytest_expires` time is still ahead.
+
+        Args:
+            scope: `mine` for what you created, `all` for what anyone created, every user's default helpers folder
+                included.
+            schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas to drop too.
+            notebooks: Also delete old setup, teardown and debug notebooks that no job the sweep keeps uses.
+            branch: Delete only what carries this `pytest_git_branch`, and the notebooks only its jobs use.
+            dry_run: Delete nothing, and report what would be deleted.
+            report: A file to write the report to, as JSON.
+
+        Returns:
+            What was deleted, or with `dry_run` what would have been.
+
+        Raises:
+            ValueError: If `scope` is not `mine` or `all`.
+        """
+        if scope not in session.SWEEP_SCOPES:
+            raise ValueError(f"scope must be one of {', '.join(session.SWEEP_SCOPES)}, got {scope!r}")
+        user = self.ws.current_user.me().user_name
+        options = session.SweepOptions(
+            scope=scope,
+            schemas_catalog=schemas_catalog,
+            notebooks=notebooks,
+            branch=branch,
+            dry_run=dry_run,
+            report=None if report is None else Path(report),
+        )
+        folder = self.helpers_path or helpers.default_folder(user)
+        return session.sweep(self.ws, None, self.sweep_hours, folder, options, user=user)
 
     def _state(self) -> dict[str, Any]:
         current = session.current()

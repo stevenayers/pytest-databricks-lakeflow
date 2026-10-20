@@ -32,7 +32,7 @@ All arguments are keyword-only.
 | `allow_undeclared_params` | `False` | Allow job parameters that the job does not declare. |
 | `test_marker` | `False` | Declare a `__pytest_test_id` job parameter on every ephemeral job, with the test node id as its default, so job code can tell that it runs under test. See [Writing job tests](job-tests.md#make-a-job). |
 | `notebook_export` | `"failed"` | Which notebook tasks to read with `jobs.export_run` after a run, into `TaskRun.notebook`: `"failed"` exports each notebook task that ran and did not succeed, `"always"` every notebook task that ran, `"never"` none. Any other value raises `ValueError`. See [Read what a notebook printed](job-tests.md#read-what-a-notebook-printed). |
-| `sweep_hours` | `24` | The age after which `--lakeflow-sweep` deletes leftover jobs and pipeline copies. |
+| `sweep_hours` | `24` | The age after which `--lakeflow-sweep` and `Lakeflow.sweep()` delete leftover jobs and pipeline copies. |
 | `keep` | `False` | Keep every ephemeral job, pipeline copy and temporary schema. |
 | `keep_failed` | `True` | Keep the ephemeral job and pipeline copies when their test fails. |
 | `strict_artifacts` | `False` | Raise `LakeflowError` from the first template lookup when the bundle has a wheel artifact without `dynamic_version: true`, or, with `sync="none"`, a local wheel built after its uploaded copy, instead of the `UserWarning` the plugin emits once per session for each. Later lookups fail with the same message. See [Limitations](limitations.md). |
@@ -68,12 +68,12 @@ These apply to one pytest run and win over the matching arguments.
 | `--lakeflow-keep` | Keep every ephemeral job, pipeline copy and temporary schema. |
 | `--lakeflow-keep-failed` | Keep the ephemeral job and pipeline copies when their test fails, even with `Lakeflow(keep_failed=False)`. |
 | `--no-lakeflow-keep-failed` | Delete the ephemeral job and pipeline copies even when their test fails. |
-| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job and pipeline copy with `pytest_expires`, an ISO 8601 UTC time this far ahead, in whole hours (`h`) or days (`d`). The sweep keeps a tagged job or pipeline until then, whatever its age, and deletes it once that time has passed. `--lakeflow-sweep-notebooks` does not read the tag, see [sweeping leftovers](#sweeping-leftovers). |
+| `--lakeflow-keep-ttl=48h` | Tag every ephemeral job and pipeline copy with `pytest_expires`, an ISO 8601 UTC time this far ahead, in whole hours (`h`) or days (`d`), and give every temporary schema the same `pytest_expires` property. The sweep keeps a tagged job, pipeline or schema until then, whatever its age, with the notebooks such a job uses, and deletes it once that time has passed. |
 | `--lakeflow-sweep` | At session start, delete your own jobs tagged `pytest`, and your own `[pytest]` pipeline copies, from other runs that are older than `sweep_hours`. |
-| `--lakeflow-sweep-scope=all` | Sweep jobs, pipeline copies and schemas whoever created them, not only your own. The default is `mine`. |
+| `--lakeflow-sweep-scope=all` | Sweep jobs, pipeline copies and schemas whoever created them, not only your own, and with `--lakeflow-sweep-notebooks` every user's default helpers folder. The default is `mine`. |
 | `--lakeflow-sweep-schemas=<catalog>` | Also drop the temporary `pytest_<run id>_<8 hex digits>` schemas of other runs in that catalog that are older than `sweep_hours`. |
-| `--lakeflow-sweep-notebooks` | Also delete the `setup_<hash>` and `teardown_<hash>` notebooks in the helpers folder that were last uploaded more than `sweep_hours` ago. |
-| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs and pipeline copies whose `pytest_git_branch` tag is that branch. |
+| `--lakeflow-sweep-notebooks` | Also delete the `setup_<hash>`, `teardown_<hash>` and debug notebooks in the helpers folder that were last uploaded more than `sweep_hours` ago and that no job the sweep keeps uses. |
+| `--lakeflow-sweep-branch=<branch>` | Sweep only jobs, pipeline copies and schemas whose `pytest_git_branch` tag or property is that branch, and only the notebooks that those jobs alone use. |
 | `--lakeflow-sweep-dry-run` | Delete nothing, and list what the sweep would delete. |
 | `--lakeflow-sweep-report=<path>` | Write what the sweep deleted, or would delete, to a JSON file, relative to the directory pytest was started in. |
 | `--lakeflow-destroy` | Run `databricks bundle destroy` at the end of the session for each target that the session deployed. |
@@ -89,8 +89,10 @@ These apply to one pytest run and win over the matching arguments.
 
 - Jobs tagged `pytest` and `pytest_run_id`, from a run other than this one, created more than `sweep_hours` ago. A job tagged `pytest_expires` is deleted once that time has passed instead, whatever its age. With the default scope only jobs you created are considered; `--lakeflow-sweep-scope=all` considers everyone's, and a delete you are not allowed to make is recorded as an error.
 - Pipelines named `[pytest] ...` and tagged `pytest` and `pytest_run_id`, from a run other than this one, last changed more than `sweep_hours` ago, or past their `pytest_expires` time, by you unless the scope is `all`, and tagged with the branch under `--lakeflow-sweep-branch`. The Pipelines API lists pipelines without their tags or creation time, so the sweep lists those whose name starts with `[pytest] ` and reads each one, and a pipeline's age is the time since it last changed. A copy is deleted with its tables, as at teardown.
-- With `--lakeflow-sweep-schemas=<catalog>`, schemas named `pytest_<run id>_<8 hex digits>`, from another run, created more than `sweep_hours` ago, by you unless the scope is `all`. Schemas carry no tags, so `--lakeflow-keep-ttl` cannot protect them, and `--lakeflow-sweep-branch` cannot be combined with this flag.
-- With `--lakeflow-sweep-notebooks`, notebooks in the helpers folder named exactly `setup_` or `teardown_` followed by 12 hexadecimal digits, last uploaded more than `sweep_hours` ago. Every session that uses a setup or teardown function uploads its notebook again, so a notebook in use stays young. `set_values`, `get_values` and any other name are never deleted. `--lakeflow-sweep-branch` cannot be combined with this flag either. A notebook is judged by its upload time alone, not by the `pytest_expires` tag of the jobs that use it, so a job kept with `--lakeflow-keep-ttl` for longer than `sweep_hours` can lose its setup or teardown notebook to a later `--lakeflow-sweep-notebooks`, and a repair or rerun of it then fails. Leave the flag off while you still need such a job.
+- With `--lakeflow-sweep-schemas=<catalog>`, schemas named `pytest_<run id>_<8 hex digits>`, from another run, created more than `sweep_hours` ago or past their `pytest_expires` time, by you unless the scope is `all`, and with the branch under `--lakeflow-sweep-branch`. Schemas carry no tags, so `lakeflow.schema()` writes `pytest_expires` (with `--lakeflow-keep-ttl`) and `pytest_git_branch` (when the branch is known) as schema properties, which the Unity Catalog API returns unchanged. A schema without them, such as one made by an earlier version of the plugin, is judged by its age, and a branch sweep leaves it.
+- With `--lakeflow-sweep-notebooks`, notebooks in the helpers folder named exactly `setup_` or `teardown_` followed by 12 hexadecimal digits, and debug notebooks in its `debug` folder named `<job key>__<task key>__<run id>`, last uploaded more than `sweep_hours` ago. Every session that uses a setup or teardown function uploads its notebook again, so a notebook in use stays young. `set_values`, `get_values` and any other name are never deleted. A notebook is deleted only when no job that the sweep keeps uses it, whoever created that job: a setup or teardown notebook is used by every job with a task that runs it, and a debug notebook by the job of the run it replays. So a job kept with `--lakeflow-keep-ttl` keeps its notebooks until its `pytest_expires` time, and a young job of a crashed session keeps them until the sweep deletes the job. When the jobs cannot be listed, no notebook is deleted.
+- With `--lakeflow-sweep-scope=all`, the notebooks of every user's default helpers folder, `/Users/<user>/.pytest-databricks-lakeflow`, are swept too. That lists one folder per user under `/Users`, in parallel, so dry-run it first on a large workspace, or sweep each principal with the default scope instead. A user without a helpers folder is skipped; a folder that cannot be listed is recorded as an error. A custom `helpers_path` of another session cannot be found, so only your own is swept.
+- With `--lakeflow-sweep-branch`, a notebook is deleted only when at least one job uses it and the sweep deletes every job that does. A notebook that no job uses any more, or that a job of another branch shares, is left to an unfiltered sweep.
 
 A failed delete or listing is logged at WARNING and the sweep carries on. Any other error, such as a `--lakeflow-sweep-report` path that cannot be written, ends the sweep with a `UserWarning` (`Lakeflow sweep failed: ...`) in the warnings summary, raised once, by the process that swept. The sweep only tidies up, so no test fails because of it, and under xdist the other workers carry on as if it had succeeded. To see first what a sweep would delete, run it with `--lakeflow-sweep-dry-run`: nothing is deleted, and the terminal summary lists each job, pipeline, schema and notebook it would delete, then any error:
 
@@ -116,6 +118,19 @@ lakeflow: sweep dry run deleted nothing; it would delete:
   "errors": []
 }
 ```
+
+### Sweep from a script
+
+`Lakeflow.sweep()` runs the same sweep from plain Python, without a pytest session, a bundle or a test, so a nightly job does not need a smoke test that deploys the bundle. It uses the instance's workspace client, `sweep_hours` and `helpers_path`, or your default helpers folder, and returns a `SweepReport`. It spares no run, so every job older than `sweep_hours` goes, unless its `pytest_expires` time is still ahead:
+
+```python
+from pytest_databricks_lakeflow import Lakeflow
+
+report = Lakeflow(profile="ci").sweep(scope="all", schemas_catalog="dev_sandbox", notebooks=True, dry_run=True)
+print(report.jobs, report.schemas, report.notebooks, report.errors)
+```
+
+It takes `scope`, `schemas_catalog`, `notebooks`, `branch`, `dry_run` and `report` (a path for the JSON report), which mean what the matching `--lakeflow-sweep-*` flags do.
 
 ## Environment variables
 

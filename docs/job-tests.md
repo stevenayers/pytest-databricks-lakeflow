@@ -882,7 +882,7 @@ A `start()` or `run()` that finds no free slot within its `timeout` raises `Lake
 - `--lakeflow-keep` keeps every job and schema of the run.
 - `--no-lakeflow-keep-failed` deletes jobs even when their test fails, for CI.
 - `--lakeflow-sweep` deletes the jobs you kept earlier, once they are older than `sweep_hours`.
-- `--lakeflow-keep-ttl=48h` (or `7d`) tags every job with `pytest_expires`, 48 hours ahead in UTC. The sweep keeps a tagged job until then, however old it is, and deletes it as soon as that time has passed, so `pytest --lakeflow-keep --lakeflow-keep-ttl=7d` keeps a run's jobs for a week of debugging. `--lakeflow-sweep-notebooks` ignores the tag and still deletes the setup and teardown notebooks of those jobs once they are older than `sweep_hours`.
+- `--lakeflow-keep-ttl=48h` (or `7d`) tags every job with `pytest_expires`, 48 hours ahead in UTC. The sweep keeps a tagged job until then, however old it is, and deletes it as soon as that time has passed, so `pytest --lakeflow-keep --lakeflow-keep-ttl=7d` keeps a run's jobs for a week of debugging.
 
 A kept job carries the CI run URL and the commit in its `pytest_ci_url` and `pytest_git_sha` tags, and the test node id and CI run URL in its description.
 

@@ -27,7 +27,7 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import BadRequest, NotFound, PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
-from databricks.sdk.service import iam, pipelines, workspace
+from databricks.sdk.service import iam, jobs, pipelines, workspace
 from filelock import FileLock
 
 from pytest_databricks_lakeflow import bundle, helpers
@@ -56,6 +56,10 @@ SWEEP_STATE_FILE = "lakeflow_sweep.json"
 EXPIRES_TAG = "pytest_expires"
 EXPIRES_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 LIFECYCLE_NOTEBOOK = re.compile(rf"(setup|teardown)_[0-9a-f]{{{helpers.NOTEBOOK_DIGEST_CHARS}}}")
+# `<job_key>__<task_key>__<run id>`, as `EphemeralJob.debug_notebook` names it in the helpers folder's `debug` folder.
+DEBUG_NOTEBOOK = re.compile(r".+__.+__(?P<run_id>[0-9]+)")
+USERS_FOLDER = "/Users"
+FOLDER_LISTING_THREADS = 16
 SCHEMA_SUFFIX = "[0-9a-f]{8}"
 SP_USER_ROLE = "roles/servicePrincipal.user"
 GRANT_ROLE = "Ask a manager of that service principal to grant you the role"
@@ -79,8 +83,10 @@ class SweepOptions:
     Attributes:
         scope: `mine` for jobs, pipelines and schemas this user created, `all` for anyone's.
         schemas_catalog: A catalog whose old `pytest_<run id>_<hex>` schemas from other runs are dropped too.
-        notebooks: Also delete old `setup_<hash>` and `teardown_<hash>` notebooks from the helpers folder.
-        branch: Delete only jobs and pipelines whose `pytest_git_branch` tag is this branch.
+        notebooks: Also delete old `setup_<hash>`, `teardown_<hash>` and debug notebooks from the helpers folder, or
+            with scope `all` from every user's default helpers folder too, unless a job the sweep keeps uses them.
+        branch: Delete only jobs, pipelines and schemas whose `pytest_git_branch` tag or property is this branch, and
+            only the notebooks that those jobs alone use.
         dry_run: Delete nothing, and report what would be deleted.
         report: A file to write the report to, as JSON.
     """
@@ -98,7 +104,7 @@ DEFAULT_SWEEP_OPTIONS = SweepOptions()
 
 @dataclass(frozen=True)
 class SweepReport:
-    """What a sweep deleted, or with `dry_run` would have deleted.
+    """What a sweep deleted, or with `dry_run` would have deleted, as `Lakeflow.sweep()` returns it.
 
     Attributes:
         dry_run: Whether the sweep only listed what it would delete.
@@ -117,6 +123,7 @@ class SweepReport:
     errors: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
+        """Get the report as `--lakeflow-sweep-report` writes it, with a `version` key."""
         return {
             "version": SWEEP_REPORT_VERSION,
             "dry_run": self.dry_run,
@@ -839,7 +846,7 @@ def _modified_at(ws: WorkspaceClient, path: str) -> int | None:
 
 def sweep(
     ws: WorkspaceClient,
-    run_id: str,
+    run_id: str | None,
     hours: float,
     helpers_folder: str,
     options: SweepOptions = DEFAULT_SWEEP_OPTIONS,
@@ -848,13 +855,15 @@ def sweep(
 ) -> SweepReport:
     """Delete ephemeral jobs and pipeline copies of other runs older than `hours`, and what else `options` asks for.
 
-    A job or pipeline tagged `pytest_expires` is old once that time has passed, whatever its age. A pipeline reports
-    no creation time, so its last change counts as its age. A failed delete or listing is logged and recorded in the
-    report's `errors`, and the sweep carries on.
+    A job, pipeline or schema tagged `pytest_expires` is old once that time has passed, whatever its age. A pipeline
+    reports no creation time, so its last change counts as its age. A notebook is deleted only when every job that
+    uses it is deleted too, and with `options.branch` only when at least one is; a debug notebook is used by the job of
+    the run it replays. When the jobs cannot all be listed, no notebook is deleted. A failed delete or listing is
+    logged and recorded in the report's `errors`, and the sweep carries on.
 
     Args:
         ws: The workspace client.
-        run_id: The id of this run, whose jobs and schemas are kept.
+        run_id: The id of this run, whose jobs and schemas are kept, or `None` to keep no run's.
         hours: The age after which a job, pipeline, schema or notebook is deleted.
         helpers_folder: The folder of the helper notebooks, for `options.notebooks`.
         options: What else to sweep, and whether only to report it.
@@ -872,19 +881,23 @@ def sweep(
     errors: list[str] = []
     rule = _SweepRule(run_id=run_id, user=me, cutoff_ms=cutoff_ms, now_ms=now_ms, branch=options.branch)
     # Each listing finishes before the first delete, so deleting does not disturb the paging.
-    stale_jobs = _stale_jobs(ws, rule, errors)
+    listed_jobs, all_listed = _list_jobs(ws, options.notebooks, errors)
+    stale_jobs = _stale_jobs(listed_jobs, rule)
     deleted_jobs = _delete_each("job", stale_jobs, ws.jobs.delete, options.dry_run, errors)
     stale_pipelines = _stale_pipelines(ws, rule, errors)
     drop_pipeline = partial(delete_pipeline, ws)
     deleted_pipelines = _delete_each("pipeline", stale_pipelines, drop_pipeline, options.dry_run, errors)
     deleted_schemas: list[str] = []
     if options.schemas_catalog:
-        stale = _stale_schemas(ws, options.schemas_catalog, run_id, me, cutoff_ms, errors)
+        stale = _stale_schemas(ws, options.schemas_catalog, rule, errors)
         drop = partial(ws.schemas.delete, force=True)
         deleted_schemas = _delete_each("schema", stale, drop, options.dry_run, errors)
     deleted_notebooks: list[str] = []
-    if options.notebooks:
-        stale = _stale_notebooks(ws, helpers_folder, cutoff_ms, errors)
+    if options.notebooks and all_listed:
+        folders = _helpers_folders(ws, helpers_folder, options.scope, errors)
+        candidates = _old_notebooks(ws, folders, cutoff_ms, errors)
+        users = _notebook_users(ws, listed_jobs, candidates, errors)
+        stale = _unused_notebooks(users, set(deleted_jobs), options.branch)
         deleted_notebooks = _delete_each("notebook", stale, ws.workspace.delete, options.dry_run, errors)
     report = SweepReport(
         dry_run=options.dry_run,
@@ -914,24 +927,29 @@ def sweep(
 
 @dataclass(frozen=True)
 class _SweepRule:
-    """Which tagged jobs and pipelines a sweep deletes.
+    """Which tagged jobs, pipelines and schemas a sweep deletes.
 
-    Those of runs other than `run_id`, created by `user` unless it is `None`, tagged with `branch` unless it is
-    `None`, and past their `pytest_expires` time or, without one, created or last changed before the cutoff.
+    Those of runs other than `run_id` unless it is `None`, created by `user` unless it is `None`, tagged with `branch`
+    unless it is `None`, and past their `pytest_expires` time or, without one, created or last changed before the
+    cutoff.
     """
 
-    run_id: str
+    run_id: str | None
     user: str | None
     cutoff_ms: float
     now_ms: float
     branch: str | None
 
     def matches(self, creator: str | None, tags: Mapping[str, str], age_from_ms: int | None) -> bool:
-        if self.user is not None and creator != self.user:
-            return False
         if "pytest" not in tags or "pytest_run_id" not in tags:
             return False
         if tags["pytest_run_id"] == self.run_id:
+            return False
+        return self.selects(creator, tags, age_from_ms)
+
+    def selects(self, creator: str | None, tags: Mapping[str, str], age_from_ms: int | None) -> bool:
+        """Apply the creator, branch and age rules to anything `pytest` made, by its tags or schema properties."""
+        if self.user is not None and creator != self.user:
             return False
         if self.branch is not None and tags.get("pytest_git_branch") != tag_value(self.branch):
             return False
@@ -941,15 +959,24 @@ class _SweepRule:
         return (age_from_ms or 0) < self.cutoff_ms
 
 
-def _stale_jobs(ws: WorkspaceClient, rule: _SweepRule, errors: list[str]) -> list[int]:
-    stale: list[int] = []
+def _list_jobs(ws: WorkspaceClient, expand_tasks: bool, errors: list[str]) -> tuple[list[jobs.BaseJob], bool]:
+    """List every job, with its tasks when `expand_tasks` is set, and whether the listing finished."""
+    listed: list[jobs.BaseJob] = []
     try:
-        for job in ws.jobs.list(limit=100):
-            tags = (job.settings.tags if job.settings else None) or {}
-            if job.job_id is not None and rule.matches(job.creator_user_name, tags, job.created_time):
-                stale.append(job.job_id)
+        for job in ws.jobs.list(limit=100, expand_tasks=expand_tasks):
+            listed.append(job)
     except DatabricksError as e:
         _record(errors, f"Could not list the jobs: {e}")
+        return listed, False
+    return listed, True
+
+
+def _stale_jobs(listed: list[jobs.BaseJob], rule: _SweepRule) -> list[int]:
+    stale: list[int] = []
+    for job in listed:
+        tags = (job.settings.tags if job.settings else None) or {}
+        if job.job_id is not None and rule.matches(job.creator_user_name, tags, job.created_time):
+            stale.append(job.job_id)
     return stale
 
 
@@ -1013,41 +1040,155 @@ def _expiry_ms(value: str | None) -> float | None:
     return expiry.timestamp() * 1000
 
 
-def _stale_schemas(
-    ws: WorkspaceClient, catalog: str, run_id: str, user: str | None, cutoff_ms: float, errors: list[str]
-) -> list[str]:
-    """The temporary schemas in `catalog` of other runs, created before the cutoff, by `user` unless it is `None`."""
-    this_run = re.compile(re.escape(schema_prefix(run_id)) + SCHEMA_SUFFIX)
+def _stale_schemas(ws: WorkspaceClient, catalog: str, rule: _SweepRule, errors: list[str]) -> list[str]:
+    """The temporary schemas in `catalog` of other runs that `rule` selects by their properties and creation time."""
+    this_run = None
+    if rule.run_id is not None:
+        this_run = re.compile(re.escape(schema_prefix(rule.run_id)) + SCHEMA_SUFFIX)
     stale: list[str] = []
     try:
         for info in ws.schemas.list(catalog_name=catalog):
             name = info.name or ""
-            if not PYTEST_SCHEMA.fullmatch(name) or this_run.fullmatch(name):
+            if not PYTEST_SCHEMA.fullmatch(name) or not info.full_name:
                 continue
-            if user is not None and info.created_by != user:
+            if this_run is not None and this_run.fullmatch(name):
                 continue
-            if info.full_name and (info.created_at or 0) < cutoff_ms:
+            if rule.selects(info.created_by, info.properties or {}, info.created_at):
                 stale.append(info.full_name)
     except DatabricksError as e:
         _record(errors, f"Could not list the schemas in {catalog}: {e}")
     return stale
 
 
-def _stale_notebooks(ws: WorkspaceClient, folder: str, cutoff_ms: float, errors: list[str]) -> list[str]:
-    """The setup and teardown notebooks in `folder` last changed before the cutoff. Other names are never matched."""
-    stale: list[str] = []
+def _helpers_folders(ws: WorkspaceClient, helpers_folder: str, scope: SweepScope, errors: list[str]) -> list[str]:
+    """The helpers folders to sweep: `helpers_folder`, and with scope `all` every user's default one."""
+    folders = [helpers_folder.rstrip("/")]
+    if scope != "all":
+        return folders
+    try:
+        for info in ws.workspace.list(USERS_FOLDER):
+            if info.object_type != workspace.ObjectType.DIRECTORY or not info.path:
+                continue
+            folder = helpers.default_folder(posixpath.basename(info.path))
+            if folder not in folders:
+                folders.append(folder)
+    except DatabricksError as e:
+        _record(errors, f"Could not list the user folders in {USERS_FOLDER}: {e}")
+    return folders
+
+
+@dataclass(frozen=True)
+class _OldNotebook:
+    """A setup, teardown or debug notebook last changed before the cutoff. A debug notebook has its `run_id`."""
+
+    path: str
+    run_id: int | None = None
+
+
+def _old_notebooks(ws: WorkspaceClient, folders: list[str], cutoff_ms: float, errors: list[str]) -> list[_OldNotebook]:
+    """The old helper notebooks in each of `folders` and its `debug` folder, listed one folder per user in parallel.
+
+    A folder that does not exist is skipped: most users have no helpers folder.
+    """
+    with ThreadPoolExecutor(min(FOLDER_LISTING_THREADS, len(folders))) as pool:
+        listings = list(pool.map(partial(_old_notebooks_in, ws, cutoff_ms=cutoff_ms), folders))
+    found: list[_OldNotebook] = []
+    for notebooks, error in listings:
+        found.extend(notebooks)
+        if error is not None:
+            _record(errors, error)
+    return found
+
+
+def _old_notebooks_in(ws: WorkspaceClient, folder: str, *, cutoff_ms: float) -> tuple[list[_OldNotebook], str | None]:
+    found: list[_OldNotebook] = []
+    debug_folder = f"{folder}/{helpers.DEBUG_FOLDER}"
+    has_debug_folder = False
     try:
         for info in ws.workspace.list(folder):
             path = info.path or ""
-            if info.object_type != workspace.ObjectType.NOTEBOOK:
-                continue
-            if not LIFECYCLE_NOTEBOOK.fullmatch(posixpath.basename(path)):
-                continue
-            if (info.modified_at or 0) < cutoff_ms:
-                stale.append(path)
+            if info.object_type == workspace.ObjectType.DIRECTORY and path == debug_folder:
+                has_debug_folder = True
+            elif _is_old_notebook(info, cutoff_ms) and LIFECYCLE_NOTEBOOK.fullmatch(posixpath.basename(path)):
+                found.append(_OldNotebook(path))
+        if has_debug_folder:
+            for info in ws.workspace.list(debug_folder):
+                match = DEBUG_NOTEBOOK.fullmatch(posixpath.basename(info.path or ""))
+                if match and _is_old_notebook(info, cutoff_ms):
+                    found.append(_OldNotebook(info.path or "", int(match["run_id"])))
+    except NotFound:
+        return found, None
     except DatabricksError as e:
-        _record(errors, f"Could not list the notebooks in {folder}: {e}")
-    return stale
+        return found, f"Could not list the notebooks in {folder}: {e}"
+    return found, None
+
+
+def _is_old_notebook(info: workspace.ObjectInfo, cutoff_ms: float) -> bool:
+    return info.object_type == workspace.ObjectType.NOTEBOOK and (info.modified_at or 0) < cutoff_ms
+
+
+def _notebook_users(
+    ws: WorkspaceClient, listed: list[jobs.BaseJob], notebooks: list[_OldNotebook], errors: list[str]
+) -> dict[str, set[int] | None]:
+    """The jobs that use each notebook, by its path, or `None` when that could not be found out.
+
+    A setup or teardown notebook is used by every job with a task that runs it. A debug notebook is used by the job
+    of the run it replays, which `runs/get` still names after the job is deleted; a run that no longer exists has no
+    job.
+    """
+    by_path: dict[str, set[int]] = {}
+    for job in listed:
+        if job.job_id is None or job.settings is None:
+            continue
+        for path in _paths_used(job.settings.tasks or []):
+            by_path.setdefault(path, set()).add(job.job_id)
+    users: dict[str, set[int] | None] = {}
+    for notebook in notebooks:
+        if notebook.run_id is None:
+            users[notebook.path] = by_path.get(_workspace_path(notebook.path), set())
+            continue
+        try:
+            job_id = ws.jobs.get_run(notebook.run_id).job_id
+        except NotFound:
+            users[notebook.path] = set()
+        except DatabricksError as e:
+            _record(errors, f"Could not read run {notebook.run_id} of notebook {notebook.path}: {e}")
+            users[notebook.path] = None
+        else:
+            users[notebook.path] = set() if job_id is None else {job_id}
+    return users
+
+
+def _paths_used(tasks: list[jobs.Task]) -> list[str]:
+    """The workspace paths of the notebooks and SQL files that `tasks` run, those nested in a for-each task included."""
+    paths: list[str] = []
+    for task in tasks:
+        if task.for_each_task is not None and task.for_each_task.task is not None:
+            paths.extend(_paths_used([task.for_each_task.task]))
+        if task.notebook_task is not None and task.notebook_task.notebook_path:
+            paths.append(_workspace_path(task.notebook_task.notebook_path))
+        if task.sql_task is not None and task.sql_task.file is not None and task.sql_task.file.path:
+            paths.append(_workspace_path(task.sql_task.file.path))
+    return paths
+
+
+def _workspace_path(path: str) -> str:
+    """`path` without a leading `/Workspace`, which a task may name and `workspace.list` does not report."""
+    if path.startswith("/Workspace/"):
+        return path.removeprefix("/Workspace")
+    return path
+
+
+def _unused_notebooks(users: Mapping[str, set[int] | None], deleted_jobs: set[int], branch: str | None) -> list[str]:
+    """The notebooks whose every job is deleted, and with `branch`, that at least one deleted job uses."""
+    unused: list[str] = []
+    for path, job_ids in users.items():
+        if job_ids is None or not job_ids <= deleted_jobs:
+            continue
+        if branch is not None and not job_ids:
+            continue
+        unused.append(path)
+    return unused
 
 
 def _delete_each(kind: str, names: list[T], delete: Callable[[T], None], dry_run: bool, errors: list[str]) -> list[T]:
