@@ -1222,7 +1222,9 @@ def check_compute(settings: jobs.JobSettings) -> None:
         )
 
 
-def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[str] = ()) -> list[str]:
+def select(
+    settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[str] = (), exclude: Collection[str] = ()
+) -> list[str]:
     """Add the injected tasks that the selected tasks need to `only`.
 
     Those are the stubs that selected tasks depend on, the probes on selected tasks, and the setup and teardown tasks
@@ -1232,9 +1234,12 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
         settings: The job's settings.
         only: Task keys, where `+key`, `key+` and `+key+` select upstream and downstream tasks, as `run_now` does.
         stubs: Keys of the stub tasks.
+        exclude: Keys of tasks to leave out of the run, such as the teardown task when it runs as the job closes.
 
     Returns:
-        `only` followed by the injected tasks it does not already select.
+        `only` followed by the injected tasks it does not already select. When `only` selects a task in `exclude`,
+        every selected task by its key instead, in sorted order, without the disabled tasks and the tasks downstream
+        of them that `only` does not name.
 
     Raises:
         LakeflowError: If `only` names a task that is not in the job.
@@ -1245,9 +1250,16 @@ def select(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[st
         key = task.task_key
         if key.startswith(PROBE_PREFIX) and key.removeprefix(PROBE_PREFIX) in selected:
             needed.add(key)
-        if key in (SETUP_KEY, TEARDOWN_KEY):
+        if key in (SETUP_KEY, TEARDOWN_KEY) and key not in exclude:
             needed.add(key)
-    return [*only, *sorted(needed - selected)]
+    if selected.isdisjoint(exclude):
+        return [*only, *sorted(needed - selected)]
+    # `key+` reaches the teardown task, which depends on every leaf, and run_now has no way to leave one task out of a
+    # `+` selection, so the selection is spelt out. The platform runs a disabled task that only names, but not one that
+    # a `+` reaches, nor one downstream of it, so those stay out.
+    named = {entry.strip("+") for entry in only}
+    left_out = set(exclude) | (disabled_task_keys(settings) - named)
+    return sorted((selected | needed) - left_out)
 
 
 def selected_tasks(settings: jobs.JobSettings, only: Sequence[str], stubs: Collection[str] = ()) -> set[str]:

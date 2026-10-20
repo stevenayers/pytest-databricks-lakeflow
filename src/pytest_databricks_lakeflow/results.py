@@ -957,12 +957,16 @@ class JobRun:
 
     @property
     def teardown(self) -> TaskRun | None:
-        """The task that ran the job's `teardown=` function, or `None` when the job has none.
+        """The task that ran the job's `teardown=` function, or `None` when the job has none or the run left it out.
 
-        A failed teardown does not change `succeeded`; the plugin logs a warning instead. Assert
-        `run.teardown.succeeded` to fail the test on it.
+        A run leaves it out when the job was made with `teardown_at="close"`: the task then ends `DISABLED` and runs
+        alone when the job closes, in `EphemeralJob.teardown_run`. A failed teardown does not change `succeeded`; the
+        plugin logs a warning instead. Assert `run.teardown.succeeded` to fail the test on it.
         """
-        return self.injected_tasks.get(TEARDOWN_KEY)
+        teardown = self.injected_tasks.get(TEARDOWN_KEY)
+        if teardown is None or teardown.disabled:
+            return None
+        return teardown
 
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.

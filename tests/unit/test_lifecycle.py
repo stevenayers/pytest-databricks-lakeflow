@@ -511,3 +511,220 @@ def test_job(lakeflow, caplog):
 """,
         )
         result.assert_outcomes(passed=1)
+
+
+FULL_RUN_STATES = {
+    "__pytest_setup": "SUCCESS",
+    "extract": "SUCCESS",
+    "transform": "SUCCESS",
+    "load": "SUCCESS",
+    "classic": "SUCCESS",
+    "__pytest_teardown": "DISABLED",
+}
+TEARDOWN_ONLY_STATES = {
+    "__pytest_setup": "DISABLED",
+    "extract": "DISABLED",
+    "transform": "DISABLED",
+    "load": "DISABLED",
+    "classic": "DISABLED",
+    "__pytest_teardown": "SUCCESS",
+}
+EVERY_TASK_BUT_TEARDOWN = ["__pytest_setup", "extract", "transform", "load", "classic"]
+CLOSE_JOB = 'lakeflow.job("my_job", params={"schema": "s"}, setup=seed, teardown=cleanup, teardown_at="close")'
+
+
+def queue_runs(ws: FakeWorkspaceClient, teardown: jobs.Run | None = None, **teardown_polls: Any) -> None:
+    """Queue a finished full run as run 76, then the run that closing the job starts, by default a passing one."""
+    ws.jobs.queue(make_run(76, FULL_RUN_STATES), polls=0)
+    ws.jobs.queue(teardown or make_run(77, TEARDOWN_ONLY_STATES), **teardown_polls)
+
+
+def only_of_each_run(ws: FakeWorkspaceClient) -> list[list[str] | None]:
+    return [call["only"] for call in ws.jobs.run_now_calls]
+
+
+class TestTeardownAtClose:
+    """teardown_at="close" leaves the teardown task out of every run and runs it alone when the job closes."""
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param(
+                f"""
+def test_job(lakeflow):
+    with {CLOSE_JOB} as job:
+        run = job.run(params={{"param1": "only this run"}})
+        assert run.succeeded, run
+        assert run.teardown is None
+        assert job.teardown_run is None
+    assert job.runs == [run]
+    assert job.teardown_run.run_id == 77
+    assert job.teardown_run.teardown.succeeded
+    assert job.teardown_at == "close"
+""",
+                id="with",
+            ),
+            pytest.param(
+                f"""
+def test_job(lakeflow):
+    job = {CLOSE_JOB}
+    assert job.run(params={{"param1": "only this run"}}).teardown is None
+""",
+                id="finaliser",
+            ),
+        ],
+    )
+    def test_job_closes_with_a_run_of_the_teardown_alone(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str
+    ) -> None:
+        queue_runs(fake_ws)
+        result = run_tests(pytester, source)
+        result.assert_outcomes(passed=1)
+        first, last = fake_ws.jobs.run_now_calls
+        assert first["only"] == EVERY_TASK_BUT_TEARDOWN
+        assert first["job_parameters"] == {"schema": "s", "param1": "only this run"}
+        assert last["job_id"] == 1001
+        assert last["only"] == ["__pytest_teardown"]
+        assert last["job_parameters"] == {"schema": "s"}
+        # A run that the job's close cancelled may still be ending, and the copy allows one run at a time.
+        assert last["queue"] == jobs.QueueSettings(enabled=True)
+        assert fake_ws.jobs.deleted == [1001]
+
+    def test_only_adds_the_setup_alone(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            f"""
+def test_job(lakeflow):
+    with {CLOSE_JOB} as job:
+        job.run(only=["load"])
+        job.run(only=["+transform+"])
+""",
+        )
+        result.assert_outcomes(passed=1)
+        assert only_of_each_run(fake_ws) == [
+            ["load", "__pytest_setup"],
+            ["__pytest_setup", "extract", "load", "transform"],
+            ["__pytest_teardown"],
+        ]
+
+    def test_full_run_leaves_out_disabled_tasks(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        # The platform runs a disabled task that only names, and a task whose upstream only leaves out.
+        result = run_tests(
+            pytester,
+            'def test_job(lakeflow):\n    lakeflow.job("my_job", disable=["transform"], teardown=cleanup, '
+            'teardown_at="close").run()\n',
+        )
+        result.assert_outcomes(passed=1)
+        assert only_of_each_run(fake_ws) == [["extract", "classic"], ["__pytest_teardown"]]
+
+    def test_cancelled_run_is_still_cleaned_up(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        fake_ws.jobs.queue(make_run(76, FULL_RUN_STATES), polls=100)
+        fake_ws.jobs.queue(make_run(77, TEARDOWN_ONLY_STATES))
+        result = run_tests(pytester, f"def test_job(lakeflow):\n    with {CLOSE_JOB} as job:\n        job.start()\n")
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == [76]
+        assert only_of_each_run(fake_ws) == [EVERY_TASK_BUT_TEARDOWN, ["__pytest_teardown"]]
+        assert fake_ws.jobs.deleted == [1001]
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            pytest.param(f"def test_job(lakeflow):\n    {CLOSE_JOB}\n", id="never_created"),
+            pytest.param(f"def test_job(lakeflow):\n    with {CLOSE_JOB}:\n        pass\n", id="never_run"),
+        ],
+    )
+    def test_no_teardown_run_without_a_run(
+        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, source: str
+    ) -> None:
+        result = run_tests(pytester, source)
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.run_now_calls == []
+
+    @pytest.mark.parametrize(
+        ("arguments", "flags", "outcome", "teardown_runs", "deleted"),
+        [
+            pytest.param("keep=True", [], "passed", 0, [], id="keep"),
+            pytest.param("", ["--lakeflow-keep"], "passed", 0, [], id="lakeflow_keep"),
+            pytest.param("", [], "failed", 1, [], id="keep_failed"),
+            pytest.param("", ["--no-lakeflow-keep-failed"], "failed", 1, [1001], id="failed_and_deleted"),
+        ],
+    )
+    def test_only_keep_skips_the_teardown_run(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        arguments: str,
+        flags: list[str],
+        outcome: str,
+        teardown_runs: int,
+        deleted: list[int],
+    ) -> None:
+        configure_lakeflow(pytester, arguments)
+        queue_runs(fake_ws)
+        fails = "\n        assert False, 'boom'" if outcome == "failed" else ""
+        result = run_tests(
+            pytester, f"def test_job(lakeflow):\n    with {CLOSE_JOB} as job:\n        job.run(){fails}\n", *flags
+        )
+        result.assert_outcomes(**{outcome: 1})
+        assert len(fake_ws.jobs.run_now_calls) == 1 + teardown_runs
+        assert fake_ws.jobs.deleted == deleted
+        if outcome == "failed" and not deleted:
+            result.stdout.fnmatch_lines(["*Kept run: https://example.cloud.databricks.com/jobs/runs/77"])
+
+    @pytest.mark.parametrize(
+        ("arguments", "teardown", "polls", "cancelled"),
+        [
+            pytest.param("", make_run(77, {**TEARDOWN_ONLY_STATES, "__pytest_teardown": "FAILED"}), 1, [], id="failed"),
+            pytest.param("timeout=timedelta(0)", make_run(77, TEARDOWN_ONLY_STATES), 100, [77], id="timed_out"),
+        ],
+    )
+    def test_teardown_run_that_does_not_succeed_only_warns(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        arguments: str,
+        teardown: jobs.Run,
+        polls: int,
+        cancelled: list[int],
+    ) -> None:
+        configure_lakeflow(pytester, arguments)
+        queue_runs(fake_ws, teardown, polls=polls)
+        result = run_tests(
+            pytester,
+            f"""
+import logging
+import re
+
+
+def test_job(lakeflow, caplog):
+    caplog.set_level(logging.WARNING, logger="pytest_databricks_lakeflow")
+    with {CLOSE_JOB} as job:
+        job.run()
+    assert re.search(r"teardown .*https://example.cloud.databricks.com/jobs/runs/77\\b", caplog.text), caplog.text
+""",
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.cancelled == cancelled
+        assert fake_ws.jobs.deleted == [1001]
+
+    def test_rejected_before_anything_is_created(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        result = run_tests(
+            pytester,
+            """
+import pytest
+
+from pytest_databricks_lakeflow import LakeflowError
+
+
+def test_job(lakeflow):
+    with pytest.raises(LakeflowError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
+        lakeflow.job("my_job", setup=seed, teardown_at="close")
+    with pytest.raises(LakeflowError, match=r'teardown_at="close" runs the teardown task .* needs teardown='):
+        lakeflow.task("my_job.load", teardown_at="close")
+    with pytest.raises(LakeflowError, match=r"teardown_at must be 'run' or 'close', not 'later'"):
+        lakeflow.job("my_job", teardown=cleanup, teardown_at="later")
+""",
+        )
+        result.assert_outcomes(passed=1)
+        assert fake_ws.jobs.created == []
+        assert lifecycle_uploads(fake_ws) == []

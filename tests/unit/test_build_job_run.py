@@ -298,6 +298,11 @@ class TestLifecycleTasks:
         without = build_from(FakeWorkspaceClient(), make_run(2, {"a": "SUCCESS"}))
         assert (without.setup, without.teardown) == (None, None)
 
+    def test_teardown_left_out_of_the_run_is_none(self) -> None:
+        built = build_from(FakeWorkspaceClient(), make_run(1, {"extract": "SUCCESS", "__pytest_teardown": "DISABLED"}))
+        assert built.teardown is None
+        assert built.injected_tasks["__pytest_teardown"].disabled
+
     def test_failed_setup_is_named_first(self) -> None:
         ws = FakeWorkspaceClient()
         run = make_run(1, {"__pytest_setup": "FAILED", "a": "UPSTREAM_FAILED", "b": "UPSTREAM_FAILED"}, "FAILED")
