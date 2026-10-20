@@ -1702,6 +1702,30 @@ def wrap_task(
     return settings
 
 
+def recover_injected(settings: jobs.JobSettings) -> tuple[frozenset[str], dict[str, list[str]]]:
+    """Read back the stubs and probes that `stub_upstream`, `inject_probes` or `wrap_task` added to a created copy.
+
+    `json.loads` undoes `escape`, so a value key containing `{{` comes back as it was written.
+
+    Args:
+        settings: The settings of a created copy, as `jobs/get` returns them.
+
+    Returns:
+        The keys of the stub tasks, and the value keys each probe captures, by the key of the task it watches.
+    """
+    stubs: set[str] = set()
+    capture: dict[str, list[str]] = {}
+    for task in settings.tasks or []:
+        params = task.notebook_task.base_parameters if task.notebook_task else None
+        if not params or not task.task_key:
+            continue
+        if VALUES_WIDGET in params:
+            stubs.add(task.task_key)
+        elif task.task_key.startswith(PROBE_PREFIX) and TASK_KEY_WIDGET in params and KEYS_WIDGET in params:
+            capture[params[TASK_KEY_WIDGET]] = list(json.loads(params[KEYS_WIDGET]))
+    return frozenset(stubs), capture
+
+
 def require_task(settings: jobs.JobSettings, task_key: str) -> jobs.Task:
     """Get the job's top-level task `task_key`, raising `LakeflowError` with the available keys if there is none."""
     target = _find_task(settings, task_key)
