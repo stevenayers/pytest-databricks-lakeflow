@@ -46,10 +46,10 @@ By default `setup=`, `teardown=` and `once()` steps run from the test process ov
 UserWarning: databricks-connect is not installed, so setup= and teardown= run as tasks, about 30 seconds each.
 ```
 
-The plugin brings databricks-connect on Python 3.11 and 3.12, but no release installs on Python 3.13 or later. Run the tests on Python 3.12, the Python of serverless environment 3 and later:
+The plugin does not install databricks-connect. Add the release that matches your serverless environment or cluster runtime, 15.1 or later. Releases from 16.2 install only on Python 3.12, and no release installs on Python 3.13 or later:
 
 ```bash
-uv run --python 3.12 pytest
+uv add --dev databricks-connect
 ```
 
 To keep tasks on purpose, pass `Lakeflow(run_as_task=True)`, which also silences the warning. A step that is a notebook file always runs as a task. See [Run a step as a task](recipes/data.md#run-a-step-as-a-task).

@@ -4,7 +4,7 @@ This page takes you from an installed plugin to a passing job test. It assumes y
 
 ## Prerequisites
 
-- Python 3.11 or later. pytest 8 or later, `databricks-sdk` 0.100 or later, `filelock` and, below Python 3.13, `databricks-connect` 15.1 or later are installed as dependencies.
+- Python 3.11 or later. pytest 8 or later, `databricks-sdk` 0.100 or later and `filelock` are installed as dependencies.
 - The [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) v1.7.0 or later on `PATH`. The plugin shells out to it for `bundle deploy`, `bundle summary`, `bundle validate`, `bundle sync` and `bundle destroy`.
 - Credentials that both the CLI and the SDK can use: a profile in `~/.databrickscfg`, or the standard `DATABRICKS_*` environment variables. `DATABRICKS_CONFIG_PROFILE` works for both.
 - Serverless jobs in the workspace. The stub and probe tasks the plugin adds, and setup and teardown steps that run as tasks, run on serverless by default. Without serverless, point them at a job cluster, see [Run the helper tasks on a job cluster](recipes/compute.md#run-the-helper-tasks-on-a-job-cluster).
@@ -13,16 +13,13 @@ This page takes you from an installed plugin to a passing job test. It assumes y
 ## Install
 
 ```bash
-uv add --dev "pytest-databricks-lakeflow[xdist]"
+uv add --dev pytest-databricks-lakeflow databricks-connect pytest-xdist
 ```
 
-Or `pip install "pytest-databricks-lakeflow[xdist]"`. The `xdist` extra is optional: it installs pytest-xdist, for running tests in parallel.
+Or `pip install pytest-databricks-lakeflow databricks-connect pytest-xdist`. The plugin installs neither of the other two, so add the ones you use:
 
-databricks-connect comes with the plugin, so `setup=`, `teardown=` and `once()` steps run from your machine over Databricks Connect in a few seconds, instead of as tasks of the job that wait about 30 seconds each for compute:
-
-- Any release from 15.1 works, so pin the one that matches your serverless environment or cluster runtime in your own dependencies. Releases from 16.2 install only on Python 3.12, the Python of serverless environment 3 and later; on Python 3.11 the newest is 16.1.
-- No release installs on Python 3.13 or later, so there the steps run as tasks, with one warning per session.
-- databricks-connect replaces pyspark. Remove pyspark from the environment the tests run in, or the two packages break each other.
+- **databricks-connect** runs `setup=`, `teardown=` and `once()` steps from your machine over Databricks Connect in a few seconds, instead of as tasks of the job that wait about 30 seconds each for compute. Any release from 15.1 works, so install the one that matches your serverless environment or cluster runtime. Releases from 16.2 install only on Python 3.12, the Python of serverless environment 3 and later, and no release installs on Python 3.13 or later. Without it the steps run as tasks, with one warning per session. databricks-connect replaces pyspark, so remove pyspark from the environment the tests run in.
+- **pytest-xdist** runs tests in parallel, with `pytest -n 4`.
 
 The plugin registers itself through the `pytest11` entry point. There is nothing to add to `conftest.py` or `pytest.ini`.
 

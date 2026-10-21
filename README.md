@@ -25,10 +25,10 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest. Each t
 You need Python 3.11 or later, the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) v1.7.0 or later on `PATH`, credentials that both the CLI and the SDK can use (a `~/.databrickscfg` profile or the `DATABRICKS_*` variables), a workspace with serverless jobs, and a [Databricks Asset Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/) with at least one job.
 
 ```bash
-uv add --dev pytest-databricks-lakeflow
+uv add --dev pytest-databricks-lakeflow databricks-connect
 ```
 
-Or `pip install pytest-databricks-lakeflow`. It brings databricks-connect, which runs `setup=`, `teardown=` and `once()` steps from your machine in a few seconds rather than as 30 second tasks. No databricks-connect release installs on Python 3.13 or later, so there the steps run as tasks. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps the test deployment apart from your `dev` deployment:
+Or `pip install pytest-databricks-lakeflow databricks-connect`. databricks-connect is optional: it runs `setup=`, `teardown=` and `once()` steps from your machine in a few seconds rather than as 30 second tasks. Install the release that matches your serverless environment or cluster runtime; no release installs on Python 3.13 or later. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps the test deployment apart from your `dev` deployment:
 
 ```yaml
 targets:
@@ -107,7 +107,7 @@ def test_job_reads_orders(lakeflow: Lakeflow, orders: None) -> None:
         assert job.run().succeeded
 ```
 
-With the fixtures made once, the tests are independent, so run them in parallel with `pytest -n 4` (install the `pytest-databricks-lakeflow[xdist]` extra).
+With the fixtures made once, the tests are independent, so run them in parallel with `pytest -n 4` (install `pytest-xdist`).
 
 ## Where next
 

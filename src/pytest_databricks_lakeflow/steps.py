@@ -37,9 +37,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 CONNECT_MISSING = (
     "databricks-connect is not installed, so setup= and teardown= run as tasks, about 30 seconds each. "
-    "pytest-databricks-lakeflow installs it on Python 3.11 and 3.12, but no release installs on Python 3.13 or later. "
-    "Run the tests on Python 3.12 to run steps over Databricks Connect in a few seconds, or pass run_as_task=True to "
-    "Lakeflow to choose tasks and silence this warning."
+    "Install databricks-connect 15.1 or later, the release that matches your serverless environment or cluster "
+    "runtime, to run them over Databricks Connect in a few seconds, or pass run_as_task=True to Lakeflow to choose "
+    "tasks and silence this warning."
 )
 
 

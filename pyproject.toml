@@ -26,10 +26,6 @@ dependencies = [
     "pytest>=8",
     "databricks-sdk>=0.100",
     "filelock>=3",
-    # Runs setup=, teardown= and once() steps from the test process. Releases before 16.2 pin numpy<2, which has no
-    # wheels for Python 3.13 or later, and 16.2 onwards declare Python 3.12 only, so no release installs on 3.13 or 3.14.
-    # There the steps run as tasks.
-    "databricks-connect>=15.1; python_version < '3.13'",
 ]
 
 [project.urls]
@@ -40,7 +36,6 @@ Source = "https://github.com/stevenayers/pytest-databricks-lakeflow"
 Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
 
 [project.optional-dependencies]
-xdist = ["pytest-xdist>=3"]
 pytester = ["databricks-labs-pytester>=0.7"]
 
 [project.entry-points.pytest11]
@@ -51,6 +46,9 @@ audit = [
     "pip-audit>=2.9",
 ]
 dev = [
+    # For the integration tests' Connect cases. Releases before 16.2 pin numpy<2, which has no wheels for Python 3.13 or
+    # later, and 16.2 onwards declare Python 3.12 only, so no release installs on 3.13 or 3.14.
+    "databricks-connect>=15.1; python_version < '3.13'",
     "pytest-cov>=6",
     "pytest-xdist>=3",
     "ruff>=0.5",
