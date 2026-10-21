@@ -35,9 +35,6 @@ Changelog = "https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main
 Source = "https://github.com/stevenayers/pytest-databricks-lakeflow"
 Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
 
-[project.optional-dependencies]
-pytester = ["databricks-labs-pytester>=0.7"]
-
 [project.entry-points.pytest11]
 databricks_lakeflow = "pytest_databricks_lakeflow.plugin"
 

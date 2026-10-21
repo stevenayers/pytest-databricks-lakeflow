@@ -198,7 +198,7 @@ See [`StepResult`](../reference/api.md#stepresult) in the API reference.
 
 ## Seed from the test process
 
-Teams that already use databricks-labs-pytester can seed a `lakeflow.schema()` from the test process too, before the job runs. The `pytester` extra installs [databricks-labs-pytester](https://github.com/databrickslabs/pytester), whose fixtures create tables and other resources and remove them afterwards. The two plugins coexist: this one defines only the `lakeflow` fixture, and `lakeflow.ws` gives you the `WorkspaceClient` without a second fixture. The plugin's own tests do not run pytester; check it against your environment.
+Teams that already use databricks-labs-pytester can seed a `lakeflow.schema()` from the test process too, before the job runs. Install [databricks-labs-pytester](https://github.com/databrickslabs/pytester) yourself: its fixtures create tables and other resources and remove them afterwards. The two plugins coexist: this one defines only the `lakeflow` fixture, and `lakeflow.ws` gives you the `WorkspaceClient` without a second fixture. The plugin's own tests do not run pytester; check it against your environment.
 
 Choose `once()` when the seed is shared by many tests: it runs one time for the session. Choose `setup=` when one test owns the seed; over Connect it adds a few seconds per run, as a task 28 to 32 seconds before its first statement. Choose pytester when you already build your test resources with its fixtures.
 
