@@ -56,6 +56,7 @@ class FakeJobs:
         self.export_calls: list[dict[str, Any]] = []
         self.delete_errors: dict[int, Exception] = {}
         self.delete_log: Path | None = None
+        self.create_log: Path | None = None
         self.deletions: list[str] = []
         self.list_calls = 0
         self.list_kwargs: list[dict[str, Any]] = []
@@ -83,7 +84,11 @@ class FakeJobs:
     def create(self, **kwargs: Any) -> jobs.CreateResponse:
         self.acls.append(kwargs.pop("access_control_list", None))
         self.created.append(kwargs)
-        return jobs.CreateResponse(job_id=self.add(jobs.JobSettings(**kwargs)))
+        job_id = self.add(jobs.JobSettings(**kwargs))
+        if self.create_log is not None:
+            with self.create_log.open("a") as f:
+                f.write(f"{job_id}\n")
+        return jobs.CreateResponse(job_id=job_id)
 
     def update(
         self,

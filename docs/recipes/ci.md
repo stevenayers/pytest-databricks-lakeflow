@@ -27,6 +27,7 @@ steps:
 - `--lakeflow-report-dir` keeps every run's output as a build artefact after the jobs are deleted, see [Keep every run's output as an artefact](debugging.md#keep-every-runs-output-as-an-artefact).
 - The run id that tags every job is read from `GITHUB_RUN_ID` or `BUILD_BUILDID`, and the CI run URL, user, commit and branch go into the `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` tags, so a job can be traced back to the pipeline run.
 - A service principal has no CLI token to refresh, so xdist workers never race on one. A user-to-machine profile can fail with `exit status 45` under xdist, see [the FAQ](../faq.md#the-cli-failed-with-exit-status-45-under-xdist).
+- Add `--lakeflow-performance-target=STANDARD` to a nightly or post-merge run that can wait: standard mode bills fewer DBUs, up to 70% fewer, and adds 4 to 6 minutes of start-up to every task, so a parallel run takes about 20 minutes longer end to end. Leave the default, `PERFORMANCE_OPTIMIZED`, on the runs people wait for, see [Choose the performance mode](compute.md#choose-the-performance-mode).
 - When several branches or pipelines share one test target, give each its own deployment and end the pipeline with `--lakeflow-destroy`, see [Give each branch and identity its own deployment](deployments.md#give-each-branch-and-identity-its-own-deployment).
 
 ## Be stricter in CI

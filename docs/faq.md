@@ -34,9 +34,13 @@ The copy runs as you rather than as the deployed job's `run_as`. To test the per
 
 The Jobs API accepts undeclared parameters silently, so a typo would pass unnoticed. The plugin checks `params` against the job's declared `parameters` and raises `LakeflowError` for anything undeclared. Declare the parameter on the job, or pass `Lakeflow(allow_undeclared_params=True)`.
 
+## Why does every test take minutes?
+
+A serverless task starts in about 30 seconds before it runs its first line, and a test that creates, runs and deletes a copy pays that for each of its tasks, the plugin's setup, teardown, stub and probe tasks included. Two habits make it much worse: creating the same fixtures inside every copy with `setup=`, which costs a task start plus the statements per test and stops the tests running at the same time, and running the tests one after another. Create shared fixtures once with [`lakeflow.once()`](recipes/data.md#seed-once-for-the-whole-session) and run with `pytest -n 4`. [Speed and cost](speed.md) shows where the time goes and what each change saves.
+
 ## Why is every run 3 to 4 minutes slower than in the UI?
 
-The job's `performance_target` is `STANDARD`, and the plugin warns about it. Pass `Lakeflow(performance_optimized=True)`, or `job.run(performance_target="PERFORMANCE_OPTIMIZED")` for one run, see [Speed up a run](recipes/compute.md#speed-up-a-run).
+The run used standard performance mode. By default the plugin runs every copy with `performance_target: PERFORMANCE_OPTIMIZED`, so this happens only with `Lakeflow(performance_target=None)` on a job whose template says `STANDARD`, which the plugin warns about, or with `performance_target="STANDARD"` or `--lakeflow-performance-target=STANDARD`, which trade the minutes for fewer DBUs on purpose, see [Choose the performance mode](recipes/compute.md#choose-the-performance-mode).
 
 The other cause is a workspace that does not honour the request. When a run asked for `PERFORMANCE_OPTIMIZED` and `run.effective_performance_target` is `STANDARD`, a workspace policy or the job's compute decided the mode, and the plugin warns once per `Lakeflow`:
 
@@ -63,11 +67,30 @@ The CLI and the SDK resolved different workspaces. The CLI takes the host from t
 
 Before `bundle deploy`, the plugin reads the `run_as` of the target and of each job from `bundle validate` and compares it with the identity that deploys. A deploy with another user's `run_as`, or a service principal on which you do not have the Service Principal User role, would either fail inside the CLI after a long deploy or leave jobs that run as someone else. Set the test target's `run_as` to `user_name: ${workspace.current_user.userName}`, so that each identity deploys jobs that run as itself; deploy as that principal, for example from CI; or ask a manager of the service principal to grant you the role. To keep a `run_as` you cannot deploy, deploy the bundle yourself as the right identity and pass `sync="none"`.
 
+## How do I run tests in parallel with my own login?
+
+On an Azure workspace, keep your profile and switch its authentication to the Azure CLI for the session:
+
+```bash
+az login
+DATABRICKS_CONFIG_PROFILE=dev DATABRICKS_AUTH_TYPE=azure-cli uv run pytest tests -n 8
+```
+
+`DATABRICKS_AUTH_TYPE` takes precedence over the profile's `auth_type`, so the plugin's client, the `databricks bundle` commands it runs, your own `WorkspaceClient()` and Databricks Connect all switch together, and the profile itself is unchanged for everyday use. You still run as yourself: the Azure CLI signs you in with Microsoft Entra ID, whose tokens Azure Databricks accepts directly.
+
+It avoids [the `exit status 45` race](#the-cli-failed-with-exit-status-45-under-xdist) because nothing shares the Databricks CLI's token cache. databricks-sdk asks `az account get-access-token` for a token without forcing a refresh, and the Azure CLI keeps its own token cache, which it locks across processes. Measured in one Azure workspace in October 2026: 16 clients built at the same moment, twice over, all authenticated, against 2 of 8 concurrent refreshes through a `databricks auth login` profile, and 12 concurrent CLI calls and 4 concurrent `bundle validate` runs all succeeded.
+
+| Where you run | Use |
+| --- | --- |
+| Your machine, Azure workspace | `DATABRICKS_AUTH_TYPE=azure-cli`, as above |
+| Your machine, AWS or GCP workspace | A service principal with OAuth machine-to-machine credentials, or fewer workers, see [below](#the-cli-failed-with-exit-status-45-under-xdist) |
+| CI | A service principal, see [Run the tests in CI](recipes/ci.md#run-the-tests-in-ci) |
+
 ## The CLI failed with `exit status 45` under xdist
 
-Each xdist worker builds its own `WorkspaceClient`. On a user-to-machine profile (`auth_type = databricks-cli`, from `databricks auth login`), databricks-sdk runs `databricks auth token --force-refresh` to get the token, so every worker refreshes the same cached token at the start of the session. When two refreshes update the CLI's token cache at the same moment, one of them fails with `cannot get access token: Error: forced token refresh: cache update: exit status 45`. The plugin tries to build the client up to four times, waiting a random 2 to 16 seconds between attempts, so that workers that collided do not collide again. A test still fails if every attempt collides.
+Each xdist worker builds its own `WorkspaceClient`. On a user-to-machine profile (`auth_type = databricks-cli`, from `databricks auth login`), databricks-sdk runs `databricks auth token --force-refresh` to get the token, so every worker refreshes the same cached token at the start of the session, and the CLI has no lock across processes on its token cache ([databricks/cli#6051](https://github.com/databricks/cli/issues/6051), with a fix proposed in [PR #6759](https://github.com/databricks/cli/pull/6759) and not yet released). When two refreshes update the cache at the same moment, one of them fails with `cannot get access token: Error: forced token refresh: cache update: exit status 45`. The plugin tries to build the client up to four times, waiting a random 2 to 16 seconds between attempts, so that workers that collided do not collide again. A test still fails if every attempt collides.
 
-If you still see it, run with fewer workers, or use a profile that does not refresh through the CLI for parallel runs: a service principal with OAuth machine-to-machine credentials (`client_id` and `client_secret`) or a personal access token (`token`). For example, keep the `databricks-cli` profile `dev` for everyday runs and choose a machine-to-machine profile `dev-sp` for parallel runs through an environment variable:
+On an Azure workspace the simplest fix is to authenticate through the Azure CLI for parallel runs, see [How do I run tests in parallel with my own login?](#how-do-i-run-tests-in-parallel-with-my-own-login). Otherwise, every `WorkspaceClient()` a test builds itself is one more refresh in the same race, so use `lakeflow.ws`, the plugin's client, for workspace reads. If you still see the error, run with fewer workers, or use a profile that does not refresh through the CLI for parallel runs: a service principal with OAuth machine-to-machine credentials (`client_id` and `client_secret`) or a personal access token (`token`). For example, keep the `databricks-cli` profile `dev` for everyday runs and choose a machine-to-machine profile `dev-sp` for parallel runs through an environment variable:
 
 ```python
 import os

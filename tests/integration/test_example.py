@@ -204,7 +204,7 @@ def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
 
 def test_performance_optimized_is_honoured(lakeflow: Lakeflow, recwarn: pytest.WarningsRecorder) -> None:
     # The baseline: this workspace has no policy that overrides the performance mode, so no override warning.
-    optimized = dataclasses.replace(lakeflow, performance_optimized=True)
+    optimized = dataclasses.replace(lakeflow, performance_target="PERFORMANCE_OPTIMIZED")
     with optimized.job("my_example_job", params={"param1": "hello", "param2": "world"}) as job:
         run = job.run()
     assert run.succeeded
@@ -883,3 +883,46 @@ def test_sweep_deletes_a_stale_notebook(lakeflow: Lakeflow) -> None:
                 ws.workspace.get_status(path)
     finally:
         ws.workspace.delete(folder, recursive=True)
+
+
+ONCE_SETUP = [
+    "CREATE SCHEMA IF NOT EXISTS ${schema}",
+    "CREATE OR REPLACE TABLE ${schema}.once_rows AS SELECT 1 AS id",
+]
+ONCE_TEARDOWN = ["DROP SCHEMA IF EXISTS ${schema} CASCADE"]
+
+
+@pytest.fixture(scope="module")
+def once_schema(lakeflow: Lakeflow) -> str:
+    assert lakeflow.catalog, "set LAKEFLOW_CATALOG"
+    return f"{lakeflow.catalog}.pytest_{lakeflow.run_id}_once"
+
+
+@pytest.fixture(scope="module")
+def once_rows(lakeflow: Lakeflow, once_schema: str) -> JobRun:
+    """The session step every test of this module reads: set up once, in whichever worker asks first."""
+    run = lakeflow.once("example rows", setup=ONCE_SETUP, teardown=ONCE_TEARDOWN, params={"schema": once_schema})
+    assert run is not None
+    return run
+
+
+def test_once_sets_up_the_schema_in_one_job(lakeflow: Lakeflow, once_rows: JobRun, once_schema: str) -> None:
+    assert once_rows.setup is not None and once_rows.setup.succeeded, once_rows.setup
+    assert once_rows.setup.output_json == {"statements": 2}
+    assert once_rows.tasks == {}
+    assert lakeflow.ws.tables.exists(f"{once_schema}.once_rows").table_exists
+    settings = lakeflow.ws.jobs.get(once_rows.job_id).settings
+    assert settings is not None
+    assert settings.name == "[pytest] once: example rows"
+    assert (settings.tags or {})["pytest_once"] == "example rows"
+    assert [task.task_key for task in settings.tasks or []] == ["__pytest_setup", "__pytest_teardown"]
+    assert settings.performance_target == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+
+
+def test_once_is_shared_by_every_caller(lakeflow: Lakeflow, once_rows: JobRun, once_schema: str) -> None:
+    # The same step again, from any test or worker, runs nothing: it reads the first run.
+    again = lakeflow.once("example rows", setup=ONCE_SETUP, teardown=ONCE_TEARDOWN, params={"schema": once_schema})
+    assert again is not None
+    assert (again.job_id, again.run_id) == (once_rows.job_id, once_rows.run_id)
+    runs = list(lakeflow.ws.jobs.list_runs(job_id=once_rows.job_id))
+    assert [run.run_id for run in runs] == [once_rows.run_id]

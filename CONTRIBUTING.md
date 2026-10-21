@@ -44,13 +44,14 @@ The unit tests use pytest's `pytester` and an in-memory fake of the parts of `Wo
 | `ephemeral/` | The copies a test makes: `job` (`EphemeralJob` and `RunHandle`), `pipeline`, `polling` and `outcome`, with `base` for what the copies share. |
 | `results/` | What a run reports back: `models` (the dataclasses), `build` (filled from the Jobs API), `notebook` (exported notebooks) and `serialise` (`report.json`). |
 | `helpers.py` | The notebooks the plugin uploads: set and get task values, setup and teardown steps, debug notebooks, inlined queries. |
+| `once.py` | Session steps: `lakeflow.once()`, set up once per session across xdist workers and torn down at session end. |
 | `sweep.py` | Sweeping what earlier sessions left behind. |
 | `report.py` | Writing `--lakeflow-report-dir`. |
 | `dbt.py` | Downloading and reading dbt artefacts. |
 | `naming.py`, `limits.py` | Every name the plugin writes into a workspace, and every limit the platform enforces, each with how it was measured. |
 | `errors.py` | The exception classes. |
 
-Two rules hold across the public API. A wrong argument raises `ValueError`; anything about the bundle, the job or the workspace raises `LakeflowError`, or `LakeflowBundleError` for the CLI. Names mirror the platform's spelling where they stand for a platform field (`performance_optimized`, `disable_auto_optimization`) and use UK English where they are the plugin's own (`side_effects="neutralise"`, `TaskRun.cancelled`).
+Two rules hold across the public API. A wrong argument raises `ValueError`; anything about the bundle, the job or the workspace raises `LakeflowError`, or `LakeflowBundleError` for the CLI. Names mirror the platform's spelling where they stand for a platform field (`performance_target`, `disable_auto_optimization`) and use UK English where they are the plugin's own (`side_effects="neutralise"`, `TaskRun.cancelled`).
 
 ## Integration tests
 

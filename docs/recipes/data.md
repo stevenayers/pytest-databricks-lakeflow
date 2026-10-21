@@ -18,9 +18,45 @@ def test_writes_table(lakeflow: Lakeflow) -> None:
 - The schema carries `pytest_git_branch` and, with `--lakeflow-keep-ttl`, `pytest_expires` as schema properties.
 - Tables the test asserts on belong here, because the drop cleans them up. Use a teardown task for side effects outside the schema.
 
+## Seed once for the whole session
+
+`lakeflow.once()` runs a setup step one time per session, for every test and every xdist worker, and its teardown when the session ends. It is for data that every test reads and none changes: the source tables behind a job's config, a schema the jobs write into, landing files in a volume. Call it from a session fixture:
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+SOURCES = [
+    "CREATE SCHEMA IF NOT EXISTS ${schema}",
+    "CREATE OR REPLACE TABLE ${schema}.orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)",
+]
+
+
+@pytest.fixture(scope="session")
+def sources(lakeflow: Lakeflow) -> None:
+    run = lakeflow.once(
+        "sources", setup=SOURCES, teardown=["DROP SCHEMA ${schema} CASCADE"], params={"schema": "dev_sandbox.sources"}
+    )
+    assert run.setup.output_json == {"statements": 2}
+
+
+def test_job_reads_the_sources(lakeflow: Lakeflow, sources: None) -> None:
+    with lakeflow.job("my_example_job", params={"schema": "dev_sandbox.sources"}) as job:
+        assert job.run().succeeded
+```
+
+- `setup=` and `teardown=` take the same forms as on `job()`: a plain function taking any of `spark`, `dbutils` and `params`, a list of SQL statements rendered from `params`, or a `Path` to a `.py` notebook file. `params` are declared on the step's job with these values as defaults, and a `${name}` that `params` does not hold raises `LakeflowError` before anything is created.
+- The step is one serverless job named `[pytest] once: <name>`, tagged `pytest_once`, with a `__pytest_setup` task, a `__pytest_teardown` task or both. The first test to ask for it creates the job and runs the setup task alone; the other xdist workers wait for that run and read its outcome; a second call with the same name, steps and parameters anywhere in the session returns the same outcome without running anything.
+- It returns the setup run as a `JobRun`, whose `setup` is the task's `TaskRun`, or `None` when the step has no setup. Its `succeeded` is false, because a step has no task under test; assert on `run.setup`. A step whose setup failed raises `LakeflowError` in every test that asks for it, naming the error and the run, and the job is kept as `keep_failed` keeps a copy.
+- When the session ends, the teardown task runs alone, on the xdist controller when there is one, and the job is deleted. `keep` and `--lakeflow-keep` keep it and skip the teardown; `keep_failed` keeps it after a failed teardown, with a line at the end of the terminal output. `--lakeflow-sweep` removes leftovers from crashed sessions.
+- The step runs on the [helper compute](../task-tests.md#helper-compute). `helpers_compute` names a job cluster of a bundle job, which a step's job does not have, so a `Lakeflow` with it refuses `once()`; `existing_cluster_id` moves the step onto that running cluster instead.
+
+The rule of thumb: data every test reads goes in `once()`, data one test owns goes in `setup=` or `lakeflow.schema()`. A setup task inside every copy costs a task start plus the statements per test, and stops the tests running in parallel when they recreate the same tables; in one suite it was 72 seconds per test, 40% of the run time.
+
 ## Seed data with a setup task
 
-`setup=` takes a plain function that runs on the job's own compute, as the first task of the copy, so it gets the real `spark` and `dbutils`:
+`setup=` seeds data that one test owns. It takes a plain function that runs on the job's own compute, as the first task of the copy, so it gets the real `spark` and `dbutils`; data every test reads belongs in [`once()`](#seed-once-for-the-whole-session) instead:
 
 ```python
 def seed_orders(spark, dbutils, params):
@@ -147,7 +183,7 @@ def test_seeded_through_connect(lakeflow: Lakeflow) -> None:
 
 The `pytester` extra installs [databricks-labs-pytester](https://github.com/databrickslabs/pytester), whose fixtures create tables and other resources and remove them afterwards. The two plugins coexist: this one defines only the `lakeflow` fixture, and `lakeflow.ws` gives you the `WorkspaceClient` without a second fixture.
 
-Choose `setup=` when the seed needs `spark` or `dbutils` and you do not want a second connection from the test process; a setup task costs one task start per run, 7 to 30 seconds on serverless. Choose Connect or pytester when the seed is shared by many tests or built from local files.
+Choose `once()` when the seed is shared by many tests: it runs on serverless with the real `spark` and `dbutils`, one time for the session. Choose `setup=` when one test owns the seed and it needs `spark` or `dbutils`; a setup task costs one task start per run, 28 to 32 seconds on serverless before its first statement. Choose Connect or pytester when the seed is built from local files or needs a library the test process already has.
 
 ## Let job code know it is under test
 

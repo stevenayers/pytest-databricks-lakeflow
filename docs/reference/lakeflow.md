@@ -41,7 +41,7 @@ Every argument of `Lakeflow`, the object that the `lakeflow` fixture returns. Ov
 | `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, helper and nested for-each tasks included. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. |
 | `single_node` | `False` | Make every job cluster and every task's `new_cluster` a single node cluster. Raises `LakeflowError` naming the cluster when one uses standard access mode. See [Run job clusters on one node](../recipes/compute.md#run-job-clusters-on-one-node). |
 | `budget_policy_id` | `None` | The budget policy of every copy and pipeline copy. A pipeline copy without it keeps the deployed pipeline's. |
-| `performance_optimized` | `False` | Run every copy with `performance_target: PERFORMANCE_OPTIMIZED`, whatever the template says. When a run reports that it used `STANDARD` all the same, the plugin warns once per `Lakeflow`. |
+| `performance_target` | `"PERFORMANCE_OPTIMIZED"` | The serverless performance mode of every copy and every `once()` job, whatever the template says: `"PERFORMANCE_OPTIMIZED"` starts each task in seconds; `"STANDARD"` bills fewer DBUs and adds 4 to 6 minutes of start-up to every task, for CI runs that can wait; `None` keeps the template's own setting, with a warning when that is `STANDARD`. `--lakeflow-performance-target` overrides it for one run of pytest. Anything else raises `ValueError`. When a run asked for `PERFORMANCE_OPTIMIZED` and the platform used `STANDARD`, the plugin warns once per `Lakeflow`. |
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks, nested for-each tasks included, so that a failure fails once instead of being retried by the platform. |
 
 ## What the copy keeps
@@ -73,11 +73,23 @@ Every argument of `Lakeflow`, the object that the `lakeflow` fixture returns. Ov
 
 Once a default is set, a call cannot opt out of `setup`, `teardown` or `run_as`: `None` takes the `Lakeflow` value, and `setup=[]` raises `ValueError` like any empty list of statements. For tests that need no setup, derive a `Lakeflow` without it, such as `dataclasses.replace(lakeflow, setup=None)`, in their directory's `conftest.py`. To run one copy as yourself while `Lakeflow` sets another `run_as`, pass your own user name.
 
+## Methods
+
+| Method | Does |
+| --- | --- |
+| `lakeflow.job(key, ...)`, `lakeflow.task(ref, ...)` | Make a throwaway copy of a job, or of one task. See [Job tests](../job-tests.md) and [Task tests](../task-tests.md). |
+| `lakeflow.once(name, *, setup=None, teardown=None, params=None, timeout=None)` | Run a setup step once for the whole session, across xdist workers, and its teardown when the session ends; returns the setup run, or `None` without a setup. See [Seed once for the whole session](../recipes/data.md#seed-once-for-the-whole-session). |
+| `lakeflow.schema(catalog=None)` | A temporary schema, dropped when the block ends. |
+| `lakeflow.pipeline(key, schema, ...)` | A throwaway copy of a bundle pipeline. |
+| `lakeflow.check(key, *, rules=None)` | The wiring mistakes in a job's template, without creating anything. |
+| `lakeflow.attach(run_id)` | The `JobRun` of a finished run of a kept job. |
+| `lakeflow.sweep(...)` | The `--lakeflow-sweep` sweep from plain Python. |
+
 ## Properties
 
 | Property | Holds |
 | --- | --- |
-| `lakeflow.ws` | The `WorkspaceClient`. |
+| `lakeflow.ws` | The `WorkspaceClient`. Use it in tests instead of a `WorkspaceClient()` of your own, which on a user-to-machine profile would refresh the CLI's token once more. |
 | `lakeflow.run_id` | The run id that tags every job and names every temporary schema. |
 | `lakeflow.templates` | The usable job templates as dicts, by bundle resource key. |
 | `lakeflow.template_errors` | Why each other job cannot be used as a template, by key. |

@@ -15,6 +15,12 @@ Creating a `Lakeflow` does nothing. The first time a test asks it for a job temp
 
 The result, job templates as dicts, template errors, helper paths and the artifact notes, is JSON. If setup fails, the error is remembered and every later use in the session fails with the same message instead of retrying the deploy.
 
+### Session steps
+
+`lakeflow.once(name, setup=..., teardown=..., params=...)` is keyed on the name, the notebooks the steps render to and the parameters, as a digest. The first call in the process with that digest builds a one-job `JobSettings`: the parameters with the given values as defaults, a `__pytest_setup` task, a `__pytest_teardown` task or both on the helper environment, or on `existing_cluster_id`, then the same `sanitise` as a copy, named `once: <name>` and tagged `pytest_once` beside the usual tags. It uploads the notebooks as a copy does, creates the job, runs the setup task alone with `run_now(only=["__pytest_setup"])` and waits for it. A setup task that did not succeed keeps or deletes the job by the `keep_failed` rules and raises `LakeflowError` naming the run; the error is remembered, so every later call with that digest raises again without creating anything. A step with a setup returns its run as a `JobRun`; a teardown-only step returns `None`.
+
+The record of the job, its setup run, its teardown and the keep rules is kept for the session's end. Under xdist it goes through a `once_<digest>.json` file in the state directory, as the bundle setup does: the first worker to take the lock produces it, the others wait and read it, and read the setup run from the Jobs API with `runs/get` to build their own `JobRun`.
+
 ### Parallel sessions
 
 Under pytest-xdist, the controller creates a temporary directory and passes it and the run id to every worker. The first worker to need a bundle target takes a `FileLock` on a state file named after the bundle key, runs the setup and writes the JSON. Workers that arrive later read the file. A setup error is written too, so every worker reports it. Each worker builds its own `WorkspaceClient`, and the controller deletes the directory at the end.
@@ -32,9 +38,9 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 5. For a job test: `upstream_task_values` replaces each named task with a stub of the same key, without its `depends_on`, and rewrites every `{{tasks.<key>.output.<path>}}` reference to it with the stub's outputs; `capture_task_values` appends a probe after each named task; `for_each_inputs` replaces each named loop's `inputs` as JSON. For a task test: `input` rewrites the body's `{{input}}` references to `__pytest_input` job parameters; the target is kept alone with a stub for each entry in `upstream_task_values` as its only dependencies, and a probe when values are captured.
 6. `trigger` rewrites each `{{job.trigger.<path>}}` reference it names to a `__pytest_trigger_<path>` job parameter, warns about the references it leaves, and the job's creation later refuses a `file_arrival` or `table_update` reference that is left.
 7. `setup=` and `teardown=` add the `__pytest_setup` task, which every task without `depends_on` comes to depend on, and the `__pytest_teardown` task, which depends on every leaf with `run_if: ALL_DONE`. Their notebooks are uploaded once per distinct notebook per session as `setup_<hash>` and `teardown_<hash>`. Helper tasks get the `__pytest_serverless` environment, or the `helpers_compute` job cluster.
-8. **Sanitise.** The copy loses what would make it run on its own, notify people or count as bundle-managed: `deployment`, `edit_mode`, `schedule`, `trigger`, `triggers`, `continuous`, the notification fields and `parent_path` on the job, and the notification fields on every task. Dashboard and SQL alert subscriptions are paused unless `side_effects="keep"`. `run_as` is stripped unless the test passed one. `disable_auto_optimization` is set on serverless code tasks. The compute overrides apply: `environment_version`, `budget_policy_id`, `existing_cluster_id`, then `single_node`. `performance_optimized` sets the performance target, `max_concurrent_runs` becomes 1, and `timeout_seconds` becomes `Lakeflow`'s `timeout` plus 60 seconds unless the template has a smaller positive one. The job is named `[pytest] <test node id>` within the 4096-byte limit, and tagged `pytest`, `pytest_run_id`, `pytest_nodeid` and `pytest_job_key` within the 25-tag limit, then with `pytest_expires`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` while room remains. The description becomes the test node id and the CI run URL, then the template's description. `test_marker` declares `__pytest_test_id`.
+8. **Sanitise.** The copy loses what would make it run on its own, notify people or count as bundle-managed: `deployment`, `edit_mode`, `schedule`, `trigger`, `triggers`, `continuous`, the notification fields and `parent_path` on the job, and the notification fields on every task. Dashboard and SQL alert subscriptions are paused unless `side_effects="keep"`. `run_as` is stripped unless the test passed one. `disable_auto_optimization` is set on serverless code tasks. The compute overrides apply: `environment_version`, `budget_policy_id`, `existing_cluster_id`, then `single_node`. `performance_target`, from `--lakeflow-performance-target` or `Lakeflow`, replaces the template's performance target unless it is `None`, `max_concurrent_runs` becomes 1, and `timeout_seconds` becomes `Lakeflow`'s `timeout` plus 60 seconds unless the template has a smaller positive one. The job is named `[pytest] <test node id>` within the 4096-byte limit, and tagged `pytest`, `pytest_run_id`, `pytest_nodeid` and `pytest_job_key` within the 25-tag limit, then with `pytest_expires`, `pytest_ci_url`, `pytest_user`, `pytest_git_sha` and `pytest_git_branch` while room remains. The description becomes the test node id and the CI run URL, then the template's description. `test_marker` declares `__pytest_test_id`.
 9. `environments` merges each override into the copy's environments.
-10. A `performance_target` of `STANDARD` triggers a warning, and each enabled Run Job task triggers a warning, or `LakeflowError` with `children="refuse"`.
+10. A template `performance_target` of `STANDARD` that `performance_target=None` keeps triggers a warning, and each enabled Run Job task triggers a warning, or `LakeflowError` with `children="refuse"`.
 11. With `pipelines="copy"`, the pipelines that enabled pipeline tasks update are listed and their deployed specs read. Nothing is created yet.
 12. A finaliser is registered on the test, so the job is closed at teardown if no `with` block closes it first.
 
@@ -67,9 +73,10 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 ## Session end
 
 1. Every process cancels the runs it started that are still active, and stops the pipeline updates that `EphemeralPipeline.run()` started.
-2. xdist workers report the targets they deployed, what they kept, the debug notebooks they wrote and the runs they cancelled to the controller.
-3. With `--lakeflow-destroy`, the controller, or the single process, runs `databricks bundle destroy -t <target> --auto-approve` for each target deployed with `sync="deploy"`, with the same `--var` arguments as its deploy. A failed destroy turns a passing session into a failed one.
-4. A `lakeflow` block in the terminal summary lists the kept jobs, pipeline copies and schemas, the debug notebooks and the cancelled runs, see [The terminal summary](reference/output.md#the-terminal-summary).
+2. xdist workers report the targets they deployed, what they kept, the debug notebooks they wrote, the runs they cancelled and the `once()` jobs they set up to the controller.
+3. For each `once()` job, the controller, or the single process, runs the teardown task alone with `run_now(only=["__pytest_teardown"])` and queueing on, waits for it for the step's timeout, and deletes the job. `keep` and `--lakeflow-keep` keep the job and skip the teardown; a teardown that fails or times out keeps it under `keep_failed`, with a `lakeflow: kept the job of once(...)` line after the summary, because the summary has been printed by then. An error here only logs a warning.
+4. With `--lakeflow-destroy`, the controller, or the single process, runs `databricks bundle destroy -t <target> --auto-approve` for each target deployed with `sync="deploy"`, with the same `--var` arguments as its deploy. A failed destroy turns a passing session into a failed one.
+5. A `lakeflow` block in the terminal summary lists the kept jobs, pipeline copies and schemas, the debug notebooks and the cancelled runs, see [The terminal summary](reference/output.md#the-terminal-summary).
 
 ## What is left in the workspace
 
@@ -77,7 +84,7 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 - The two helper notebooks under `helpers_path`, and the `setup_<hash>` and `teardown_<hash>` notebooks of any `setup=` and `teardown=` arguments. Each edit of a function, and each plugin upgrade that changes the notebook around it, uploads a new one.
 - The `query_<run id>_<task key>_<hex>.sql` files of `saved_queries="inline"` under `helpers_path`, uploaded when the job is created and deleted with it. A kept job keeps its files.
 - Debug notebooks from `debug_notebook()` and `--lakeflow-debug-notebook`, under `helpers_path/debug/`, one per job, task and run.
-- Jobs, pipeline copies and schemas kept by the keep rules. Their tags say which test, run, person and commit made them, and `lakeflow.attach(run_id)` rebuilds the `JobRun` of a kept job's run.
+- Jobs, pipeline copies and schemas kept by the keep rules. Their tags say which test, run, person and commit made them, and `lakeflow.attach(run_id)` rebuilds the `JobRun` of a kept job's run. A `once()` job is deleted when the session ends, after its teardown, unless the same rules keep it.
 - Nothing else. `--lakeflow-sweep` with its flags removes all of the above but the deployed target and the two helper notebooks, see [Clean up leftovers](recipes/ci.md#clean-up-leftovers).
 
 ## Timing
@@ -85,10 +92,14 @@ Under pytest-xdist, the controller creates a temporary directory and passes it a
 Measured in one Azure workspace:
 
 - A trivial serverless notebook test takes about 20 to 35 seconds end to end, of which about 2 seconds is API overhead.
-- A probe, stub, setup or teardown task adds 7 to 30 seconds.
-- A job with `performance_target: STANDARD` adds 3 to 4 minutes to every run.
+- A probe, stub, setup or teardown task is a serverless notebook task, which takes 28 to 32 seconds end to end before its own work, measured again in October 2026. Each statement a SQL `setup=` runs through `spark.sql` takes about 1.5 seconds on top.
+- The setup phase of a serverless task, in which its environment is prepared, took 2 to 4 seconds with the environment cache warm, a freshly uploaded `dynamic_version` wheel included.
+- Between one run ending and the next starting, the plugin's own work, the job delete, the next create and `run_now`, takes 3 to 6 seconds.
+- A job with `performance_target: STANDARD` adds 4 to 6 minutes to every task, which Databricks documents as the price of fewer DBUs on the same SKU.
 - A classic job cluster takes 2 to 10 minutes to start.
 - Five jobs run at once took no longer than one.
 - An update of a serverless pipeline copy with one materialised view over literal rows took 28 to 29 seconds from `start_update` to `COMPLETED`; a pipeline task running the same pipeline took 31 to 42 seconds.
 
-To measure your own workspace, read `run.task(key).timing`, which splits each task's time into queue, setup, execution and cleanup, and `run.effective_performance_target`, which shows which performance mode the run used.
+When a run ends, the plugin reads every task's output in parallel, with 8 threads, or `16 // <worker count>` under xdist, at least 1, so that every worker finishing at once stays under the workspace's limit of 20 `runs/get-output` requests per second.
+
+To measure your own workspace, read `run.task(key).timing`, which splits each task's time into queue, setup, execution and cleanup, and `run.effective_performance_target`, which shows which performance mode the run used. [Speed and cost](speed.md) turns these numbers into what to change.

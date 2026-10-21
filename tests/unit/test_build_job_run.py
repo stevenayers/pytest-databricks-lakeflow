@@ -15,7 +15,7 @@ from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow import ForEachError, ForEachStats, JobRun, TaskRun, Timing, dbt
-from pytest_databricks_lakeflow.results.build import build_job_run, error_line
+from pytest_databricks_lakeflow.results.build import build_job_run, error_line, fetch_threads
 from pytest_databricks_lakeflow.results.serialise import serialise_with_files
 
 from .conftest import FAILED_EXPORT
@@ -1436,3 +1436,27 @@ class TestSerialise:
         assert child_run["tasks"]["load"]["logs_file"] == "777/load.log"
         assert files == {"1/flaky.attempt-0.log": "first", "1/flaky.log": "second", "777/load.log": "child"}
         assert json.loads(json.dumps(data)) == data
+
+
+class TestFetchThreads:
+    """How many task runs one process reads at once, sharing the Jobs API's rate limit between xdist workers."""
+
+    @pytest.mark.parametrize(
+        ("workers", "expected"),
+        [
+            pytest.param(None, 8, id="no xdist"),
+            pytest.param("2", 8, id="two workers"),
+            pytest.param("4", 4, id="four workers"),
+            pytest.param("8", 2, id="eight workers"),
+            pytest.param("32", 1, id="many workers"),
+            pytest.param("x", 8, id="unreadable count"),
+        ],
+    )
+    def test_threads_share_the_rate_limit_between_workers(
+        self, monkeypatch: pytest.MonkeyPatch, workers: str | None, expected: int
+    ) -> None:
+        if workers is None:
+            monkeypatch.delenv("PYTEST_XDIST_WORKER_COUNT", raising=False)
+        else:
+            monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", workers)
+        assert fetch_threads() == expected
