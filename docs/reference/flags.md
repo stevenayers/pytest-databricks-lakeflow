@@ -22,6 +22,7 @@ Flags apply to one pytest run and win over the matching `Lakeflow` arguments.
 | `--lakeflow-report-dir=DIR` | Write the runs of each test to `DIR`, relative to the directory pytest was invoked from: one `report.json` per test, with raw logs and exported notebooks as files. See [Report directory](output.md#report-directory). |
 | `--lakeflow-live` | Print each run's start, each task state change and the run's end to the terminal while a run waits. `run(stream=...)` overrides it for one run. Under xdist the lines are only logged. |
 | `--lakeflow-max-concurrent-runs=N` | Start a run only while fewer than `N` runs started by this process are active, and otherwise wait for one to end. The cap is per xdist worker. Less than 1 is a usage error. |
+| `--lakeflow-performance-target=MODE` | Run every copy and every `once()` job in this serverless performance mode: `PERFORMANCE_OPTIMIZED`, the default, or `STANDARD`, which bills fewer DBUs and adds 4 to 6 minutes of start-up to every task, for runs that can wait. Overrides `Lakeflow(performance_target=...)`. Any other value is a usage error. See [Choose the performance mode](../recipes/compute.md#choose-the-performance-mode). |
 | `--lakeflow-check` | Collect one test per job of each `databricks.yml` that pytest collects, named `databricks.yml::<key>`, which calls `lakeflow.check(key, rules=DEFAULT_RULES - {"trigger"})` and fails with the problems it finds. See [Check every job's wiring](../recipes/ci.md#check-every-jobs-wiring-without-running-it). |
 
 Every `--lakeflow-sweep-*` flag needs `--lakeflow-sweep`.

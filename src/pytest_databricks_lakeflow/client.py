@@ -25,6 +25,7 @@ from pytest_databricks_lakeflow.ephemeral.polling import terminated
 from pytest_databricks_lakeflow.errors import LakeflowBundleError, LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.naming import JOB_KEY_TAG, default_folder, schema_prefix, tag_value
+from pytest_databricks_lakeflow.once import run_once
 from pytest_databricks_lakeflow.results.build import NOTEBOOK_EXPORTS, NotebookExport, build_job_run
 from pytest_databricks_lakeflow.results.models import JobRun
 from pytest_databricks_lakeflow.settings.compute import (
@@ -81,6 +82,8 @@ Pipelines = Literal["deployed", "copy"]
 PIPELINES: tuple[str, ...] = get_args(Pipelines)
 SavedQueries = Literal["deployed", "inline"]
 SAVED_QUERIES: tuple[str, ...] = get_args(SavedQueries)
+PerformanceTarget = Literal["PERFORMANCE_OPTIMIZED", "STANDARD"]
+PERFORMANCE_TARGETS: tuple[str, ...] = get_args(PerformanceTarget)
 # A setup or teardown notebook's source, and the job parameters its statements read.
 Notebook = tuple[str, frozenset[str]]
 UNVERSIONED_ARTIFACTS = (
@@ -172,7 +175,11 @@ class Lakeflow:
             without serverless.
         helpers_environment_version: The serverless environment version for stub, probe, setup and teardown tasks.
         disable_auto_optimization: Stop serverless from retrying failed tasks, so that a failure fails once and fast.
-        performance_optimized: Run every ephemeral job as `PERFORMANCE_OPTIMIZED`, whatever the template says.
+        performance_target: The serverless performance mode of every ephemeral job, whatever the template says:
+            `"PERFORMANCE_OPTIMIZED"`, the default, starts each task in seconds; `"STANDARD"` uses fewer DBUs and
+            adds 4 to 6 minutes of start-up to every task, for CI runs that can wait; `None` keeps the template's
+            own setting, with a warning when that is `STANDARD`. `--lakeflow-performance-target` overrides it for one
+            session. Anything else raises `ValueError`.
         side_effects: `neutralise` pauses dashboard subscriptions and SQL alert subscriptions in every ephemeral
             job, so runs do not email snapshots or notify subscribers. `keep` leaves them as the template has them.
         environment_version: The serverless environment version of every environment copied from the template,
@@ -257,7 +264,7 @@ class Lakeflow:
     helpers_compute: str | None = None
     helpers_environment_version: str = "4"
     disable_auto_optimization: bool = True
-    performance_optimized: bool = False
+    performance_target: PerformanceTarget | None = "PERFORMANCE_OPTIMIZED"
     side_effects: SideEffects = "neutralise"
     environment_version: str | None = None
     budget_policy_id: str | None = None
@@ -295,6 +302,11 @@ class Lakeflow:
         _choice("notebook_export", self.notebook_export, NOTEBOOK_EXPORTS)
         _choice("children", self.children, CHILDREN)
         _choice("saved_queries", self.saved_queries, SAVED_QUERIES)
+        if self.performance_target is not None and self.performance_target not in PERFORMANCE_TARGETS:
+            raise ValueError(
+                f"performance_target must be one of {', '.join(PERFORMANCE_TARGETS)} or None, "
+                f"got {self.performance_target!r}"
+            )
         if self.poll_interval is not None and self.poll_interval <= timedelta(0):
             raise ValueError(f"poll_interval must be longer than zero, got {self.poll_interval!r}")
         if self.max_concurrent_runs is not None and self.max_concurrent_runs < 1:
@@ -881,6 +893,56 @@ class Lakeflow:
                 kept[key] = override
         return kept
 
+    def once(
+        self,
+        name: str,
+        *,
+        setup: LifecycleStep | None = None,
+        teardown: LifecycleStep | None = None,
+        params: Mapping[str, str] | None = None,
+        timeout: timedelta | None = None,
+    ) -> JobRun | None:
+        """Run a setup step once for the whole session, and its teardown when the session ends.
+
+        For test data that every test reads and none changes: the fixture tables behind a job's config, a schema the
+        jobs write into, a volume of landing files. `setup=` on `job()` recreates them inside every copy, which costs
+        a task start plus the statements per test and stops the tests from running in parallel; `once()` does it one
+        time, in one job named after the step, for every test and every xdist worker:
+
+            @pytest.fixture(scope="session")
+            def fixtures(lakeflow: Lakeflow) -> None:
+                lakeflow.once("orders", setup=SEED_ORDERS, teardown=DROP_ORDERS, params={"schema": "dev.orders"})
+
+        The first test to ask for the step creates the job and runs the setup task; the other xdist workers wait for
+        that run and read its outcome, and a second call with the same name, steps and parameters anywhere in the
+        session returns the same outcome without running anything. A step whose setup failed fails every test that
+        asks for it. When the session ends, the teardown task runs alone, on the xdist controller when there is one,
+        and the job is deleted; `keep` and `--lakeflow-keep` keep it and skip the teardown, and `keep_failed` keeps
+        it after a failed setup or teardown, as for a copy. The sweep removes leftovers.
+
+        Args:
+            name: What the step sets up, which names the job `[pytest] once: <name>` and its `pytest_once` tag.
+            setup: A plain function taking any of `spark`, `dbutils` and `params`, a list of SQL statements rendered
+                from `params`, or a `Path` to a `.py` notebook file, as `setup=` on `job()` takes it.
+            teardown: The same forms, run alone when the session ends.
+            params: The step's job parameters, which the statements' `${name}` placeholders and the function's
+                `params` read. They are declared on the step's job with these values as defaults.
+            timeout: How long to wait for the setup task, and later for the teardown task. Defaults to `Lakeflow`'s
+                `timeout`.
+
+        Returns:
+            The setup run's outcome, whose `setup` is the task's `TaskRun`, or `None` when the step has no setup.
+            Its `succeeded` is false, because a step has no task under test; assert on `run.setup`.
+
+        Raises:
+            ValueError: If `name` is blank, neither step is given, a step has a form `setup=` refuses, a parameter name
+                starts with `__pytest_`, or `helpers_compute` names a job cluster, which a step's job does not have.
+            LakeflowError: If called outside a test or a fixture, a statement reads a `${name}` that `params` does
+                not hold, the setup task failed or the step failed earlier in this session.
+            LakeflowTimeout: If the setup run did not finish within `timeout`. It is cancelled first.
+        """
+        return run_once(self, name, setup=setup, teardown=teardown, params=params, timeout=timeout)
+
     def attach(self, run_id: int) -> JobRun:
         """Rebuild the outcome of a finished run of a kept ephemeral job, without running anything.
 
@@ -1133,6 +1195,13 @@ class Lakeflow:
         warned.add(key)
         warnings.warn(message, stacklevel=3)
 
+    def _performance_target(self) -> str | None:
+        """The performance mode of every copy: `--lakeflow-performance-target`, or else this instance's."""
+        flag = session.current().performance_target
+        if flag is not None:
+            return flag
+        return self.performance_target
+
     def _warn_performance_override(self, job_key: str, run: JobRun) -> None:
         """Warn, once for this `Lakeflow`, that a run asked for `PERFORMANCE_OPTIMIZED` and used another target."""
         if self._warned_performance_override:
@@ -1209,10 +1278,11 @@ class Lakeflow:
         environments: Mapping[str, Mapping[str, Any]],
     ) -> EphemeralJob:
         """Finish the copy's settings and wrap them in an `EphemeralJob` that the test's finaliser closes."""
-        if settings.performance_target == jobs.PerformanceTarget.STANDARD and not self.performance_optimized:
+        performance_target = self._performance_target()
+        if performance_target is None and settings.performance_target == jobs.PerformanceTarget.STANDARD:
             warnings.warn(
                 f"Job {key!r} has performance_target STANDARD, which adds 3 to 4 minutes to every run. "
-                "Pass performance_optimized=True to Lakeflow to run tests with PERFORMANCE_OPTIMIZED.",
+                "Leave Lakeflow's performance_target at its default to run tests with PERFORMANCE_OPTIMIZED.",
                 stacklevel=3,
             )
         for task in run_job_tasks(settings):
@@ -1230,7 +1300,7 @@ class Lakeflow:
             tags=tags,
             description=f"{item.nodeid} {tags.get('pytest_ci_url', '')}".strip(),
             disable_auto_optimization=self.disable_auto_optimization,
-            performance_optimized=self.performance_optimized,
+            performance_target=performance_target,
             run_as=options.run_as,
             timeout=self.timeout,
             side_effects=self.side_effects,

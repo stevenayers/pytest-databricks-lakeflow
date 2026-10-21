@@ -34,7 +34,7 @@ SINGLE_NODE_CONF = {"spark.master": "local[*, 4]", "spark.databricks.cluster.pro
 def sanitised(
     settings: jobs.JobSettings | None = None, tags: dict[str, str] = TAGS, name: str = NODEID, **kwargs: Any
 ) -> jobs.JobSettings:
-    options: dict[str, Any] = {"disable_auto_optimization": True, "performance_optimized": False, **kwargs}
+    options: dict[str, Any] = {"disable_auto_optimization": True, "performance_target": None, **kwargs}
     return sanitise(settings or example_settings(), name, tags, **options)
 
 
@@ -127,7 +127,7 @@ class TestAutoOptimisation:
 
 
 class TestComputeOverrides:
-    """environment_version, budget_policy_id, existing_cluster_id and performance_optimized."""
+    """environment_version, budget_policy_id, existing_cluster_id and performance_target."""
 
     @staticmethod
     def with_environments(*environments: dict[str, Any]) -> jobs.JobSettings:
@@ -179,8 +179,9 @@ class TestComputeOverrides:
         settings = example_settings()
         settings.performance_target = jobs.PerformanceTarget.STANDARD
         assert sanitised(settings).performance_target == jobs.PerformanceTarget.STANDARD
-        forced = sanitised(performance_optimized=True)
-        assert forced.performance_target == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        optimised = sanitised(performance_target="PERFORMANCE_OPTIMIZED")
+        assert optimised.performance_target == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        assert sanitised(performance_target="STANDARD").performance_target == jobs.PerformanceTarget.STANDARD
 
     def test_sanitise_without_compute_knobs_changes_nothing(self) -> None:
         plain = sanitised()

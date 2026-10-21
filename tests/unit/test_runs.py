@@ -536,14 +536,15 @@ class TestRunOptions:
             def test_job(lakeflow):
                 with lakeflow.job("my_job") as job:
                     job.run({arguments})
-                    assert job.settings.performance_target is None
+                    # The run's own target goes to run_now; the job keeps the session default.
+                    assert job.settings.performance_target == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
             """,
         )
         result.assert_outcomes(passed=1)
         [call] = fake_ws.jobs.run_now_calls
         assert call["performance_target"] == target
         assert call["queue"] == queue
-        assert "performance_target" not in fake_ws.jobs.created[0]
+        assert fake_ws.jobs.created[0]["performance_target"] == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
 
     @pytest.mark.parametrize("method", ["run", "start"])
     def test_an_unknown_performance_target_is_rejected_before_the_job_is_created(
@@ -759,7 +760,6 @@ class TestPerformanceOverride:
     ) -> None:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
         fake_ws.jobs.queue(make_run(8, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
-        configure_lakeflow(pytester, "performance_optimized=True")
         result = run_tests(
             pytester,
             """
@@ -789,8 +789,6 @@ class TestPerformanceOverride:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, target: str, warnings: int
     ) -> None:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
-        if target == "STANDARD":
-            configure_lakeflow(pytester, "performance_optimized=True")
         result = run_tests(
             pytester, f'def test_job(lakeflow):\n    lakeflow.job("my_job").run(performance_target="{target}")\n'
         )
@@ -800,6 +798,7 @@ class TestPerformanceOverride:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        configure_lakeflow(pytester, "performance_target=None")
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
         result.assert_outcomes(passed=1, warnings=0)
 
@@ -809,6 +808,7 @@ class TestPerformanceOverride:
         template = fake_ws.jobs.settings[fake_cli.deployed["my_job"]]
         template.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}, effective_performance_target="STANDARD"))
+        configure_lakeflow(pytester, "performance_target=None")
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
         result.assert_outcomes(passed=1, warnings=1)
 
@@ -816,7 +816,6 @@ class TestPerformanceOverride:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
         fake_ws.jobs.queue(make_run(7, {"task": "SUCCESS"}))
-        configure_lakeflow(pytester, "performance_optimized=True")
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
         result.assert_outcomes(passed=1, warnings=0)
 

@@ -66,6 +66,7 @@ nav:
       - Limitations: reference/limitations.md
   - FAQ: faq.md
   - How it works: how-it-works.md
+  - Speed and cost: speed.md
   - Changelog: changelog.md
 
 markdown_extensions:

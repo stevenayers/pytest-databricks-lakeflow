@@ -44,7 +44,7 @@ class TestLakeflowArguments:
             "4",
         )
         assert lakeflow.disable_auto_optimization
-        assert not lakeflow.performance_optimized
+        assert lakeflow.performance_target == "PERFORMANCE_OPTIMIZED"
         assert not lakeflow.single_node
         assert (lakeflow.environment_version, lakeflow.budget_policy_id, lakeflow.existing_cluster_id) == (
             None,
@@ -108,6 +108,10 @@ class TestLakeflowArguments:
             ({"side_effects": "other"}, "side_effects must be one of neutralise, keep, got 'other'"),
             ({"notebook_export": "bogus"}, "notebook_export must be one of never, failed, always, got 'bogus'"),
             ({"children": "other"}, "children must be one of warn, refuse, got 'other'"),
+            (
+                {"performance_target": "FAST"},
+                "performance_target must be one of PERFORMANCE_OPTIMIZED, STANDARD or None, got 'FAST'",
+            ),
         ],
     )
     def test_rejects_an_unknown_choice(self, arguments: dict[str, Any], message: str) -> None:

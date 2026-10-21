@@ -2,9 +2,15 @@
 
 Make test runs start faster and cost less, without changing the bundle. Every option here is an argument of `Lakeflow`, so it applies to every copy a `Lakeflow` makes; derive one with `dataclasses.replace(lakeflow, ...)` for a subset of tests.
 
-## Speed up a run
+## Choose the performance mode
 
-A job whose `performance_target` is `STANDARD` adds 3 to 4 minutes to every serverless run, and the plugin warns about it. `Lakeflow(performance_optimized=True)` runs every copy with `PERFORMANCE_OPTIMIZED`, and `job.run(performance_target="PERFORMANCE_OPTIMIZED")` does it for one run without changing the job's settings:
+Every copy, and every `once()` step, runs with `performance_target: PERFORMANCE_OPTIMIZED` by default, whatever the template says, so a serverless task starts in seconds. `Lakeflow(performance_target="STANDARD")` runs them in standard mode instead, which Databricks bills on the same SKU with fewer DBUs, up to 70% fewer, and which adds 4 to 6 minutes of start-up to every task; use it for CI runs that can wait, and prefer the flag so nothing changes in the code:
+
+```bash
+pytest --lakeflow-performance-target=STANDARD
+```
+
+`Lakeflow(performance_target=None)` keeps each template's own setting, and the plugin then warns about a job whose template says `STANDARD`. `job.run(performance_target="PERFORMANCE_OPTIMIZED")` chooses the mode for one run without changing the job's settings:
 
 ```python
 def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
@@ -15,10 +21,10 @@ def test_run_with_performance_target_override(lakeflow: Lakeflow) -> None:
 ```
 
 - `run.effective_performance_target` and each task's `effective_performance_target` show which mode the run used. When a run asked for `PERFORMANCE_OPTIMIZED` and used `STANDARD`, a workspace policy or the job's compute decided, and the plugin emits one `UserWarning` per `Lakeflow`. Nothing in the test can change that; ask a workspace admin about the policy.
-- The performance target applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError`.
+- The performance target applies to serverless tasks; tasks on classic clusters ignore it. An unknown name raises `ValueError`, on `Lakeflow`, on `run()` and on the flag.
 - `job.run(queue=False)` turns queueing off for one run, and `Lakeflow(queue=...)` sets the default. `None` leaves the job's own setting.
 
-Each task's `timing` splits its time into `queue`, `setup`, `execution` and `cleanup`, so you can see where a slow run spends it. [How it works](../how-it-works.md#timing) lists what to expect.
+Each task's `timing` splits its time into `queue`, `setup`, `execution` and `cleanup`, so you can see where a slow run spends it. [Speed and cost](../speed.md) explains where a session's time and money go, and [How it works](../how-it-works.md#timing) lists what to expect.
 
 ## Skip cluster start-up
 

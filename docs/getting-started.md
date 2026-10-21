@@ -103,13 +103,48 @@ def test_job_succeeds(lakeflow: Lakeflow) -> None:
 pytest --log-cli-level=INFO
 ```
 
-On the first run expect a `bundle deploy`, which builds and uploads any wheels, before the test itself starts. An unchanged bundle deploys again in seconds in later sessions.
+On the first run expect a `bundle deploy`, which builds and uploads any wheels, before the test itself starts. An unchanged bundle deploys again in seconds in later sessions. On a Mac, run a long session under `caffeinate -i pytest ...`: the jobs go on running while the laptop sleeps, but pytest's clock stops, so the time it prints is not the time you waited.
 
 The INFO log shows the deploy, the job's creation with its URL, the start and end of each run, and a line each time a task changes state, such as `transform: RUNNING -> FAILED in 0:00:42 ValueError: no rows`. `pytest --lakeflow-live` prints only those run and task lines, without INFO from every other logger.
 
 When a test fails, its job is kept so you can open the run in the workspace. The job and run URLs and the task state lines appear in a `lakeflow` section of the test report, and a `lakeflow` block at the end of the session lists every kept job. [Debug a failure](recipes/debugging.md) covers what to do next.
 
 Tests that use the fixture get the `lakeflow` marker automatically, so `pytest -m "not lakeflow"` runs only your fast tests. A session that never creates a job deploys nothing.
+
+## Share fixtures, run in parallel
+
+Data that every test reads, such as the source tables behind a job's config, goes in `lakeflow.once()`, in a session fixture. The step runs one time per session, in one job, however many tests and xdist workers ask for it, and its teardown runs when the session ends. Data that one test owns goes in `setup=` on that test's job, or in `lakeflow.schema()`:
+
+```python
+import pytest
+
+from pytest_databricks_lakeflow import Lakeflow
+
+SOURCES = [
+    "CREATE SCHEMA IF NOT EXISTS ${schema}",
+    "CREATE OR REPLACE TABLE ${schema}.orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)",
+]
+
+
+@pytest.fixture(scope="session")
+def sources(lakeflow: Lakeflow) -> None:
+    lakeflow.once(
+        "sources", setup=SOURCES, teardown=["DROP SCHEMA ${schema} CASCADE"], params={"schema": "dev_sandbox.sources"}
+    )
+
+
+def test_job_reads_the_sources(lakeflow: Lakeflow, sources: None) -> None:
+    with lakeflow.job("my_example_job", params={"schema": "dev_sandbox.sources"}) as job:
+        assert job.run().succeeded
+```
+
+A setup task inside every copy would cost a task start plus the statements for every test, and would stop the tests running at the same time, because each copy recreates the same tables. With the fixtures made once, the tests are independent:
+
+```bash
+pytest -n 4
+```
+
+One worker deploys the bundle and runs the step while the others wait, then every worker reuses both. [Speed and cost](speed.md) explains where a session's time goes and how to keep it short.
 
 ## Next steps
 

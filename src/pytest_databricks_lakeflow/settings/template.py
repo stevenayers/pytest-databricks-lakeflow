@@ -59,7 +59,7 @@ def sanitise(
     tags: Mapping[str, str],
     *,
     disable_auto_optimization: bool,
-    performance_optimized: bool,
+    performance_target: str | None,
     run_as: RunAs = None,
     description: str | None = None,
     timeout: timedelta | None = None,
@@ -85,7 +85,8 @@ def sanitise(
             template's own, or 20 with `--lakeflow-keep-ttl`, which adds `pytest_expires`.
         disable_auto_optimization: Stop serverless from retrying failed code tasks, tasks nested in a
             `for_each_task` included.
-        performance_optimized: Override the performance target with `PERFORMANCE_OPTIMIZED`.
+        performance_target: `PERFORMANCE_OPTIMIZED` or `STANDARD` replaces the template's performance target; `None`
+            keeps it.
         run_as: `None` removes the template's `run_as`, so the job runs as its creator. `"keep"` keeps it. A
             `jobs.JobRunAs` replaces it. Any other string names a user when it contains `@`, and otherwise a
             service principal by its application id.
@@ -136,8 +137,8 @@ def sanitise(
         use_existing_cluster(settings, existing_cluster_id)
     if single_node:
         single_node_clusters(settings)
-    if performance_optimized:
-        settings.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+    if performance_target is not None:
+        settings.performance_target = jobs.PerformanceTarget(performance_target)
     settings.max_concurrent_runs = 1
     if timeout is not None:
         _mirror_timeout(settings, timeout)

@@ -44,7 +44,8 @@ Find the thing you want to do, then follow the link. Each recipe is a code block
 | Run several jobs at the same time in one test | [Run jobs side by side](runs.md#run-jobs-side-by-side) |
 | Stop a streaming job after a fixed time and still get its result | [Stop a run that does not end](runs.md#stop-a-run-that-does-not-end) |
 | Stay under a serverless quota | [Cap the number of active runs](runs.md#cap-the-number-of-active-runs) |
-| Make a run faster | [Speed up a run](compute.md#speed-up-a-run) |
+| Make the whole suite faster | [Speed and cost](../speed.md) |
+| Choose fast start-up or fewer DBUs | [Choose the performance mode](compute.md#choose-the-performance-mode) |
 
 ### Task types
 
@@ -69,7 +70,8 @@ Find the thing you want to do, then follow the link. Each recipe is a code block
 | Goal | Recipe |
 | --- | --- |
 | Give each test its own schema | [Give each test its own schema](data.md#give-each-test-its-own-schema) |
-| Seed tables or files before the job runs | [Seed data with a setup task](data.md#seed-data-with-a-setup-task) |
+| Create the fixtures every test reads, once per session | [Seed once for the whole session](data.md#seed-once-for-the-whole-session) |
+| Seed tables or files before one test's job runs | [Seed data with a setup task](data.md#seed-data-with-a-setup-task) |
 | Clean up files or tables outside the test schema | [Clean up with a teardown task](data.md#clean-up-with-a-teardown-task) |
 | Assert on what the teardown removes | [Tear down when the job closes](data.md#tear-down-when-the-job-closes) |
 | Seed with SQL or a notebook file instead of a function | [Seed with SQL statements or a notebook file](data.md#seed-with-sql-statements-or-a-notebook-file) |

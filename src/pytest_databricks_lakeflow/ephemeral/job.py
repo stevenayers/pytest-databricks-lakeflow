@@ -1034,16 +1034,38 @@ class EphemeralJob(EphemeralResource):
         log.warning(f"The teardown run {result.run_id} of job {self.job_id} {outcome}: {result.run_url}")
 
     def _wait_for_teardown(self) -> JobRun:
-        item = session.current_item()
         # A run that closing the job cancelled may still be ending, and the copy allows one run at a time, so the
         # teardown run queues behind it rather than being skipped.
-        queue = jobs.QueueSettings(enabled=True)
-        run_id, first = self._start_run(item, self.params, [TEARDOWN_KEY], queue=queue)
-        run, outputs = self._wait(run_id, self.lakeflow.timeout, item, first, time.monotonic())
-        self._forget(run_id)
-        result = self._job_run(run, outputs)
-        log.info(f"Teardown run {run_id} of job {self.job_id} finished {result.result_state}: {result.run_url}")
+        result = self._run_alone(TEARDOWN_KEY, queue=jobs.QueueSettings(enabled=True))
+        log.info(f"Teardown run {result.run_id} of job {self.job_id} finished {result.result_state}: {result.run_url}")
         return result
+
+    def _run_alone(
+        self, task_key: str, *, timeout: timedelta | None = None, queue: jobs.QueueSettings | None = None
+    ) -> JobRun:
+        """Run one task of the job on its own, with the job's `params`, and wait for it.
+
+        For the teardown task of `teardown_at="close"` and for the steps of `Lakeflow.once()`. The run is neither
+        appended to `runs` nor passed to `run_finished`, and nothing is recorded on the test.
+
+        Args:
+            task_key: The task to run, which `only` names alone.
+            timeout: How long to wait, by default `Lakeflow`'s `timeout`.
+            queue: The run's queue setting, or `None` for the job's own.
+
+        Returns:
+            The run's outcome.
+
+        Raises:
+            LakeflowTimeout: If the run did not finish in time. It is cancelled first.
+        """
+        item = session.current_item()
+        if timeout is None:
+            timeout = self.lakeflow.timeout
+        run_id, first = self._start_run(item, self.params, [task_key], queue=queue, timeout=timeout)
+        run, outputs = self._wait(run_id, timeout, item, first, time.monotonic())
+        self._forget(run_id)
+        return self._job_run(run, outputs)
 
     def _close_pipelines(self, failed: bool) -> None:
         if self.job_id is None:
@@ -1217,8 +1239,8 @@ class RunHandle:
     def _check_performance_target(self, result: JobRun) -> None:
         """Warn when the run asked for `PERFORMANCE_OPTIMIZED`, from `run()` or the job's settings, and used `STANDARD`.
 
-        The job's settings say `PERFORMANCE_OPTIMIZED` when `Lakeflow`'s `performance_optimized` is set, or when the
-        template or `modify_settings` chose it.
+        The job's settings say `PERFORMANCE_OPTIMIZED` when `Lakeflow`'s `performance_target` is, as it is by default,
+        or when the template or `modify_settings` chose it.
         """
         requested = self._performance_target
         if requested is None:
