@@ -275,7 +275,7 @@ def test_b(lakeflow):
         result = run_tests(pytester, source)
         result.assert_outcomes(passed=2, warnings=1)
         result.stdout.fnmatch_lines(
-            ["*databricks-connect is not installed, so setup= and teardown= run as tasks*[connect]*Python 3.12*"]
+            ["*databricks-connect is not installed, so setup= and teardown= run as tasks*no release * Python 3.13*"],
         )
         assert task_keys(fake_ws, 0)[0] == SETUP_TASK
         assert task_keys(fake_ws, 1)[-1] == TEARDOWN_TASK

@@ -65,14 +65,12 @@ LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<cat
 
 `--dist loadgroup` sends the tests of each `xdist_group` to one worker, so a run that a module-scoped fixture shares between them happens once rather than once per worker. `LAKEFLOW_CATALOG` is the catalog the tests create schemas in. `LAKEFLOW_WAREHOUSE_ID` is the id of a SQL warehouse the `sql` bundle runs its queries on, the `alerts` bundle evaluates its alerts on and the `dbt` bundle's dbt task runs on, passed as the bundle variable `warehouse_id`; `test_sql.py`, `test_alerts.py` and `test_dbt.py` skip when it is unset. Without `LAKEFLOW_INTEGRATION=1`, `tests/integration/conftest.py` skips every test in the directory, so a plain `uv run pytest` is safe. The first test of each module deploys its bundle to the `test` target; for the example bundle that also builds the example wheel with `uv build --wheel`. Pass `--lakeflow-destroy` to remove the deployments at the end, and `--lakeflow-keep` to inspect the jobs afterwards.
 
-The setup and teardown tests run in both step modes, `task` and `connect`. The `connect` cases skip unless databricks-connect can be imported, which needs Python 3.12 and the `connect` extra:
+The setup and teardown tests run in both step modes, `task` and `connect`. databricks-connect is a dependency below Python 3.13, so the usual environment runs both, with databricks-connect 16.1, the last release for Python 3.11. To run the `connect` cases on Python 3.12 with the newest release, as on serverless, use a second environment so that `.venv` stays as it is:
 
 ```bash
-LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> \
-    uv run --python 3.12 --extra connect pytest tests/integration -n 4 -k "setup or teardown or once" --lakeflow-sweep
+LAKEFLOW_INTEGRATION=1 DATABRICKS_CONFIG_PROFILE=<profile> LAKEFLOW_CATALOG=<catalog> UV_PROJECT_ENVIRONMENT=.venv-312 \
+    uv run --python 3.12 pytest tests/integration -n 4 -k "setup or teardown or once" --lakeflow-sweep
 ```
-
-`uv run --python 3.12` rebuilds `.venv` on Python 3.12. To keep the usual environment, point this run at another one with `UV_PROJECT_ENVIRONMENT=.venv-connect`.
 
 `tests/integration/test_classic.py` is skipped unless `LAKEFLOW_CLASSIC=1` is set as well. Its bundle runs on a classic job cluster (`Standard_D4s_v5`, `SINGLE_USER` access mode, no cluster policy), which takes five to ten minutes to start, and it checks `single_node=True` against the Jobs API and the cluster's reported `spark.master`. Run it on its own when you change the compute overrides:
 

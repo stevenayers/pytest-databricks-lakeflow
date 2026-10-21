@@ -531,14 +531,16 @@ def test_only_resolves_the_result_state_of_a_task_left_out(lakeflow: Lakeflow) -
         assert load["upstream"] == "disabled", "only checks task values; the platform resolves other references"
 
 
-# The two ways a setup= or teardown= step runs. Over Connect needs databricks-connect, which installs on Python 3.12:
-# `uv run --python 3.12 --extra connect pytest ...`.
+# The two ways a setup= or teardown= step runs. Over Connect needs databricks-connect, which no release installs on
+# Python 3.13 or later.
 STEP_MODES = [
     pytest.param(True, id="task"),
     pytest.param(
         False,
         id="connect",
-        marks=pytest.mark.skipif(not steps.connect_available(), reason="needs databricks-connect, on Python 3.12"),
+        marks=pytest.mark.skipif(
+            not steps.connect_available(), reason="needs databricks-connect, which installs below Python 3.13"
+        ),
     ),
 ]
 
@@ -763,7 +765,7 @@ def test_failed_setup_task_is_named_first(lakeflow: Lakeflow) -> None:
         assert run.teardown is not None and run.teardown.succeeded, run.teardown
 
 
-@pytest.mark.skipif(not steps.connect_available(), reason="needs databricks-connect, on Python 3.12")
+@pytest.mark.skipif(not steps.connect_available(), reason="needs databricks-connect, which installs below Python 3.13")
 def test_failed_setup_over_connect_starts_no_run(lakeflow: Lakeflow) -> None:
     with lakeflow.job("my_example_job", setup=broken_setup, run_as_task=False) as job:
         with pytest.raises(LakeflowError, match="setup= of 'my_example_job' failed before the run started: "):

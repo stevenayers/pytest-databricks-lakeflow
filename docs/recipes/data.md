@@ -165,13 +165,13 @@ A step runs as a notebook task of the copy, on the [helper compute](../task-test
 
 - It is a `Path` to a notebook file.
 - `run_as_task=True` is passed to `job()`, `task()` or `once()`, or set on `Lakeflow` for every call.
-- databricks-connect cannot be imported. It installs only on Python 3.12, with the `connect` extra, see [Install](../getting-started.md#install). The plugin then warns once per session:
+- databricks-connect cannot be imported. The plugin brings it on Python 3.11 and 3.12, but no release installs on Python 3.13 or later, see [Install](../getting-started.md#install). The plugin then warns once per session:
 
 ```text
 UserWarning: databricks-connect is not installed, so setup= and teardown= run as tasks, about 30 seconds each.
-Install pytest-databricks-lakeflow[connect] on Python 3.12, the only Python that current databricks-connect releases
-support, to run them over Databricks Connect in a few seconds, or pass run_as_task=True to Lakeflow to choose tasks
-and silence this warning.
+pytest-databricks-lakeflow installs it on Python 3.11 and 3.12, but no release installs on Python 3.13 or later.
+Run the tests on Python 3.12 to run steps over Databricks Connect in a few seconds, or pass run_as_task=True to
+Lakeflow to choose tasks and silence this warning.
 ```
 
 As a task, the setup task `__pytest_setup` runs first: every task that has no `depends_on`, stubs included, comes to depend on it, and `run(only=...)` always includes it. The teardown task `__pytest_teardown` depends on every task that nothing else depends on, with `run_if: ALL_DONE`. A failed setup task leaves the job's tasks `UPSTREAM_FAILED`, so the run fails and `repr(run)` names it first, as `setup: <error>`. `run.setup.task` and `run.teardown.task` are the tasks' `TaskRun`s, also in `run.injected_tasks`.
