@@ -36,7 +36,23 @@ The Jobs API accepts undeclared parameters silently, so a typo would pass unnoti
 
 ## Why does every test take minutes?
 
-A serverless task starts in about 30 seconds before it runs its first line, and a test that creates, runs and deletes a copy pays that for each of its tasks, the plugin's setup, teardown, stub and probe tasks included. Two habits make it much worse: creating the same fixtures inside every copy with `setup=`, which costs a task start plus the statements per test and stops the tests running at the same time, and running the tests one after another. Create shared fixtures once with [`lakeflow.once()`](recipes/data.md#seed-once-for-the-whole-session) and run with `pytest -n 4`. [Speed and cost](speed.md) shows where the time goes and what each change saves.
+A serverless task starts in about 30 seconds before it runs its first line, and a test that creates, runs and deletes a copy pays that for each of its tasks, the plugin's stub and probe tasks included. Setup and teardown steps pay it too when they run as tasks, which they do without databricks-connect, see [Why do my setup and teardown run as tasks?](#why-do-my-setup-and-teardown-run-as-tasks). Two habits make it much worse: creating the same fixtures inside every copy with `setup=`, which runs the statements once per test and stops the tests running at the same time, and running the tests one after another. Create shared fixtures once with [`lakeflow.once()`](recipes/data.md#seed-once-for-the-whole-session) and run with `pytest -n 4`. [Speed and cost](speed.md) shows where the time goes and what each change saves.
+
+## Why do my setup and teardown run as tasks?
+
+By default `setup=`, `teardown=` and `once()` steps run from the test process over Databricks Connect, in a few seconds. They run as tasks of the job, about 30 seconds each, when databricks-connect cannot be imported, and the plugin then warns once per session:
+
+```text
+UserWarning: databricks-connect is not installed, so setup= and teardown= run as tasks, about 30 seconds each.
+```
+
+Install the `connect` extra on Python 3.12, the only Python that current databricks-connect releases support:
+
+```bash
+uv add --dev "pytest-databricks-lakeflow[connect]"
+```
+
+To keep tasks on purpose, pass `Lakeflow(run_as_task=True)`, which also silences the warning. A step that is a notebook file always runs as a task. See [Run a step as a task](recipes/data.md#run-a-step-as-a-task).
 
 ## Why is every run 3 to 4 minutes slower than in the UI?
 
@@ -57,7 +73,7 @@ Nothing in the test can change that; ask a workspace admin about the policy.
 
 ## What does the plugin leave in my workspace?
 
-The deployed test target, the helper notebooks under `helpers_path` with any setup, teardown and debug notebooks and inlined saved query files, and the jobs, pipeline copies and schemas kept by the keep rules. A kept job's tags and description say which test, run, person and commit made it. See [What is left in the workspace](how-it-works.md#what-is-left-in-the-workspace).
+The deployed test target, the helper notebooks under `helpers_path` with the notebooks of any setup and teardown steps that ran as tasks, the debug notebooks and inlined saved query files, and the jobs, pipeline copies and schemas kept by the keep rules. A kept job's tags and description say which test, run, person and commit made it. See [What is left in the workspace](how-it-works.md#what-is-left-in-the-workspace).
 
 ## Setup fails with "Bundle target 'test' deploys to ... but the workspace client is for ..."
 
@@ -127,4 +143,4 @@ Run with `--lakeflow-live` to print each task's change of state to the terminal 
 
 ## Which clouds and runtimes are supported?
 
-The plugin uses only the Jobs API, the Pipelines API, the Workspace API, the Unity Catalog schemas API and the CLI, which are the same on AWS, Azure and GCP. It was developed and tested against an Azure workspace with serverless jobs and classic job clusters in dedicated access mode.
+The plugin uses only the Jobs API, the Pipelines API, the Workspace API, the Unity Catalog schemas API, the Files API, Databricks Connect and the CLI, which are the same on AWS, Azure and GCP. It was developed and tested against an Azure workspace with serverless jobs and classic job clusters in dedicated access mode. It runs on Python 3.11 or later; steps over Databricks Connect need Python 3.12, see [Why do my setup and teardown run as tasks?](#why-do-my-setup-and-teardown-run-as-tasks).

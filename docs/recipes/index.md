@@ -71,11 +71,12 @@ Find the thing you want to do, then follow the link. Each recipe is a code block
 | --- | --- |
 | Give each test its own schema | [Give each test its own schema](data.md#give-each-test-its-own-schema) |
 | Create the fixtures every test reads, once per session | [Seed once for the whole session](data.md#seed-once-for-the-whole-session) |
-| Seed tables or files before one test's job runs | [Seed data with a setup task](data.md#seed-data-with-a-setup-task) |
-| Clean up files or tables outside the test schema | [Clean up with a teardown task](data.md#clean-up-with-a-teardown-task) |
+| Seed tables or files before one test's job runs | [Seed data with a setup step](data.md#seed-data-with-a-setup-step) |
+| Clean up files or tables outside the test schema | [Clean up with a teardown step](data.md#clean-up-with-a-teardown-step) |
 | Assert on what the teardown removes | [Tear down when the job closes](data.md#tear-down-when-the-job-closes) |
 | Seed with SQL or a notebook file instead of a function | [Seed with SQL statements or a notebook file](data.md#seed-with-sql-statements-or-a-notebook-file) |
-| Seed with Databricks Connect or pytester fixtures | [Seed from the test process](data.md#seed-from-the-test-process) |
+| Run a setup or teardown step as a task of the job | [Run a step as a task](data.md#run-a-step-as-a-task) |
+| Seed with pytester fixtures | [Seed from the test process](data.md#seed-from-the-test-process) |
 
 ### Debug a failure
 

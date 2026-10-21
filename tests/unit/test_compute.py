@@ -372,7 +372,7 @@ class TestUnreachedDependencies:
             pytest.param(None, 'lakeflow.task("my_job.extract", {})', ["extract"], id="task"),
             pytest.param(
                 None,
-                'lakeflow.job("my_job", setup=["SELECT 1"], teardown=["SELECT 2"], {})',
+                'lakeflow.job("my_job", setup=["SELECT 1"], teardown=["SELECT 2"], run_as_task=True, {})',
                 ["extract", "transform"],
                 id="setup-and-teardown",
             ),

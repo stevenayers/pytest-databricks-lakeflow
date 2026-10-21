@@ -10,7 +10,7 @@ from databricks.sdk.service import jobs
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.dbt import DbtArtifacts
-    from pytest_databricks_lakeflow.results.models import JobRun, TaskError, TaskRun, Timing
+    from pytest_databricks_lakeflow.results.models import JobRun, StepResult, TaskError, TaskRun, Timing
 
 
 def serialise_with_files(run: JobRun) -> tuple[dict[str, Any], dict[str, str]]:
@@ -41,6 +41,22 @@ def _serialise_run(run: JobRun, files: dict[str, str]) -> dict[str, Any]:
         "timing": _serialise_timing(run.timing),
         "effective_performance_target": run.effective_performance_target,
         "trigger_type": run.trigger_type,
+        "setup": _serialise_step(run.setup),
+        "teardown": _serialise_step(run.teardown),
+    }
+
+
+def _serialise_step(step: StepResult | None) -> dict[str, Any] | None:
+    if step is None:
+        return None
+    return {
+        "role": step.role,
+        "ran_as": step.ran_as,
+        "succeeded": step.succeeded,
+        "output": step.output,
+        "error": _serialise_error(step.error),
+        "duration_seconds": step.duration.total_seconds(),
+        "task_key": step.task.task_key if step.task is not None else None,
     }
 
 

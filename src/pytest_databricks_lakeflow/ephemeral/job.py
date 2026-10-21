@@ -9,7 +9,7 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -20,7 +20,7 @@ from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import deployment, helpers, session, workspace_api
+from pytest_databricks_lakeflow import deployment, helpers, session, steps, workspace_api
 from pytest_databricks_lakeflow.ephemeral.base import EphemeralResource
 from pytest_databricks_lakeflow.ephemeral.outcome import (
     DEBUG_NOTEBOOKS,
@@ -42,7 +42,7 @@ from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowTimeout
 from pytest_databricks_lakeflow.limits import TIMEOUT_GRACE_SECONDS, WIDGET_LIMIT_BYTES
 from pytest_databricks_lakeflow.naming import DEBUG_FOLDER, PREFIX, TEARDOWN_KEY
 from pytest_databricks_lakeflow.results.build import build_job_run, fetch_outputs, has_output
-from pytest_databricks_lakeflow.results.models import DebugNotebook, JobRun, task_outcome
+from pytest_databricks_lakeflow.results.models import DebugNotebook, JobRun, StepResult, step_outcome
 from pytest_databricks_lakeflow.settings.compute import check_compute, unreached_notebook_tasks
 from pytest_databricks_lakeflow.settings.lifecycle import name_lifecycle_params, rewire_teardown
 from pytest_databricks_lakeflow.settings.params import check_params, pipeline_params
@@ -66,6 +66,7 @@ from pytest_databricks_lakeflow.workspace_api import GRANT_ROLE, cancel_run
 
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.client import Lakeflow
+    from pytest_databricks_lakeflow.steps import LocalStep
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 ROLE_FIX = f"{GRANT_ROLE}, or leave run_as out to run the copy as yourself."
@@ -114,9 +115,11 @@ class EphemeralJob(EphemeralResource):
         runs: The outcome of each finished run, in order. The teardown run that closing the job starts is not one.
         query_files: The SQL text of each saved query that `saved_queries="inline"` inlined, by the workspace path of
             its file. They are uploaded just before the job is created and deleted with it, or kept with it.
-        teardown_run: The run of the teardown task alone that closing the job started, with `teardown_at="close"`,
-            once it has finished. Its `teardown` is the task's outcome. `None` until then, and when the job never
-            ran, `keep` or `--lakeflow-keep` kept the job, or the run did not finish.
+        local_steps: The `setup=` and `teardown=` steps that run over Databricks Connect, by role, rather than as
+            tasks of the copy.
+        teardown: The outcome of the teardown that ran when the job closed, with `teardown_at="close"`. `None` until
+            then, and when the job never ran, `keep` or `--lakeflow-keep` kept the job, or a teardown task's run did
+            not finish.
     """
 
     def __init__(
@@ -132,6 +135,7 @@ class EphemeralJob(EphemeralResource):
         pipeline_copies: Sequence[EphemeralPipeline] = (),
         teardown_at: TeardownAt = "run",
         query_files: Mapping[str, str] | None = None,
+        local_steps: Mapping[str, LocalStep] | None = None,
     ) -> None:
         super().__init__(lakeflow)
         self.job_key = job_key
@@ -148,7 +152,8 @@ class EphemeralJob(EphemeralResource):
         self._copy_pipeline: Callable[[str], EphemeralPipeline] | None = None
         self.job_id: int | None = None
         self.runs: list[JobRun] = []
-        self.teardown_run: JobRun | None = None
+        self.local_steps = dict(local_steps or {})
+        self.teardown: StepResult | None = None
         self.ran = False
         self._run_urls: dict[int, str] = {}
         self._active: dict[int, pytest.Item] = {}
@@ -501,6 +506,11 @@ class EphemeralJob(EphemeralResource):
         selected = self._selection(only)
         if timeout is not None:
             self._raise_timeout(timeout)
+        setup = None
+        if "setup" in self.local_steps:
+            setup = self._run_local("setup", merged)
+            if not setup.succeeded:
+                raise LakeflowError(f"setup= of {self.job_key!r} failed before the run started: {step_outcome(setup)}")
         run_id, first = self._start_run(
             item,
             merged,
@@ -511,7 +521,9 @@ class EphemeralJob(EphemeralResource):
             timeout=timeout,
             dbt_commands=commands,
         )
-        return RunHandle(self, run_id, item, first, timeout, stream=stream, performance_target=target)
+        return RunHandle(
+            self, run_id, item, first, timeout, stream=stream, performance_target=target, setup=setup, params=merged
+        )
 
     def _check_dbt_commands_allowed(self) -> None:
         # run_now refuses dbt_commands, a legacy run parameter, on a job that declares job parameters, with
@@ -528,7 +540,7 @@ class EphemeralJob(EphemeralResource):
     def _selection(self, only: Sequence[str] | None) -> list[str] | None:
         """The `only` of a run: what `only` selects and the injected tasks it needs, less a teardown left to close."""
         exclude: set[str] = set()
-        if self.teardown_at == "close":
+        if self.teardown_at == "close" and "teardown" not in self.local_steps:
             exclude.add(TEARDOWN_KEY)
         if only:
             check_disabled(self.settings, only)
@@ -1011,12 +1023,20 @@ class EphemeralJob(EphemeralResource):
                 self._close_pipelines(failed)
 
     def _run_teardown_alone(self) -> None:
-        """Run the teardown task alone for `teardown_at="close"`, setting `teardown_run`. Errors are only logged."""
+        """Run the teardown once for `teardown_at="close"`, setting `teardown`. Errors are only logged."""
         if self.teardown_at != "close" or self.job_id is None or not self.ran:
             return
         # As for Lakeflow.schema(), only keep skips the clean-up: a job kept because its test failed is still cleaned.
         if session.current().keeps(self.lakeflow.keep, keep_failed=False, failed=False):
-            log.warning(f"Not running the teardown task of job {self.job_id}, which is kept with what its runs wrote")
+            log.warning(f"Not running the teardown of job {self.job_id}, which is kept with what its runs wrote")
+            return
+        if "teardown" in self.local_steps:
+            self.teardown = self._run_local("teardown", self.params)
+            if not self.teardown.succeeded:
+                log.warning(
+                    f"The teardown step of job {self.job_id} from {self.job_key!r} failed: "
+                    f"{step_outcome(self.teardown)}"
+                )
             return
         try:
             result = self._wait_for_teardown()
@@ -1024,14 +1044,30 @@ class EphemeralJob(EphemeralResource):
         except Exception as e:
             log.warning(f"The teardown run of job {self.job_id} from {self.job_key!r} did not finish: {e}")
             return
-        self.teardown_run = result
-        teardown = result.teardown
-        if teardown is not None and teardown.succeeded:
+        self.teardown = result.teardown
+        if self.teardown is not None and self.teardown.succeeded:
             return
         outcome = f"ended {result.result_state} without running the teardown task"
-        if teardown is not None:
-            outcome = f"failed: {task_outcome(teardown)}"
+        if self.teardown is not None:
+            outcome = f"failed: {step_outcome(self.teardown)}"
         log.warning(f"The teardown run {result.run_id} of job {self.job_id} {outcome}: {result.run_url}")
+
+    def _run_local(self, role: str, params: Mapping[str, str]) -> StepResult:
+        """Run the `setup=` or `teardown=` step over Databricks Connect with the run's job parameters."""
+        step = self.local_steps[role]
+        values = steps.step_params(self.settings, params)
+        spark = steps.session_for(self.lakeflow)
+        result = steps.run_local(spark, self.lakeflow.ws.dbutils, step, values)
+        log.info(f"The {role} step of job {self.job_id} ran over Databricks Connect in {result.duration}")
+        return result
+
+    def _with_local_steps(self, result: JobRun, setup: StepResult | None, params: Mapping[str, str]) -> JobRun:
+        """Add the steps that ran over Connect to a finished run: its setup, and its teardown, run now."""
+        if setup is not None:
+            result = replace(result, setup=setup)
+        if "teardown" in self.local_steps and self.teardown_at == "run":
+            result = replace(result, teardown=self._run_local("teardown", params))
+        return result
 
     def _wait_for_teardown(self) -> JobRun:
         # A run that closing the job cancelled may still be ending, and the copy allows one run at a time, so the
@@ -1156,6 +1192,8 @@ class RunHandle:
         *,
         stream: bool | None = None,
         performance_target: jobs.PerformanceTarget | None = None,
+        setup: StepResult | None = None,
+        params: Mapping[str, str] | None = None,
     ) -> None:
         self.job = job
         self.run_id = run_id
@@ -1167,6 +1205,9 @@ class RunHandle:
         self._stream = stream
         # From run(performance_target=...); None asks for the job's own.
         self._performance_target = performance_target
+        # The setup that ran over Connect before the run started, and the run's job parameters for its teardown.
+        self._setup = setup
+        self._params = dict(params or {})
         self._result: JobRun | None = None
 
     @property
@@ -1219,7 +1260,7 @@ class RunHandle:
         self._first = None
         run, outputs = job._wait(self.run_id, timeout, self._item, first, self._first_at, stop_after, stream)
         job._forget(self.run_id)
-        result = job._job_run(run, outputs)
+        result = job._with_local_steps(job._job_run(run, outputs), self._setup, self._params)
         self._result = result
         job.runs.append(result)
         # Held on the test only for --lakeflow-report-dir, because a run can carry megabytes of logs and notebooks.
@@ -1307,7 +1348,10 @@ def _warn_on_failed_teardown(result: JobRun) -> None:
     teardown = result.teardown
     if teardown is None or teardown.succeeded:
         return
-    log.warning(f"The teardown task of run {result.run_id} failed: {task_outcome(teardown)} {teardown.run_url}")
+    if teardown.task is None:
+        log.warning(f"The teardown step of run {result.run_id} failed: {step_outcome(teardown)}")
+        return
+    log.warning(f"The teardown task of run {result.run_id} failed: {step_outcome(teardown)} {teardown.task.run_url}")
 
 
 def _summary_line(notebook: DebugNotebook, item: pytest.Item | None, cut: list[str]) -> str:

@@ -15,7 +15,7 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest. Each t
 - **The deployed jobs are never run.** Every test runs its own copy, named and tagged after the test, with schedules, triggers, notifications and `run_as` removed. Copies run in parallel and are deleted when the test ends, unless it failed.
 - **Results you can assert on.** `run.task("transform")` gives the task's state, output, logs, error, resolved parameters, task values, SQL rows, pipeline update, dbt artefacts and what a failed notebook printed.
 - **One task at a time.** Task values are not exposed by the Jobs API, so `lakeflow.task("job.task")` runs a single task between a stub task that sets the upstream values you choose and a probe task that reads the values it set.
-- **Test data without a seed task.** `lakeflow.once()` creates the fixtures every test reads one time per session, however many tests and xdist workers there are, and tears them down at the end. `setup=` and `teardown=` run a plain function with the real `spark` and `dbutils`, a list of SQL statements or a notebook file as the first and last tasks of one copy, for data one test owns. `lakeflow.schema()` gives each test a temporary schema.
+- **Test data without a seed task.** `lakeflow.once()` creates the fixtures every test reads one time per session, however many tests and xdist workers there are, and tears them down at the end. `setup=` and `teardown=` run a function with `spark` and `dbutils`, or a list of SQL statements, before and after each run of one copy, for data one test owns. By default they run from your machine over Databricks Connect, in a few seconds; a notebook file, or `run_as_task=True`, runs as a task of the copy instead. `lakeflow.schema()` gives each test a temporary schema.
 - **Pipelines too.** `pipelines="copy"` points a job's pipeline tasks at copies that publish to the test's schema, and `lakeflow.pipeline()` copies one pipeline on its own.
 - **Failures explain themselves.** A failed assertion names the failing tasks with their errors and links to the run. The job is kept for you to open, `--lakeflow-debug-notebook` writes a notebook that replays the failed task, and `--lakeflow-report-dir` keeps every run's output as a CI artefact.
 - **Wiring checks without a run.** `lakeflow.check("my_job")` lists the mistakes that `bundle validate` passes, such as an undeclared `{{job.parameters.x}}`, and `pytest --lakeflow-check` collects one check per bundle job.
@@ -25,10 +25,10 @@ Test the Lakeflow Jobs in your Databricks Asset Bundle with plain pytest. Each t
 You need Python 3.11 or later, the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) v1.7.0 or later on `PATH`, credentials that both the CLI and the SDK can use (a `~/.databrickscfg` profile or the `DATABRICKS_*` variables), a workspace with serverless jobs, and a [Databricks Asset Bundle](https://docs.databricks.com/aws/en/dev-tools/bundles/) with at least one job.
 
 ```bash
-uv add --dev pytest-databricks-lakeflow
+uv add --dev "pytest-databricks-lakeflow[connect]"
 ```
 
-Or `pip install pytest-databricks-lakeflow`. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps the test deployment apart from your `dev` deployment:
+Or `pip install "pytest-databricks-lakeflow[connect]"`. The `connect` extra installs databricks-connect, which runs `setup=`, `teardown=` and `once()` steps from your machine in a few seconds rather than as 30 second tasks. Current databricks-connect releases install only on Python 3.12, so on any other Python the extra installs nothing and the steps run as tasks. Add a `test` target to `databricks.yml`. Development mode pauses schedules, and the separate `root_path` keeps the test deployment apart from your `dev` deployment:
 
 ```yaml
 targets:
@@ -89,7 +89,7 @@ def lakeflow() -> Lakeflow:
     return Lakeflow(target="test", catalog="dev_sandbox", timeout=timedelta(minutes=20))
 ```
 
-Fixtures that every test reads belong in `lakeflow.once()`, in a session fixture, not in each test's job: a setup task inside every copy costs a task start plus the statements per test and stops the tests running in parallel, because every copy recreates the same tables. `once()` runs the step one time for the session, in every xdist worker, and its teardown when the session ends:
+Fixtures that every test reads belong in `lakeflow.once()`, in a session fixture, not in each test's job: a setup in every copy runs the same statements once per test and stops the tests running in parallel, because every copy recreates the same tables. `once()` runs the step one time for the session, whatever the number of xdist workers, and its teardown when the session ends:
 
 ```python
 SEED = ["CREATE SCHEMA IF NOT EXISTS ${schema}", "CREATE OR REPLACE TABLE ${schema}.orders AS SELECT 1 AS id"]

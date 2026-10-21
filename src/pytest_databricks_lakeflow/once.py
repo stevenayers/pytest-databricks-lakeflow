@@ -1,9 +1,11 @@
 """Session steps: `Lakeflow.once()`, a setup run once per session and its teardown at session end.
 
-A step is one serverless job holding a `__pytest_setup` task, a `__pytest_teardown` task or both, named after the step.
-The first caller in the session creates it and runs the setup task alone; every later caller, in any xdist worker,
-waits for that run and reads its outcome. The teardown task runs alone when the session ends, on the xdist controller
-when there is one, and the job is deleted unless the keep rules keep it.
+By default a step runs over Databricks Connect from the process that first asks for it, and no job is made; its
+teardown is kept as a description, SQL statements or a function's source, for the session's end. As a task, a step is
+one serverless job holding a `__pytest_setup` task, a `__pytest_teardown` task or both, named after the step, whose
+setup task the first caller runs alone. Either way every later caller, in any xdist worker, waits for the setup and
+reads its outcome. The teardown runs when the session ends, on the xdist controller when there is one, and a job is
+deleted unless the keep rules keep it.
 """
 
 from __future__ import annotations
@@ -22,14 +24,14 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import deployment, helpers, session, workspace_api
+from pytest_databricks_lakeflow import deployment, helpers, session, steps, workspace_api
 from pytest_databricks_lakeflow.ephemeral.job import EphemeralJob
 from pytest_databricks_lakeflow.ephemeral.polling import poll_seconds, terminated
 from pytest_databricks_lakeflow.errors import LakeflowError
 from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.naming import PREFIX, SETUP_KEY, TEARDOWN_KEY
 from pytest_databricks_lakeflow.results.build import build_job_run
-from pytest_databricks_lakeflow.results.models import JobRun, task_outcome
+from pytest_databricks_lakeflow.results.models import StepResult, step_outcome
 from pytest_databricks_lakeflow.settings.lifecycle import inject_lifecycle
 from pytest_databricks_lakeflow.settings.template import sanitise
 
@@ -51,18 +53,13 @@ def run_once(
     teardown: LifecycleStep | None,
     params: Mapping[str, str] | None,
     timeout: timedelta | None,
-) -> JobRun | None:
+    run_as_task: bool,
+) -> StepResult | None:
     """Run `setup` once in this session and register `teardown` for its end. See `Lakeflow.once()`."""
     if not isinstance(name, str) or not name.strip():
         raise ValueError(f"once() needs a name for the step, got {name!r}")
     if setup is None and teardown is None:
         raise ValueError(f"once({name!r}) needs setup=, teardown= or both")
-    if lakeflow.helpers_compute:
-        raise ValueError(
-            f"once({name!r}) runs on serverless, but helpers_compute is {lakeflow.helpers_compute!r}, a job cluster "
-            "of a bundle job, which a session step does not have. Pass existing_cluster_id to run it on a running "
-            "cluster, or derive a Lakeflow without helpers_compute."
-        )
     params = dict(params or {})
     reserved = sorted(key for key in params if key.startswith(PREFIX))
     if reserved:
@@ -71,22 +68,47 @@ def run_once(
     current = session.current()
     if timeout is None:
         timeout = lakeflow.timeout
+    given = {role: step for role, step in (("setup", setup), ("teardown", teardown)) if step is not None}
+    # One way for both steps: a notebook file needs a job, and then the other step runs as its task too.
+    as_task = any(steps.runs_as_task(step, run_as_task) for step in given.values())
     notebooks: dict[str, tuple[str, frozenset[str]]] = {}
-    for role, step in (("setup", setup), ("teardown", teardown)):
-        if step is not None:
+    local: dict[str, steps.LocalStep] = {}
+    spec = None
+    if as_task:
+        if lakeflow.helpers_compute:
+            raise ValueError(
+                f"once({name!r}) runs on serverless, but helpers_compute is {lakeflow.helpers_compute!r}, a job "
+                "cluster of a bundle job, which a session step does not have. Pass existing_cluster_id to run it on "
+                "a running cluster, or derive a Lakeflow without helpers_compute."
+            )
+        for role, step in given.items():
             notebooks[role] = helpers.lifecycle_source(step, current.rootpath, role)
-    for role, (_, names) in notebooks.items():
-        unknown = sorted(set(names) - set(params))
+        names = {role: placeholders for role, (_, placeholders) in notebooks.items()}
+        keys = {role: source for role, (source, _) in notebooks.items()}
+    else:
+        for role, step in given.items():
+            local[role] = steps.local_step(step, role)
+        # Checked now: the teardown may run in another process, from this description.
+        if "teardown" in local:
+            spec = steps.step_spec(local["teardown"])
+        names = {role: step.names for role, step in local.items()}
+        keys = {role: _step_key(step) for role, step in local.items()}
+    for role, placeholders in names.items():
+        unknown = sorted(set(placeholders) - set(params))
         if unknown:
             raise LakeflowError(
                 f"{role}= of once({name!r}) reads {unknown}, which params does not hold. Pass them in params, or "
                 "write $$ for a literal dollar."
             )
-    digest = _digest(name, notebooks, params)
+    digest = _digest(name, keys, params)
     record = current.once_records.get(digest)
     if record is None:
         path = None if current.state_dir is None else current.state_dir / f"once_{digest}.json"
-        produce = partial(_produce, lakeflow, item, name, notebooks, params, timeout)
+        if as_task:
+            produce = partial(_produce, lakeflow, item, name, notebooks, params, timeout)
+        else:
+            current.once_lakeflows[digest] = lakeflow
+            produce = partial(_produce_local, lakeflow, name, digest, local, spec, params)
         try:
             record = session.shared_state(path, produce, f"once({name!r})")
         except Exception as e:
@@ -98,10 +120,50 @@ def run_once(
     return _result(lakeflow, name, record)
 
 
-def _digest(name: str, notebooks: Notebooks, params: Mapping[str, str]) -> str:
-    sources = {role: source for role, (source, _) in notebooks.items()}
-    fields = [name, sources, sorted(params.items())]
+def _digest(name: str, keys: Mapping[str, str], params: Mapping[str, str]) -> str:
+    """Key a step on what every xdist worker sees alike: its name, what each of its steps is, and its parameters."""
+    fields = [name, dict(keys), sorted(params.items())]
     return hashlib.sha256(json.dumps(fields).encode()).hexdigest()[:DIGEST_CHARS]
+
+
+def _step_key(step: steps.LocalStep) -> str:
+    """What a step over Connect is: its statements, or its function's module and name, the same in every worker."""
+    if step.statements is not None:
+        return json.dumps(step.statements)
+    function = step.function
+    return f"{getattr(function, '__module__', '')}.{getattr(function, '__qualname__', repr(function))}"
+
+
+def _produce_local(
+    lakeflow: Lakeflow,
+    name: str,
+    digest: str,
+    local: Mapping[str, steps.LocalStep],
+    spec: Mapping[str, Any] | None,
+    params: dict[str, str],
+) -> dict[str, Any]:
+    """Run the step's setup over Connect and return the record every worker shares, with the teardown to run."""
+    current = session.current()
+    record: dict[str, Any] = {
+        "name": name,
+        "mode": "connect",
+        "digest": digest,
+        "setup": None,
+        "teardown": spec,
+        "params": params,
+        "profile": lakeflow.profile or lakeflow.ws.config.profile,
+        "cluster_id": lakeflow.existing_cluster_id,
+        "keep": current.keeps(lakeflow.keep, keep_failed=False, failed=False),
+    }
+    if "setup" in local:
+        result = steps.run_local(steps.session_for(lakeflow), lakeflow.ws.dbutils, local["setup"], params)
+        if not result.succeeded:
+            raise LakeflowError(f"once({name!r}): the setup step failed: {step_outcome(result)}")
+        record["setup"] = steps.step_record(result)
+        log.info(f"once({name!r}): the setup ran over Databricks Connect in {result.duration}")
+    if spec is not None:
+        current.once_jobs.append(record)
+    return record
 
 
 def _produce(
@@ -124,6 +186,7 @@ def _produce(
     assert job.job_id is not None
     record: dict[str, Any] = {
         "name": name,
+        "mode": "task",
         "job_id": job.job_id,
         "job_url": job.url,
         "run_id": None,
@@ -144,7 +207,7 @@ def _produce(
             job._delete_unless_kept(failed=True)
             outcome = f"ended {result.result_state} without running the setup task"
             if setup is not None:
-                outcome = task_outcome(setup)
+                outcome = step_outcome(setup)
             raise LakeflowError(f"once({name!r}): the setup step failed: {outcome}: {result.run_url}")
         current.once_results[result.run_id] = result
     current.once_jobs.append(record)
@@ -195,8 +258,12 @@ def _on_existing_cluster(settings: jobs.JobSettings, cluster_id: str) -> None:
     settings.environments = None
 
 
-def _result(lakeflow: Lakeflow, name: str, record: Mapping[str, Any]) -> JobRun | None:
-    """The setup run's outcome: the one this process built, or one rebuilt from the Jobs API."""
+def _result(lakeflow: Lakeflow, name: str, record: Mapping[str, Any]) -> StepResult | None:
+    """The setup's outcome: read from the record over Connect, or the setup run's, built here or from the Jobs API."""
+    if record["mode"] == "connect":
+        if record["setup"] is None:
+            return None
+        return steps.step_from_record(record["setup"])
     run_id = record["run_id"]
     if run_id is None:
         return None
@@ -213,7 +280,7 @@ def _result(lakeflow: Lakeflow, name: str, record: Mapping[str, Any]) -> JobRun 
             notebook_export=lakeflow.notebook_export,
         )
         current.once_results[run_id] = result
-    return result
+    return result.setup
 
 
 def finish(state: session.SessionState, write: Callable[[str], None]) -> None:
@@ -227,12 +294,39 @@ def finish(state: session.SessionState, write: Callable[[str], None]) -> None:
         write: Writes one line to the terminal.
     """
     for record in state.once_jobs:
+        if record["mode"] == "connect":
+            _finish_connect(state, record, write)
+            continue
         name, job_id = record["name"], record["job_id"]
         try:
             ws = state.once_clients.get(job_id) or workspace_api.make_workspace_client(record["profile"])
             _finish_one(ws, record, write)
         except Exception as e:
             log.warning(f"once({name!r}): job {job_id} could not be torn down: {type(e).__name__}: {e}")
+
+
+def _finish_connect(state: session.SessionState, record: Mapping[str, Any], write: Callable[[str], None]) -> None:
+    """Run the teardown of a step that ran over Connect, unless keep keeps what it set up. Errors are only logged."""
+    name = record["name"]
+    if record["keep"]:
+        log.warning(f"Not running the teardown of once({name!r}), because keep keeps what it set up")
+        write(f"lakeflow: kept what once({name!r}) set up, without its teardown")
+        return
+    try:
+        lakeflow = state.once_lakeflows.get(record["digest"])
+        if lakeflow is not None:
+            spark, dbutils = steps.session_for(lakeflow), lakeflow.ws.dbutils
+        else:
+            ws = workspace_api.make_workspace_client(record["profile"])
+            spark, dbutils = steps.connect_session(ws, record["cluster_id"]), ws.dbutils
+        result = steps.run_spec(spark, dbutils, "teardown", record["teardown"], record["params"])
+    except Exception as e:
+        log.warning(f"once({name!r}): the teardown could not run: {type(e).__name__}: {e}")
+        return
+    if result.succeeded:
+        log.info(f"once({name!r}): the teardown ran over Databricks Connect in {result.duration}")
+        return
+    log.warning(f"once({name!r}): the teardown step failed: {step_outcome(result)}")
 
 
 def _finish_one(ws: WorkspaceClient, record: Mapping[str, Any], write: Callable[[str], None]) -> None:
@@ -278,6 +372,6 @@ def _run_teardown(ws: WorkspaceClient, record: Mapping[str, Any]) -> bool:
         return True
     outcome = f"ended {result.result_state} without running the teardown task"
     if teardown is not None:
-        outcome = f"failed: {task_outcome(teardown)}"
+        outcome = f"failed: {step_outcome(teardown)}"
     log.warning(f"The teardown run {run_id} of once({name!r}) {outcome}: {result.run_url}")
     return False

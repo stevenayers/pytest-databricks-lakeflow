@@ -27,9 +27,8 @@ def fixtures(lakeflow):
 
 
 def test_a(lakeflow, fixtures):
-    assert fixtures.job_key == "orders"
-    assert fixtures.setup.output_json == {{"statements": 2}}
-    assert fixtures.succeeded is False  # a session step has no task under test
+    assert (fixtures.ran_as, fixtures.output_json) == ("task", {{"statements": 2}})
+    assert fixtures.task.task_key == "__pytest_setup"
 
 
 def test_b(lakeflow, fixtures):
@@ -46,8 +45,8 @@ def test_b(lakeflow):
 """
 WITH_TEARDOWN = """
 def test_a(lakeflow):
-    run = lakeflow.once("orders", setup=["CREATE TABLE t"], teardown=["DROP TABLE t"])
-    assert run.setup.succeeded
+    step = lakeflow.once("orders", setup=["CREATE TABLE t"], teardown=["DROP TABLE t"])
+    assert step.succeeded
 """
 ONCE_CLIENT = """
 
@@ -83,6 +82,12 @@ def queue_teardown(ws: FakeWorkspaceClient, state: str = "SUCCESS") -> None:
     result_state = "SUCCESS" if state == "SUCCESS" else "FAILED"
     output = jobs.RunOutput() if state == "SUCCESS" else jobs.RunOutput(error="PermissionError: nope")
     ws.jobs.queue(make_run(TEARDOWN_RUN, {"__pytest_teardown": state}, result_state), {TEARDOWN_RUN * 100: output})
+
+
+@pytest.fixture(autouse=True)
+def steps_as_tasks(pytester: pytest.Pytester) -> None:
+    """Run the steps as tasks; a test that needs other options configures them with `run_as_task=True` too."""
+    configure_lakeflow(pytester, "run_as_task=True")
 
 
 class TestOnce:
@@ -180,7 +185,7 @@ class TestOnce:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
         queue_setup(fake_ws, "FAILED")
-        configure_lakeflow(pytester, "keep_failed=False")
+        configure_lakeflow(pytester, "keep_failed=False, run_as_task=True")
         run_tests(pytester, WITH_TEARDOWN).assert_outcomes(failed=1)
         assert fake_ws.jobs.deleted == [ONCE_JOB]
         assert len(fake_ws.jobs.run_now_calls) == 1
@@ -208,7 +213,7 @@ class TestOnce:
     ) -> None:
         queue_setup(fake_ws)
         queue_teardown(fake_ws, "FAILED")
-        configure_lakeflow(pytester, "keep_failed=False")
+        configure_lakeflow(pytester, "keep_failed=False, run_as_task=True")
         run_tests(pytester, WITH_TEARDOWN).assert_outcomes(passed=1)
         assert fake_ws.jobs.deleted == [ONCE_JOB]
 
@@ -216,7 +221,7 @@ class TestOnce:
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient
     ) -> None:
         queue_setup(fake_ws)
-        configure_lakeflow(pytester, 'existing_cluster_id="c-1"')
+        configure_lakeflow(pytester, 'existing_cluster_id="c-1", run_as_task=True')
         run_tests(pytester, WITH_TEARDOWN).assert_outcomes(passed=1)
         [created] = fake_ws.jobs.created
         assert "environments" not in created
@@ -260,7 +265,7 @@ class TestOnceArguments:
         assert fake_ws.jobs.created == []
 
     def test_helpers_compute_is_refused(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
-        configure_lakeflow(pytester, 'helpers_compute="classic"')
+        configure_lakeflow(pytester, 'helpers_compute="classic", run_as_task=True')
         result = run_tests(pytester, 'def test_a(lakeflow):\n    lakeflow.once("x", setup=["SELECT 1"])\n')
         result.assert_outcomes(failed=1)
         result.stdout.fnmatch_lines(["*ValueError: once('x') runs on serverless, but helpers_compute is 'classic'*"])
@@ -277,9 +282,8 @@ class TestOnceUnderXdist:
         make_xdist_conftest(pytester, ONCE_CLIENT.format(created=str(created), deleted=str(deleted)))
         test = (
             "def test_{i}(lakeflow):\n"
-            "    run = lakeflow.once('orders', setup=['CREATE TABLE t'])\n"
-            "    assert run.setup.succeeded\n"
-            f"    assert run.job_id == {ONCE_JOB}\n"
+            "    step = lakeflow.once('orders', setup=['CREATE TABLE t'], run_as_task=True)\n"
+            "    assert (step.ran_as, step.succeeded) == ('task', True)\n"
         )
         pytester.makepyfile("\n".join(test.format(i=i) for i in range(6)))
         pytester.runpytest("-n", "2").assert_outcomes(passed=6)

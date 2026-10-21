@@ -38,6 +38,9 @@ Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
 [project.optional-dependencies]
 xdist = ["pytest-xdist>=3"]
 pytester = ["databricks-labs-pytester>=0.7"]
+# setup=, teardown= and once() over Databricks Connect. databricks-connect 16.2 and later install only on Python 3.12,
+# so on any other Python the extra installs nothing and the steps run as tasks.
+connect = ["databricks-connect>=16.2; python_version == '3.12'"]
 
 [project.entry-points.pytest11]
 databricks_lakeflow = "pytest_databricks_lakeflow.plugin"

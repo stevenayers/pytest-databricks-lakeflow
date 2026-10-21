@@ -4,6 +4,7 @@ docs/notes.md
 spikes
 __pycache__/
 .venv/
+.venv-*/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
