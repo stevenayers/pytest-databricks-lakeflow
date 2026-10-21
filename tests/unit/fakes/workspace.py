@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import itertools
 import re
@@ -656,6 +657,25 @@ def sp_rule_set(application_id: str) -> str:
     return f"accounts/{ACCOUNT_ID}/servicePrincipals/{application_id}/ruleSets/default"
 
 
+class FakeSdkConfig:
+    """Stands in for databricks-sdk's `Config`, whose fields live in `_inner` and whose `copy()` shares them.
+
+    A copy shares the fields with the original unless it is given its own, as the SDK's does. Building a real `Config`
+    with a host resolves the host's metadata over the network, which unit tests never do.
+    """
+
+    def __init__(self, **fields: str) -> None:
+        self._inner: dict[str, str] = dict(fields)
+
+    def __getattr__(self, name: str) -> str | None:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._inner.get(name)
+
+    def copy(self) -> FakeSdkConfig:
+        return copy.copy(self)
+
+
 class FakeWorkspaceClient:
     def __init__(self) -> None:
         self.jobs = FakeJobs()
@@ -668,6 +688,8 @@ class FakeWorkspaceClient:
         self.current_user = FakeCurrentUser()
         self.account_access_control_proxy = FakeAccountAccessControlProxy()
         self.config = SimpleNamespace(host=HOST, profile=None, account_id=ACCOUNT_ID)
+        # Stands in for the SDK's remote dbutils, which steps over Databricks Connect are given.
+        self.dbutils = SimpleNamespace(fs=SimpleNamespace(), secrets=SimpleNamespace())
         self.profiles: list[str | None] = []
         # Every job, pipeline and schema deleted, in order, such as "job 1001", "pipeline p-1000" and "schema c.s".
         self.deletions: list[str] = []

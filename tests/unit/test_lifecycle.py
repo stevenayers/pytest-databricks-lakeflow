@@ -513,7 +513,7 @@ def test_job(lakeflow, caplog):
     assert run.setup.output_json == {"rows": 1}
     assert not run.teardown.succeeded
     assert "FileNotFoundError: /Volumes/x" in caplog.text
-    assert run.teardown.run_url in caplog.text
+    assert run.teardown.task.run_url in caplog.text
 """,
         )
         result.assert_outcomes(passed=1)
@@ -562,10 +562,9 @@ def test_job(lakeflow):
         run = job.run(params={{"param1": "only this run"}})
         assert run.succeeded, run
         assert run.teardown is None
-        assert job.teardown_run is None
+        assert job.teardown is None
     assert job.runs == [run]
-    assert job.teardown_run.run_id == 77
-    assert job.teardown_run.teardown.succeeded
+    assert (job.teardown.ran_as, job.teardown.succeeded) == ("task", True)
     assert job.teardown_at == "close"
 """,
                 id="with",

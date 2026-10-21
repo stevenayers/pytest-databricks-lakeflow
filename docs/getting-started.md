@@ -7,16 +7,19 @@ This page takes you from an installed plugin to a passing job test. It assumes y
 - Python 3.11 or later. pytest 8 or later, `databricks-sdk` 0.100 or later and `filelock` are installed as dependencies.
 - The [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) v1.7.0 or later on `PATH`. The plugin shells out to it for `bundle deploy`, `bundle summary`, `bundle validate`, `bundle sync` and `bundle destroy`.
 - Credentials that both the CLI and the SDK can use: a profile in `~/.databrickscfg`, or the standard `DATABRICKS_*` environment variables. `DATABRICKS_CONFIG_PROFILE` works for both.
-- Serverless jobs in the workspace. The stub, probe, setup and teardown tasks the plugin adds run on serverless by default. Without serverless, point them at a job cluster, see [Run the helper tasks on a job cluster](recipes/compute.md#run-the-helper-tasks-on-a-job-cluster).
+- Serverless jobs in the workspace. The stub and probe tasks the plugin adds, and setup and teardown steps that run as tasks, run on serverless by default. Without serverless, point them at a job cluster, see [Run the helper tasks on a job cluster](recipes/compute.md#run-the-helper-tasks-on-a-job-cluster).
 - Permission to create and run jobs, to write to a folder under your workspace home, and, for `lakeflow.schema()`, to create schemas in a catalog.
 
 ## Install
 
 ```bash
-uv add --dev pytest-databricks-lakeflow
+uv add --dev pytest-databricks-lakeflow databricks-connect pytest-xdist
 ```
 
-Or `pip install pytest-databricks-lakeflow`. For parallel runs with pytest-xdist, install the extra `pytest-databricks-lakeflow[xdist]`.
+Or `pip install pytest-databricks-lakeflow databricks-connect pytest-xdist`. The plugin installs neither of the other two, so add the ones you use:
+
+- **databricks-connect** runs `setup=`, `teardown=` and `once()` steps from your machine over Databricks Connect in a few seconds, instead of as tasks of the job that wait about 30 seconds each for compute. Any release from 15.1 works, so install the one that matches your serverless environment or cluster runtime. Releases from 16.2 install only on Python 3.12, the Python of serverless environment 3 and later, and no release installs on Python 3.13 or later. Without it the steps run as tasks, with one warning per session. databricks-connect replaces pyspark, so remove pyspark from the environment the tests run in.
+- **pytest-xdist** runs tests in parallel, with `pytest -n 4`.
 
 The plugin registers itself through the `pytest11` entry point. There is nothing to add to `conftest.py` or `pytest.ini`.
 
@@ -113,7 +116,7 @@ Tests that use the fixture get the `lakeflow` marker automatically, so `pytest -
 
 ## Share fixtures, run in parallel
 
-Data that every test reads, such as the source tables behind a job's config, goes in `lakeflow.once()`, in a session fixture. The step runs one time per session, in one job, however many tests and xdist workers ask for it, and its teardown runs when the session ends. Data that one test owns goes in `setup=` on that test's job, or in `lakeflow.schema()`:
+Data that every test reads, such as the source tables behind a job's config, goes in `lakeflow.once()`, in a session fixture. The step runs one time per session, over Databricks Connect from whichever xdist worker asks first, however many tests and workers ask for it, and its teardown runs when the session ends. Data that one test owns goes in `setup=` on that test's job, or in `lakeflow.schema()`:
 
 ```python
 import pytest
@@ -138,7 +141,7 @@ def test_job_reads_the_sources(lakeflow: Lakeflow, sources: None) -> None:
         assert job.run().succeeded
 ```
 
-A setup task inside every copy would cost a task start plus the statements for every test, and would stop the tests running at the same time, because each copy recreates the same tables. With the fixtures made once, the tests are independent:
+A setup in every copy would run the same statements for every test, and would stop the tests running at the same time, because each copy recreates the same tables. With the fixtures made once, the tests are independent:
 
 ```bash
 pytest -n 4

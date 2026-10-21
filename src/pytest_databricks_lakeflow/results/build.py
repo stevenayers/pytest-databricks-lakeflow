@@ -16,12 +16,13 @@ from databricks.sdk.errors.base import DatabricksError
 from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.dbt import DbtArtifacts, read_artifacts
-from pytest_databricks_lakeflow.naming import PREFIX, PROBE_PREFIX
+from pytest_databricks_lakeflow.naming import PREFIX, PROBE_PREFIX, SETUP_KEY, TEARDOWN_KEY
 from pytest_databricks_lakeflow.results.models import (
     ForEachStats,
     JobRun,
     PipelineUpdate,
     SqlResult,
+    StepResult,
     TaskError,
     TaskRun,
     TaskValues,
@@ -134,6 +135,13 @@ def build_job_run(
         else:
             tasks[key] = task
 
+    setup = None
+    if SETUP_KEY in injected:
+        setup = StepResult.from_task("setup", injected[SETUP_KEY])
+    # With teardown_at="close" a run leaves the teardown task out, and the task ends DISABLED.
+    teardown = None
+    if TEARDOWN_KEY in injected and not injected[TEARDOWN_KEY].disabled:
+        teardown = StepResult.from_task("teardown", injected[TEARDOWN_KEY])
     details = run.status.termination_details if run.status else None
     return JobRun(
         job_key=job_key,
@@ -152,6 +160,8 @@ def build_job_run(
         timing=Timing.from_run(run),
         effective_performance_target=enum_value(run.effective_performance_target),
         trigger_type=enum_value(run.trigger),
+        setup=setup,
+        teardown=teardown,
     )
 
 

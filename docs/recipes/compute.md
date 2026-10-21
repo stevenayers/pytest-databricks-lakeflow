@@ -30,6 +30,16 @@ Each task's `timing` splits its time into `queue`, `setup`, `execution` and `cle
 
 A classic job cluster takes 2 to 10 minutes to start. `Lakeflow(existing_cluster_id="<cluster id>")` moves every task that the template puts on a job cluster or a new cluster onto that running cluster, the plugin's helper tasks and nested for-each tasks included. The job's `job_clusters` are dropped, and serverless and warehouse tasks keep their compute.
 
+## Where setup and teardown steps run
+
+A `setup=`, `teardown=` or `once()` step that runs over Databricks Connect uses one Databricks Connect session per `Lakeflow`, opened from the test process the first time a step needs it:
+
+- Without `existing_cluster_id`, the session is on serverless compute. It is ready in about two seconds, and each statement takes about half a second.
+- With `existing_cluster_id`, the session is on that running cluster, which can be a classic all-purpose cluster. The databricks-connect version must match the cluster's Databricks Runtime, so pin it in your project.
+- `helpers_compute` and `helpers_environment_version` apply only to steps that run as tasks, see [Run a step as a task](data.md#run-a-step-as-a-task).
+
+Connect sessions bill on the interactive serverless SKU, not the jobs one. In one Azure region its list price was USD 1.00 per DBU against USD 0.50 for serverless jobs. A step over Connect skips the 30 seconds of start-up a task pays first, so it uses far less compute time; the net effect on the bill has not been measured.
+
 ## Run job clusters on one node
 
 To keep job clusters but run each on one node, pass `Lakeflow(single_node=True)`:
@@ -40,18 +50,18 @@ To keep job clusters but run each on one node, pass `Lakeflow(single_node=True)`
 
 ## Run the helper tasks on a job cluster
 
-Stubs, probes and the setup and teardown tasks run on serverless compute by default. Without serverless jobs, name a job cluster from the job's `job_clusters`:
+Stubs, probes, and setup and teardown steps that run as tasks, run on serverless compute by default. Without serverless jobs, name a job cluster from the job's `job_clusters`:
 
 ```python
 Lakeflow(helpers_compute="main_cluster")
 ```
 
-The helper tasks then run on that cluster, and the plugin raises `LakeflowError` before creating the job when the job has no cluster with that key. The task under test keeps its own compute. With `existing_cluster_id` as well, the helper tasks move to that running cluster, and with `single_node=True` the helper cluster becomes a single node cluster like every other.
+The helper tasks then run on that cluster, and the plugin raises `LakeflowError` before creating the job when the job has no cluster with that key. Setup and teardown steps over Databricks Connect cannot use a job cluster, which exists only during a run: pass `run_as_task=True` to run them there too, or `existing_cluster_id` to run them on a running cluster. The task under test keeps its own compute. With `existing_cluster_id` as well, the helper tasks move to that running cluster, and with `single_node=True` the helper cluster becomes a single node cluster like every other.
 
 ## Pin the serverless environment version
 
 - `Lakeflow(environment_version="5")` sets the environment version of every environment copied from the template. Environments whose spec sets `base_environment` keep it. `environments=` wins for the environments it names, see [Change a serverless environment](job-settings.md#change-a-serverless-environment).
-- `Lakeflow(helpers_environment_version="5")` sets the version of the plugin's own `__pytest_serverless` environment, which the stub, probe, setup and teardown tasks use. The default is `"4"`.
+- `Lakeflow(helpers_environment_version="5")` sets the version of the plugin's own `__pytest_serverless` environment, which the stub and probe tasks and setup and teardown steps that run as tasks use. The default is `"4"`.
 
 ## Charge runs to a budget policy
 

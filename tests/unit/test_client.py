@@ -124,7 +124,10 @@ class TestLakeflowArguments:
             pytest.param({"setup": "SELECT 1"}, "setup= takes a list of SQL statements, not a string", id="string"),
             pytest.param({"teardown": []}, "teardown= is an empty list of SQL statements", id="empty-list"),
             pytest.param({"setup": Path("seed.sql")}, "setup= must be a .py file, got seed.sql", id="not-py"),
-            pytest.param({"teardown": lambda spark: None}, "teardown= cannot be a lambda", id="lambda"),
+            pytest.param(
+                {"teardown": lambda spark: None, "run_as_task": True}, "teardown= cannot be a lambda", id="lambda"
+            ),
+            pytest.param({"setup": lambda table: None}, "setup=<lambda> takes ['table']", id="unknown-argument"),
         ],
     )
     def test_rejects_a_bad_setup_default(self, arguments: dict[str, Any], message: str) -> None:
@@ -224,6 +227,7 @@ class TestPublicApi:
             "Stub",
             "DbtArtifacts",
             "DbtResult",
+            "StepResult",
         ):
             assert hasattr(pytest_databricks_lakeflow, name)
             assert name in pytest_databricks_lakeflow.__all__

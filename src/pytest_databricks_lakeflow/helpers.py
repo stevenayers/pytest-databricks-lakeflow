@@ -210,6 +210,26 @@ def _sql_source(statements: Sequence[object], argument: str) -> tuple[str, froze
 
 def _function_source(fn: Callable[..., object], argument: str) -> str:
     """Build a notebook that calls `fn` with the arguments it declares and exits with what it returns."""
+    source, name, declared = shippable_function(fn, argument)
+    call = f"{name}({', '.join(f'{arg}={LIFECYCLE_VALUES[arg]}' for arg in declared)})"
+    return LIFECYCLE.format(source=source, read_params=READ_PARAMS, call=call)
+
+
+def shippable_function(fn: Callable[..., object], argument: str) -> tuple[str, str, list[str]]:
+    """Check that `fn` can run from its source alone, away from this process, and read that source.
+
+    Args:
+        fn: The function given as `setup=` or `teardown=`.
+        argument: `"setup"` or `"teardown"`, for error messages.
+
+    Returns:
+        The function's dedented source, its name, and the arguments it declares, of `spark`, `dbutils` and
+            `params`.
+
+    Raises:
+        ValueError: If `fn` is not a plain function defined with `def`, uses variables of an enclosing function, takes
+            a parameter other than `spark`, `dbutils` and `params`, has no source to read, or has a decorator.
+    """
     if not inspect.isfunction(fn):
         raise ValueError(
             f"{argument}= must be a plain function defined with def, a list of SQL statements or a Path to a .py "
@@ -227,7 +247,7 @@ def _function_source(fn: Callable[..., object], argument: str) -> str:
             "It runs on the job's compute, where they do not exist. Pass the values as job parameters and read them "
             "through params instead."
         )
-    declared = _declared_arguments(fn, f"{argument}={name}")
+    declared = declared_arguments(fn, f"{argument}={name}")
     try:
         source = textwrap.dedent(inspect.getsource(fn)).strip()
     except (OSError, TypeError) as e:
@@ -240,11 +260,15 @@ def _function_source(fn: Callable[..., object], argument: str) -> str:
             f"{argument}={name} has a decorator, which would be shipped with its source to the job's compute, where "
             "it does not exist. Remove the decorator."
         )
-    call = f"{name}({', '.join(f'{arg}={LIFECYCLE_VALUES[arg]}' for arg in declared)})"
-    return LIFECYCLE.format(source=source, read_params=READ_PARAMS, call=call)
+    return source, name, declared
 
 
-def _declared_arguments(fn: Callable[..., object], label: str) -> list[str]:
+def declared_arguments(fn: Callable[..., object], label: str) -> list[str]:
+    """The arguments `fn` declares, of `spark`, `dbutils` and `params`, in order.
+
+    Raises:
+        ValueError: If `fn` takes any other parameter, naming it with `label`.
+    """
     declared: list[str] = []
     refused: list[str] = []
     for parameter in inspect.signature(fn).parameters.values():
