@@ -37,9 +37,9 @@ Everything after `params` is keyword-only. Most options work as for `job()`:
 | `task_params` | The task's own parameters. It may name only the task under test, and is applied before the stubs, so a `{{tasks.x.values.y}}` it adds needs `x` in `upstream_task_values` | [Override one task's parameters](recipes/job-settings.md#override-one-tasks-parameters) |
 | `task_overrides` | The task's timeout and retries. Any key but the task under test raises `ValueError` | [Test retries and timeouts](recipes/job-settings.md#test-retries-and-timeouts) |
 | `for_each_inputs` | A list for a for-each task under test, in place of the deployed `inputs`. A task without a `for_each_task` raises `LakeflowError` | [For-each tasks](recipes/task-types.md#for-each-tasks) |
-| `name`, `run_as`, `children`, `extra_dependencies`, `environments`, `setup`, `teardown`, `teardown_at`, `trigger`, `saved_queries`, `pipelines`, `schema` | As for `job()` | [Make a copy of a job](job-tests.md#make-a-copy-of-a-job) |
+| `name`, `run_as`, `children`, `extra_dependencies`, `environments`, `setup`, `teardown`, `teardown_at`, `run_as_task`, `trigger`, `saved_queries`, `pipelines`, `schema` | As for `job()` | [Make a copy of a job](job-tests.md#make-a-copy-of-a-job) |
 
-The stub and probe tasks never get `extra_dependencies`. The setup task runs before the stubs, so a stub's values are never read before the data exists, and the teardown task runs after the task and its probe.
+The stub and probe tasks never get `extra_dependencies`. The setup runs before the stubs, so a stub's values are never read before the data exists, and the teardown runs after the task and its probe: over Databricks Connect before and after the run, or as tasks inside it.
 
 ## How stubs resolve
 
@@ -177,13 +177,13 @@ To shorten the list that a for-each task iterates over instead, see [For-each ta
 
 ## Helper compute
 
-Stubs, probes and the setup and teardown tasks are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`.
+Stubs, probes, and setup and teardown steps that run as tasks, are notebook tasks. The two helper notebooks are uploaded once per session to `helpers_path`, by default `/Users/<you>/.pytest-databricks-lakeflow/`. A setup or teardown step over Databricks Connect uses none of this: it runs from the test process, see [Run a step as a task](recipes/data.md#run-a-step-as-a-task).
 
-By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its version, `"4"` by default. Each helper task costs 7 to 30 seconds of serverless compute, so a task test typically takes a minute end to end.
+By default the helper tasks run on serverless compute, in a plugin-owned environment named `__pytest_serverless` that is appended to the job's `environments`, with `helpers_environment_version` as its version, `"4"` by default. Each helper task takes 28 to 32 seconds of serverless compute before its own work, so a task test typically takes a minute end to end.
 
 - A job holds at most 10 environments. When the template already has 10, the plugin raises `LakeflowError` listing them before creating the job: drop one from the bundle job, or run the helper tasks on a job cluster.
 - Without serverless jobs, name a job cluster from the job's `job_clusters` with `Lakeflow(helpers_compute="main_cluster")`, see [Run the helper tasks on a job cluster](recipes/compute.md#run-the-helper-tasks-on-a-job-cluster). The task under test keeps its own compute either way.
-- `environments=` cannot change `__pytest_serverless`. For one job whose setup function needs a newer runtime, derive a `Lakeflow` with another version, which shares the session's deploy: `dataclasses.replace(lakeflow, helpers_environment_version="5")`.
+- `environments=` cannot change `__pytest_serverless`. For one job whose setup task needs a newer runtime, derive a `Lakeflow` with another version, which shares the session's deploy: `dataclasses.replace(lakeflow, helpers_environment_version="5")`.
 
 ## What a single-task job loses
 

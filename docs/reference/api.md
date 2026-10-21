@@ -30,6 +30,10 @@ Session-scoped. It returns `Lakeflow()` unless you override it in a `conftest.py
 
 ::: pytest_databricks_lakeflow.TaskRun
 
+## `StepResult`
+
+::: pytest_databricks_lakeflow.StepResult
+
 ## `DbtArtifacts`
 
 ::: pytest_databricks_lakeflow.DbtArtifacts

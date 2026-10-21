@@ -40,13 +40,14 @@ Everything after `params` is keyword-only. Each option has a recipe:
 | `upstream_task_values` | Replaces tasks with stubs that set task values | [Run the downstream half of a job](recipes/runs.md#run-the-downstream-half-of-a-job) |
 | `for_each_inputs` | The list a for-each task iterates over | [For-each tasks](recipes/task-types.md#for-each-tasks) |
 | `trigger` | The values of `{{job.trigger.*}}` references | [Simulate a trigger](recipes/task-types.md#simulate-a-trigger) |
-| `setup`, `teardown`, `teardown_at` | Tasks that seed and clean up data one test owns; fixtures every test reads go in `lakeflow.once()` | [Seed data with a setup task](recipes/data.md#seed-data-with-a-setup-task), [Seed once for the whole session](recipes/data.md#seed-once-for-the-whole-session) |
+| `setup`, `teardown`, `teardown_at` | Steps that seed and clean up data one test owns, over Databricks Connect by default; fixtures every test reads go in `lakeflow.once()` | [Seed data with a setup step](recipes/data.md#seed-data-with-a-setup-step), [Seed once for the whole session](recipes/data.md#seed-once-for-the-whole-session) |
+| `run_as_task` | Runs `setup` and `teardown` as tasks of the copy instead of over Databricks Connect | [Run a step as a task](recipes/data.md#run-a-step-as-a-task) |
 | `extra_dependencies` | Test-only packages | [Add test-only dependencies](recipes/job-settings.md#add-test-only-dependencies) |
 | `environments` | The copy's serverless environments | [Change a serverless environment](recipes/job-settings.md#change-a-serverless-environment) |
 | `pipelines`, `schema` | Copies the pipelines that its pipeline tasks update | [Copy the pipelines of a job](recipes/task-types.md#copy-the-pipelines-of-a-job) |
 | `saved_queries` | Runs saved query tasks as SQL files, so their rows come back | [Read the rows of a saved query](recipes/task-types.md#read-the-rows-of-a-saved-query) |
 
-`run_as`, `disable`, `extra_dependencies`, `environments`, `children`, `setup`, `teardown` and `saved_queries` take their default from the `Lakeflow` argument of the same name, see [defaults for per-call arguments](reference/lakeflow.md#defaults-for-per-call-arguments).
+`run_as`, `disable`, `extra_dependencies`, `environments`, `children`, `setup`, `teardown`, `run_as_task` and `saved_queries` take their default from the `Lakeflow` argument of the same name, see [defaults for per-call arguments](reference/lakeflow.md#defaults-for-per-call-arguments).
 
 ## Run it
 
@@ -97,7 +98,8 @@ def test_job_surfaces_permission_error(lakeflow: Lakeflow) -> None:
 ```
 
 - `run.task(key)` returns the task's `TaskRun`. For a task that was not part of the run it raises a `KeyError` that lists the available keys, or says `Skipped by only: [...]` or `Disabled in the job: [...]`.
-- `run.tasks` holds your tasks that were part of the run, `run.skipped_tasks` those left out by `only`, `run.disabled_tasks` those disabled in the job and the tasks downstream of them, and `run.injected_tasks` the plugin's stubs, probes, setup and teardown tasks. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
+- `run.tasks` holds your tasks that were part of the run, `run.skipped_tasks` those left out by `only`, `run.disabled_tasks` those disabled in the job and the tasks downstream of them, and `run.injected_tasks` the plugin's stubs, probes, and setup and teardown tasks when steps run as tasks. `run.executed_tasks` is the sorted list of keys in `run.tasks` that ran.
+- `run.setup` and `run.teardown` are the outcomes of the `setup=` and `teardown=` steps, each a `StepResult`, or `None`, see [What a step reports](recipes/data.md#what-a-step-reports).
 - `run.parameters` is the run's job parameters by name: the value passed for the run, or the default. The plugin's own parameters are left out.
 - `run.timed_out` is true when the run or any of its tasks ended `TIMEDOUT`, and `run.cancelled` when the run ended `CANCELED`. Both count as failed.
 
@@ -226,7 +228,7 @@ Two things are checked before the run starts, because the platform would otherwi
 - A selected task that refers to `{{tasks.<key>.values.<name>}}` or `{{tasks.<key>.output.<path>}}` of a task left out raises `LakeflowError` naming both tasks. Select that task too, as `+transform` does, or stub it, see [Run the downstream half of a job](recipes/runs.md#run-the-downstream-half-of-a-job). Other references to a left-out task, such as `{{tasks.extract.result_state}}`, resolve against its `DISABLED` run and are not checked.
 - `only` cannot name a task that is disabled in the copy, or one downstream of a disabled task, because the platform runs a disabled task that `only` names. A `+` that only reaches a disabled task leaves it out.
 
-When the job has stubs, probes, setup or teardown tasks, `only` is extended with the ones the selected tasks need.
+When the job has stubs, probes, setup or teardown tasks, `only` is extended with the ones the selected tasks need. A setup or teardown step over Databricks Connect runs around every run, whatever `only` selects.
 
 ## When a test fails
 

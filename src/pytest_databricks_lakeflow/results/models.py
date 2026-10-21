@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from databricks.sdk.service import jobs, pipelines
 
 from pytest_databricks_lakeflow.errors import LakeflowError, LakeflowRunFailed
-from pytest_databricks_lakeflow.naming import PREFIX, SETUP_KEY, TEARDOWN_KEY
+from pytest_databricks_lakeflow.naming import PREFIX
 from pytest_databricks_lakeflow.results.serialise import serialise_with_files
 
 if TYPE_CHECKING:
@@ -807,6 +807,71 @@ class TaskRun:
 
 
 @dataclass(frozen=True)
+class StepResult:
+    """The outcome of a `setup=` or `teardown=` step, however it ran.
+
+    `JobRun.setup` and `JobRun.teardown` hold one, so do `EphemeralJob.teardown` for a teardown that ran when the job
+    closed and the return value of `Lakeflow.once()`.
+
+    Attributes:
+        role: `"setup"` or `"teardown"`.
+        ran_as: `"connect"` when the step ran from the test process over Databricks Connect, `"task"` when it ran as a
+            notebook task of the job.
+        succeeded: Whether the step finished without an error.
+        output: What the step gave back, as JSON text: a function's return value, or `{"statements": <count>}` for a
+            list of SQL statements. `None` when a function returned `None`, or a notebook file did not call
+            `dbutils.notebook.exit()`.
+        error: What the step raised, or `None`. Over Connect, `type` is the exception's class, dotted with its module
+            unless it is a built-in, and `trace` the Python traceback.
+        duration: How long the step ran.
+        task: The step's task run, when it ran as a task, else `None`.
+    """
+
+    role: str
+    ran_as: str
+    succeeded: bool
+    output: str | None = None
+    error: TaskError | None = None
+    duration: timedelta = timedelta(0)
+    task: TaskRun | None = field(default=None, repr=False)
+
+    @property
+    def output_json(self) -> object:
+        """`output` parsed as JSON.
+
+        Raises:
+            ValueError: If the step gave nothing back, or its output is not JSON. The message names the step.
+        """
+        if self.output is None:
+            raise ValueError(f"The {self.role} step has no output: it returned None")
+        try:
+            return json.loads(self.output)
+        except ValueError as e:
+            raise ValueError(f"The {self.role} step's output is not JSON: {self.output[:200]!r}") from e
+
+    @classmethod
+    def from_task(cls, role: str, task: TaskRun) -> StepResult:
+        """Describe a step that ran as a task by that task's run.
+
+        Args:
+            role: `"setup"` or `"teardown"`.
+            task: The task run of `__pytest_setup` or `__pytest_teardown`.
+
+        Returns:
+            The step's outcome, with `task` set.
+        """
+        return cls(
+            role=role,
+            ran_as="task",
+            succeeded=task.succeeded,
+            output=task.output,
+            error=task.error,
+            duration=task.duration,
+            task=task,
+        )
+
+
+@dataclass(frozen=True)
 class JobRun:
     """The outcome of one run of an ephemeral job, or of the child run that a run-job task triggered.
 
@@ -836,6 +901,13 @@ class JobRun:
         trigger_type: What started the run, as the Jobs API reports it: `ONE_TIME` for a run of an ephemeral job,
             which is started with run-now. A trigger simulated with `trigger=` on `Lakeflow.job` or `Lakeflow.task`
             changes only what the task code sees, not this. `None` when the platform did not say.
+        setup: The outcome of the job's `setup=` step for this run, or `None` when the job has none. As a task, a
+            failure leaves the user's tasks `UPSTREAM_FAILED`, so `succeeded` is false and `repr()` names it first;
+            over Connect, a failure raises before the run starts.
+        teardown: The outcome of the job's `teardown=` step for this run, or `None` when the job has none or runs it
+            when the job closes, with `teardown_at="close"`, into `EphemeralJob.teardown`. A failed teardown does
+            not change `succeeded`; the plugin logs a warning instead. Assert `run.teardown.succeeded` to fail the
+            test on it.
     """
 
     job_key: str
@@ -854,6 +926,8 @@ class JobRun:
     timing: Timing = field(default_factory=Timing)
     effective_performance_target: str | None = None
     trigger_type: str | None = None
+    setup: StepResult | None = None
+    teardown: StepResult | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -883,28 +957,6 @@ class JobRun:
     def executed_tasks(self) -> list[str]:
         """The sorted keys of the tasks in `tasks` whose `ran` is true."""
         return sorted(key for key, task in self.tasks.items() if task.ran)
-
-    @property
-    def setup(self) -> TaskRun | None:
-        """The task that ran the job's `setup=` function, or `None` when the job has none.
-
-        When it fails, the user's tasks end `UPSTREAM_FAILED`, so `succeeded` is false, and `repr()` names the setup
-        failure first.
-        """
-        return self.injected_tasks.get(SETUP_KEY)
-
-    @property
-    def teardown(self) -> TaskRun | None:
-        """The task that ran the job's `teardown=` function, or `None` when the job has none or the run left it out.
-
-        A run leaves it out when the job was made with `teardown_at="close"`: the task then ends `DISABLED` and runs
-        alone when the job closes, in `EphemeralJob.teardown_run`. A failed teardown does not change `succeeded`; the
-        plugin logs a warning instead. Assert `run.teardown.succeeded` to fail the test on it.
-        """
-        teardown = self.injected_tasks.get(TEARDOWN_KEY)
-        if teardown is None or teardown.disabled:
-            return None
-        return teardown
 
     def task(self, key: str) -> TaskRun:
         """Get one of the user's tasks.
@@ -991,7 +1043,8 @@ class JobRun:
         `run_results` and `manifest`, or `None`; `pipeline_update` is a dict of
         `pipeline_id`, `update_id`, `state`, `cause` and `full_refresh`, or `None`; `iterations` is a list of tasks
         serialised the same way, and `for_each_stats` a dict of its fields, with `errors` a list of dicts, or `None`.
-        The run also gets `succeeded`.
+        `setup` and `teardown` are each a dict of `role`, `ran_as`, `succeeded`, `output`, `error`, `duration_seconds`
+        and `task_key`, the last `None` for a step that ran over Connect, or `None`. The run also gets `succeeded`.
 
         `logs` and the exported `notebook` are left out, because logs can reach 5 MB per task. Instead `logs_file` and
         `notebook_file` name where `--lakeflow-report-dir` saves them, relative to the test's report directory:
@@ -1028,13 +1081,22 @@ def describe_failing(run: JobRun) -> list[str]:
     """
     described: list[str] = []
     if run.setup is not None and not run.setup.succeeded:
-        described.append(f"setup: {task_outcome(run.setup)}")
+        described.append(f"setup: {step_outcome(run.setup)}")
     failing = run._failing_tasks()
     for task in failing:
         described.append(f"{task.task_key}: {task_outcome(task)}")
     if run.failed and not failing and run.termination_code != "SUCCESS" and run.termination_message:
         described.append(f"run: {run.termination_message}")
     return described
+
+
+def step_outcome(step: StepResult) -> str:
+    """The first line of the step's error, or its task's result state, or `failed` when it has neither."""
+    if step.task is not None:
+        return task_outcome(step.task)
+    if step.error is not None:
+        return first_line(str(step.error))
+    return "failed"
 
 
 def task_outcome(task: TaskRun) -> str:

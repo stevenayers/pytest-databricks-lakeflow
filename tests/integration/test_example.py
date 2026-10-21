@@ -27,7 +27,16 @@ from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 from databricks.sdk.service.workspace import ExportFormat, ImportFormat, Language, ObjectType
 
-from pytest_databricks_lakeflow import JobRun, Lakeflow, LakeflowError, LakeflowRunFailed, session, sweep
+from pytest_databricks_lakeflow import (
+    JobRun,
+    Lakeflow,
+    LakeflowError,
+    LakeflowRunFailed,
+    StepResult,
+    session,
+    steps,
+    sweep,
+)
 
 from .conftest import BUNDLES, lakeflow_for
 
@@ -522,6 +531,24 @@ def test_only_resolves_the_result_state_of_a_task_left_out(lakeflow: Lakeflow) -
         assert load["upstream"] == "disabled", "only checks task values; the platform resolves other references"
 
 
+# The two ways a setup= or teardown= step runs. Over Connect needs databricks-connect, which no release installs on
+# Python 3.13 or later.
+STEP_MODES = [
+    pytest.param(True, id="task"),
+    pytest.param(
+        False,
+        id="connect",
+        marks=pytest.mark.skipif(
+            not steps.connect_available(), reason="needs databricks-connect, which installs below Python 3.13"
+        ),
+    ),
+]
+
+
+def ran_as(run_as_task: bool) -> str:
+    return "task" if run_as_task else "connect"
+
+
 def seed_orders(spark, dbutils, params):
     schema = params["schema"]
     spark.sql(f"CREATE OR REPLACE TABLE {schema}.seed_orders AS SELECT * FROM VALUES (1, 'a'), (2, 'b') AS t(id, sku)")
@@ -552,17 +579,20 @@ def count_one(spark):
     return spark.sql("SELECT 1 AS one").count()
 
 
-def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_setup_seeds_a_table_and_teardown_removes_a_file(lakeflow: Lakeflow, run_as_task: bool) -> None:
     with lakeflow.schema() as schema:
         with lakeflow.job(
             "my_example_job",
             params={"schema": schema, "mode": "incremental"},
             setup=seed_orders,
             teardown=remove_landing_file,
+            run_as_task=run_as_task,
         ) as job:
             run = job.run(params={"param1": "seeded"})
             assert run.succeeded, run
             assert run.setup is not None and run.setup.succeeded
+            assert (run.setup.ran_as, run.teardown and run.teardown.ran_as) == (ran_as(run_as_task),) * 2
             assert run.setup.output_json == {"schema": schema, "param1": "seeded"}
             assert run.task("load").output == "loaded 2 seeded orders"
             assert run.teardown is not None and run.teardown.succeeded
@@ -577,7 +607,8 @@ def declare_run_date(settings: jobs.JobSettings, item: pytest.Item) -> None:
     settings.parameters = [*(settings.parameters or []), run_date]
 
 
-def test_sql_setup_and_teardown(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_sql_setup_and_teardown(lakeflow: Lakeflow, run_as_task: bool) -> None:
     with lakeflow.schema() as schema:
         with lakeflow.job(
             "my_example_job",
@@ -587,6 +618,7 @@ def test_sql_setup_and_teardown(lakeflow: Lakeflow) -> None:
                 "CREATE OR REPLACE TABLE ${schema}.scratch AS SELECT 2 AS id",
             ],
             teardown=["DROP TABLE ${schema}.scratch"],
+            run_as_task=run_as_task,
         ) as job:
             run = job.run(only=["extract"])
             assert run.succeeded, run
@@ -596,7 +628,8 @@ def test_sql_setup_and_teardown(lakeflow: Lakeflow) -> None:
         assert not lakeflow.ws.tables.exists(f"{schema}.scratch").table_exists
 
 
-def test_sql_setup_reads_a_parameter_declared_by_modify_settings(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_sql_setup_reads_a_parameter_declared_by_modify_settings(lakeflow: Lakeflow, run_as_task: bool) -> None:
     declaring = dataclasses.replace(lakeflow, modify_settings=declare_run_date)
     with (
         lakeflow.schema() as schema,
@@ -605,18 +638,22 @@ def test_sql_setup_reads_a_parameter_declared_by_modify_settings(lakeflow: Lakef
             params={"schema": schema, "run_date": "2026-10-19"},
             setup=["CREATE OR REPLACE TABLE ${schema}.seed AS SELECT DATE'${run_date}' AS day, '$$1' AS price"],
             teardown=Path("tests/integration/notebooks/read_seed.py"),
+            run_as_task=run_as_task,
         ) as job,
     ):
         run = job.run(only=["extract"])
         assert run.succeeded, run
         assert run.setup is not None and run.setup.succeeded, run.setup
+        # A notebook file always runs as a task, beside a setup that may not.
+        assert (run.setup.ran_as, run.teardown and run.teardown.ran_as) == (ran_as(run_as_task), "task")
         assert run.teardown is not None and run.teardown.succeeded, run.teardown
         assert run.teardown.output_json == [{"day": "2026-10-19", "price": "$1"}]
 
 
-def test_undeclared_run_params_reach_the_setup_function(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_undeclared_run_params_reach_the_setup_function(lakeflow: Lakeflow, run_as_task: bool) -> None:
     loose = dataclasses.replace(lakeflow, allow_undeclared_params=True)
-    with loose.job("my_example_job", setup=report_params) as job:
+    with loose.job("my_example_job", setup=report_params, run_as_task=run_as_task) as job:
         run = job.run(params={"run_date": "2026-10-19"}, only=["extract"])
         assert run.succeeded, run
         assert run.setup is not None and run.setup.succeeded, run.setup
@@ -624,9 +661,14 @@ def test_undeclared_run_params_reach_the_setup_function(lakeflow: Lakeflow) -> N
         assert isinstance(params, dict) and params["run_date"] == "2026-10-19", params
 
 
-def test_teardown_runs_after_a_failed_task(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_teardown_runs_after_a_failed_task(lakeflow: Lakeflow, run_as_task: bool) -> None:
     with lakeflow.job(
-        "my_example_job", params={"param1": "forbidden"}, setup=check_compute, teardown=report_params
+        "my_example_job",
+        params={"param1": "forbidden"},
+        setup=check_compute,
+        teardown=report_params,
+        run_as_task=run_as_task,
     ) as job:
         run = job.run()
         assert run.failed
@@ -636,8 +678,8 @@ def test_teardown_runs_after_a_failed_task(lakeflow: Lakeflow) -> None:
         assert run.teardown.output_json == {"param1": "forbidden", "param2": "world", "schema": "", "mode": "full"}
 
 
-def test_only_still_runs_setup_and_teardown(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", setup=check_compute, teardown=report_params) as job:
+def test_only_still_runs_setup_and_teardown_tasks(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", setup=check_compute, teardown=report_params, run_as_task=True) as job:
         # load depends on tasks that only leaves out; the platform still holds it until the setup has finished.
         run = job.run(only=["load"])
         assert run.succeeded, run
@@ -649,7 +691,8 @@ def test_only_still_runs_setup_and_teardown(lakeflow: Lakeflow) -> None:
         assert (timings["load"].start_time or 0) >= (timings["__pytest_setup"].end_time or 0)
 
 
-def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow, run_as_task: bool) -> None:
     with lakeflow.schema() as schema:
         landing_file = f"/Volumes/{schema.replace('.', '/')}/landing/orders.csv"
         with lakeflow.job(
@@ -658,6 +701,7 @@ def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow) -> None
             setup=seed_orders,
             teardown=remove_landing_file,
             teardown_at="close",
+            run_as_task=run_as_task,
         ) as job:
             run = job.run(only=["load"])
             assert run.succeeded, run
@@ -665,20 +709,21 @@ def test_teardown_at_close_runs_after_the_assertions(lakeflow: Lakeflow) -> None
             assert run.teardown is None
             lakeflow.ws.files.get_metadata(landing_file)
         assert job.runs == [run]
-        assert job.teardown_run is not None and job.teardown_run.teardown is not None, job.teardown_run
-        assert job.teardown_run.teardown.succeeded, job.teardown_run.teardown
-        assert job.teardown_run.teardown.output_json is True
+        assert job.teardown is not None and job.teardown.succeeded, job.teardown
+        assert (job.teardown.ran_as, job.teardown.output_json) == (ran_as(run_as_task), True)
         with pytest.raises(NotFound):
             lakeflow.ws.files.get_metadata(landing_file)
 
 
-def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow) -> None:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow, run_as_task: bool) -> None:
     with lakeflow.job(
         "my_example_job",
         params={"param1": "every run"},
         disable=["transform"],
         teardown=report_params,
         teardown_at="close",
+        run_as_task=run_as_task,
     ) as job:
         # only lists every task but the teardown, the disabled one and load downstream of it: the platform runs a
         # disabled task that only names, so leaving them out keeps them disabled.
@@ -688,10 +733,9 @@ def test_teardown_at_close_keeps_disabled_tasks_disabled(lakeflow: Lakeflow) -> 
         assert sorted(run.disabled_tasks) == ["load", "transform"]
         assert run.skipped_tasks == {}
         assert run.teardown is None
-    teardown = job.teardown_run.teardown if job.teardown_run else None
-    assert teardown is not None and teardown.succeeded, job.teardown_run
-    # The teardown run gets the job's params, not those of a run.
-    assert teardown.output_json == {"param1": "every run", "param2": "world", "schema": "", "mode": "full"}
+    assert job.teardown is not None and job.teardown.succeeded, job.teardown
+    # The teardown gets the job's params, not those of a run.
+    assert job.teardown.output_json == {"param1": "every run", "param2": "world", "schema": "", "mode": "full"}
 
 
 def test_only_refuses_a_disabled_task(lakeflow: Lakeflow) -> None:
@@ -704,21 +748,30 @@ def test_only_refuses_a_disabled_task(lakeflow: Lakeflow) -> None:
         assert job.runs == []
 
 
-def test_teardown_at_close_runs_after_a_cancelled_run(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", teardown=report_params, teardown_at="close") as job:
+@pytest.mark.parametrize("run_as_task", STEP_MODES)
+def test_teardown_at_close_runs_after_a_cancelled_run(lakeflow: Lakeflow, run_as_task: bool) -> None:
+    with lakeflow.job("my_example_job", teardown=report_params, teardown_at="close", run_as_task=run_as_task) as job:
         job.start(only=["extract"])
-    teardown = job.teardown_run.teardown if job.teardown_run else None
-    assert teardown is not None and teardown.succeeded, job.teardown_run
+    assert job.teardown is not None and job.teardown.succeeded, job.teardown
     assert job.runs == []
 
 
-def test_failed_setup_is_named_first(lakeflow: Lakeflow) -> None:
-    with lakeflow.job("my_example_job", setup=broken_setup, teardown=report_params) as job:
+def test_failed_setup_task_is_named_first(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", setup=broken_setup, teardown=report_params, run_as_task=True) as job:
         run = job.run()
         assert run.failed
         assert "failing=['setup: ValueError: no seed data'" in repr(run), run
         assert run.task("extract").upstream_failed
         assert run.teardown is not None and run.teardown.succeeded, run.teardown
+
+
+@pytest.mark.skipif(not steps.connect_available(), reason="needs databricks-connect, which installs below Python 3.13")
+def test_failed_setup_over_connect_starts_no_run(lakeflow: Lakeflow) -> None:
+    with lakeflow.job("my_example_job", setup=broken_setup, run_as_task=False) as job:
+        with pytest.raises(LakeflowError, match="setup= of 'my_example_job' failed before the run started: "):
+            job.run()
+        assert job.job_id is not None
+        assert list(lakeflow.ws.jobs.list_runs(job_id=job.job_id)) == []
 
 
 def test_task_setup_runs_before_the_stubs(lakeflow: Lakeflow) -> None:
@@ -727,6 +780,7 @@ def test_task_setup_runs_before_the_stubs(lakeflow: Lakeflow) -> None:
         upstream_task_values={"extract": {"row_count": 1, "source_path": "/Volumes/x/y/z"}},
         setup=check_compute,
         teardown=report_params,
+        run_as_task=True,
     ) as task:
         run = task.run()
         assert run.succeeded, run
@@ -898,31 +952,47 @@ def once_schema(lakeflow: Lakeflow) -> str:
     return f"{lakeflow.catalog}.pytest_{lakeflow.run_id}_once"
 
 
-@pytest.fixture(scope="module")
-def once_rows(lakeflow: Lakeflow, once_schema: str) -> JobRun:
+@pytest.fixture(scope="module", params=STEP_MODES)
+def once_rows(lakeflow: Lakeflow, once_schema: str, request: pytest.FixtureRequest) -> tuple[StepResult, bool]:
     """The session step every test of this module reads: set up once, in whichever worker asks first."""
-    run = lakeflow.once("example rows", setup=ONCE_SETUP, teardown=ONCE_TEARDOWN, params={"schema": once_schema})
-    assert run is not None
-    return run
+    run_as_task = request.param
+    name = f"example rows {ran_as(run_as_task)}"
+    schema = f"{once_schema}_{ran_as(run_as_task)}"
+    step = lakeflow.once(
+        name, setup=ONCE_SETUP, teardown=ONCE_TEARDOWN, params={"schema": schema}, run_as_task=run_as_task
+    )
+    assert step is not None
+    return step, run_as_task
 
 
-def test_once_sets_up_the_schema_in_one_job(lakeflow: Lakeflow, once_rows: JobRun, once_schema: str) -> None:
-    assert once_rows.setup is not None and once_rows.setup.succeeded, once_rows.setup
-    assert once_rows.setup.output_json == {"statements": 2}
-    assert once_rows.tasks == {}
-    assert lakeflow.ws.tables.exists(f"{once_schema}.once_rows").table_exists
-    settings = lakeflow.ws.jobs.get(once_rows.job_id).settings
+def test_once_sets_up_the_schema(lakeflow: Lakeflow, once_rows: tuple[StepResult, bool], once_schema: str) -> None:
+    step, run_as_task = once_rows
+    assert step.succeeded, step
+    assert (step.ran_as, step.output_json) == (ran_as(run_as_task), {"statements": 2})
+    assert lakeflow.ws.tables.exists(f"{once_schema}_{step.ran_as}.once_rows").table_exists
+    named = [job for job in lakeflow.ws.jobs.list(name=f"[pytest] once: example rows {step.ran_as}")]
+    if not run_as_task:
+        assert named == []
+        return
+    [job] = named
+    settings = lakeflow.ws.jobs.get(job.job_id or 0).settings
     assert settings is not None
-    assert settings.name == "[pytest] once: example rows"
-    assert (settings.tags or {})["pytest_once"] == "example rows"
+    assert (settings.tags or {})["pytest_once"] == f"example rows {step.ran_as}"
     assert [task.task_key for task in settings.tasks or []] == ["__pytest_setup", "__pytest_teardown"]
     assert settings.performance_target == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
 
 
-def test_once_is_shared_by_every_caller(lakeflow: Lakeflow, once_rows: JobRun, once_schema: str) -> None:
-    # The same step again, from any test or worker, runs nothing: it reads the first run.
-    again = lakeflow.once("example rows", setup=ONCE_SETUP, teardown=ONCE_TEARDOWN, params={"schema": once_schema})
+def test_once_is_shared_by_every_caller(
+    lakeflow: Lakeflow, once_rows: tuple[StepResult, bool], once_schema: str
+) -> None:
+    # The same step again, from any test or worker, runs nothing: it reads the first outcome.
+    step, run_as_task = once_rows
+    again = lakeflow.once(
+        f"example rows {step.ran_as}",
+        setup=ONCE_SETUP,
+        teardown=ONCE_TEARDOWN,
+        params={"schema": f"{once_schema}_{step.ran_as}"},
+        run_as_task=run_as_task,
+    )
     assert again is not None
-    assert (again.job_id, again.run_id) == (once_rows.job_id, once_rows.run_id)
-    runs = list(lakeflow.ws.jobs.list_runs(job_id=once_rows.job_id))
-    assert [run.run_id for run in runs] == [once_rows.run_id]
+    assert (again.output, again.duration) == (step.output, step.duration)

@@ -11,7 +11,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import PermissionDenied
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import bundle, session, workspace_api
+from pytest_databricks_lakeflow import bundle, session, steps, workspace_api
 from pytest_databricks_lakeflow.ephemeral import polling
 from pytest_databricks_lakeflow.report import directory_name
 from pytest_databricks_lakeflow.settings.compute import Helpers, add_dependencies, merge_environments
@@ -141,6 +141,8 @@ def fake_ws(monkeypatch: pytest.MonkeyPatch) -> FakeWorkspaceClient:
 
     monkeypatch.setattr(workspace_api, "make_workspace_client", make_workspace_client)
     monkeypatch.setattr(polling, "POLL_SECONDS", 0)
+    # Steps run as tasks unless a test asks for a fake Databricks Connect, so that no unit test reaches a real one.
+    monkeypatch.setattr(steps, "connect_available", lambda: False)
     return ws
 
 

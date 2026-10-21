@@ -35,13 +35,13 @@ Every argument of `Lakeflow`, the object that the `lakeflow` fixture returns. Ov
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
-| `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for the stub, probe, setup and teardown tasks, for workspaces without serverless. |
-| `helpers_environment_version` | `"4"` | The serverless environment version of the plugin's `__pytest_serverless` environment, which the stub, probe, setup and teardown tasks use. |
+| `helpers_compute` | `None`, meaning serverless | A `job_cluster_key` from the job for the stub and probe tasks, and setup and teardown steps that run as tasks, for workspaces without serverless. |
+| `helpers_environment_version` | `"4"` | The serverless environment version of the plugin's `__pytest_serverless` environment, which the stub and probe tasks, and setup and teardown steps that run as tasks, use. |
 | `environment_version` | `None` | The serverless environment version of every environment copied from the template, such as `"5"`. Environments whose spec sets `base_environment` keep it. `environments` wins for the environments it names. |
-| `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, helper and nested for-each tasks included. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. |
+| `existing_cluster_id` | `None` | A running cluster for every task that the template puts on a job cluster or a new cluster, helper and nested for-each tasks included. The job's `job_clusters` are dropped. Serverless and warehouse tasks keep their compute. Steps over Databricks Connect run on this cluster too, see [Where setup and teardown steps run](../recipes/compute.md#where-setup-and-teardown-steps-run). |
 | `single_node` | `False` | Make every job cluster and every task's `new_cluster` a single node cluster. Raises `LakeflowError` naming the cluster when one uses standard access mode. See [Run job clusters on one node](../recipes/compute.md#run-job-clusters-on-one-node). |
 | `budget_policy_id` | `None` | The budget policy of every copy and pipeline copy. A pipeline copy without it keeps the deployed pipeline's. |
-| `performance_target` | `"PERFORMANCE_OPTIMIZED"` | The serverless performance mode of every copy and every `once()` job, whatever the template says: `"PERFORMANCE_OPTIMIZED"` starts each task in seconds; `"STANDARD"` bills fewer DBUs and adds 4 to 6 minutes of start-up to every task, for CI runs that can wait; `None` keeps the template's own setting, with a warning when that is `STANDARD`. `--lakeflow-performance-target` overrides it for one run of pytest. Anything else raises `ValueError`. When a run asked for `PERFORMANCE_OPTIMIZED` and the platform used `STANDARD`, the plugin warns once per `Lakeflow`. |
+| `performance_target` | `"PERFORMANCE_OPTIMIZED"` | The serverless performance mode of every copy and every `once()` step that runs as a task, whatever the template says: `"PERFORMANCE_OPTIMIZED"` starts each task in seconds; `"STANDARD"` bills fewer DBUs and adds 4 to 6 minutes of start-up to every task, for CI runs that can wait; `None` keeps the template's own setting, with a warning when that is `STANDARD`. `--lakeflow-performance-target` overrides it for one run of pytest. Anything else raises `ValueError`. When a run asked for `PERFORMANCE_OPTIMIZED` and the platform used `STANDARD`, the plugin warns once per `Lakeflow`. |
 | `disable_auto_optimization` | `True` | Set `disable_auto_optimization` on serverless code tasks, nested for-each tasks included, so that a failure fails once instead of being retried by the platform. |
 
 ## What the copy keeps
@@ -54,7 +54,8 @@ Every argument of `Lakeflow`, the object that the `lakeflow` fixture returns. Ov
 | `extra_dependencies` | `None` | The default of `extra_dependencies=` on `job()` and `task()`. |
 | `environments` | `None` | The default of `environments=` on `job()` and `task()`. A key the job does not have is skipped, whereas `environments=` on a call adds it. A key starting with `__pytest_`, an entry that is not a mapping or an unknown field raises `ValueError` when `Lakeflow` is made. |
 | `children` | `"warn"` | The default of `children=` on `job()` and `task()`: `"warn"` or `"refuse"`. Any other value raises `ValueError`. |
-| `setup`, `teardown` | `None` | The defaults of `setup=` and `teardown=` on `job()` and `task()`. A string, an empty list, a statement with a stray `$`, a path that is not a `.py` file or a function the plugin cannot ship raises `ValueError` when `Lakeflow` is made. |
+| `setup`, `teardown` | `None` | The defaults of `setup=` and `teardown=` on `job()` and `task()`. A string, an empty list, a statement with a stray `$`, a path that is not a `.py` file, or a function the plugin cannot pass its arguments to (or, with `run_as_task=True`, cannot ship) raises `ValueError` when `Lakeflow` is made. |
+| `run_as_task` | `False` | Run `setup=`, `teardown=` and `once()` steps as tasks on the [helper compute](../task-tests.md#helper-compute) instead of over Databricks Connect from the test process. Without databricks-connect they run as tasks anyway, with one warning per session that this setting silences. See [Run a step as a task](../recipes/data.md#run-a-step-as-a-task). |
 | `saved_queries` | `"deployed"` | The default of `saved_queries=` on `job()` and `task()`: `"deployed"` or `"inline"`. Any other value raises `ValueError`. |
 | `permissions` | `None` | The `access_control_list` given to every copy when it is created, as `jobs.JobAccessControlRequest`s or dicts such as `{"group_name": "data-eng", "permission_level": "CAN_VIEW"}`. `IS_OWNER` raises `ValueError`. |
 | `modify_settings` | `None` | Called with each copy's `JobSettings` and the test's `pytest.Item` just before the job is created. Change the settings in place. Job parameters it declares are accepted by `params`. `access_control_list` is not a settings field; use `permissions`. |
@@ -69,7 +70,7 @@ Every argument of `Lakeflow`, the object that the `lakeflow` fixture returns. Ov
 
 ## Defaults for per-call arguments
 
-`run_as`, `queue`, `disable`, `extra_dependencies`, `children`, `setup`, `teardown`, `environments` and `saved_queries` hold the default of the argument of the same name on `job()` and `task()` (`queue` on `run()` and `start()`, `disable` on `job()` only). A call that leaves the argument out, or passes `None`, takes the `Lakeflow` value. Anything else replaces it whole, without merging: `disable=[]` disables nothing, `extra_dependencies=[]` adds none and `environments={}` leaves the template's environments as they are.
+`run_as`, `queue`, `disable`, `extra_dependencies`, `children`, `setup`, `teardown`, `run_as_task`, `environments` and `saved_queries` hold the default of the argument of the same name on `job()` and `task()` (`queue` on `run()` and `start()`, `disable` on `job()` only, `run_as_task` on `once()` too). A call that leaves the argument out, or passes `None`, takes the `Lakeflow` value. Anything else replaces it whole, without merging: `disable=[]` disables nothing, `extra_dependencies=[]` adds none and `environments={}` leaves the template's environments as they are.
 
 Once a default is set, a call cannot opt out of `setup`, `teardown` or `run_as`: `None` takes the `Lakeflow` value, and `setup=[]` raises `ValueError` like any empty list of statements. For tests that need no setup, derive a `Lakeflow` without it, such as `dataclasses.replace(lakeflow, setup=None)`, in their directory's `conftest.py`. To run one copy as yourself while `Lakeflow` sets another `run_as`, pass your own user name.
 
@@ -78,7 +79,7 @@ Once a default is set, a call cannot opt out of `setup`, `teardown` or `run_as`:
 | Method | Does |
 | --- | --- |
 | `lakeflow.job(key, ...)`, `lakeflow.task(ref, ...)` | Make a throwaway copy of a job, or of one task. See [Job tests](../job-tests.md) and [Task tests](../task-tests.md). |
-| `lakeflow.once(name, *, setup=None, teardown=None, params=None, timeout=None)` | Run a setup step once for the whole session, across xdist workers, and its teardown when the session ends; returns the setup run, or `None` without a setup. See [Seed once for the whole session](../recipes/data.md#seed-once-for-the-whole-session). |
+| `lakeflow.once(name, *, setup=None, teardown=None, params=None, timeout=None, run_as_task=None)` | Run a setup step once for the whole session, across xdist workers, and its teardown when the session ends; returns the setup's `StepResult`, or `None` without a setup. See [Seed once for the whole session](../recipes/data.md#seed-once-for-the-whole-session). |
 | `lakeflow.schema(catalog=None)` | A temporary schema, dropped when the block ends. |
 | `lakeflow.pipeline(key, schema, ...)` | A throwaway copy of a bundle pipeline. |
 | `lakeflow.check(key, *, rules=None)` | The wiring mistakes in a job's template, without creating anything. |

@@ -17,7 +17,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from databricks.sdk.service import jobs
 
-from pytest_databricks_lakeflow import bundle, deployment, helpers, session, workspace_api
+from pytest_databricks_lakeflow import bundle, deployment, helpers, session, steps, workspace_api
 from pytest_databricks_lakeflow.ephemeral.job import TEARDOWN_AT, EphemeralJob, TeardownAt
 from pytest_databricks_lakeflow.ephemeral.outcome import record_outcome
 from pytest_databricks_lakeflow.ephemeral.pipeline import EphemeralPipeline
@@ -27,7 +27,7 @@ from pytest_databricks_lakeflow.helpers import LifecycleStep
 from pytest_databricks_lakeflow.naming import JOB_KEY_TAG, default_folder, schema_prefix, tag_value
 from pytest_databricks_lakeflow.once import run_once
 from pytest_databricks_lakeflow.results.build import NOTEBOOK_EXPORTS, NotebookExport, build_job_run
-from pytest_databricks_lakeflow.results.models import JobRun
+from pytest_databricks_lakeflow.results.models import JobRun, StepResult
 from pytest_databricks_lakeflow.settings.compute import (
     Helpers,
     add_dependencies,
@@ -70,6 +70,7 @@ from pytest_databricks_lakeflow.settings.tasks import (
 )
 from pytest_databricks_lakeflow.settings.tasks import force_conditions as force_condition_outcomes
 from pytest_databricks_lakeflow.settings.template import SIDE_EFFECTS, RunAs, SideEffects, sanitise, sanitise_pipeline
+from pytest_databricks_lakeflow.steps import LocalStep
 from pytest_databricks_lakeflow.sweep import SWEEP_SCOPES, SweepOptions, SweepReport, SweepScope
 from pytest_databricks_lakeflow.sweep import sweep as run_sweep
 
@@ -111,7 +112,8 @@ class _CopyOptions:
         run_as: Who the copy runs as.
         children: What to do about the copy's Run Job tasks.
         teardown_at: When the teardown task runs.
-        notebooks: The setup and teardown notebooks asked for, by role, with the job parameters each reads.
+        notebooks: The setup and teardown notebooks that run as tasks, by role, with the job parameters each reads.
+        local_steps: The setup and teardown steps that run over Databricks Connect, by role.
         extra_dependencies: The test-only dependencies, local wheels pointed at their uploaded copies.
         pipelines: What the copy's pipeline tasks update.
         schema: The schema the pipeline copies publish to, with `pipelines="copy"`.
@@ -122,6 +124,7 @@ class _CopyOptions:
     children: Children
     teardown_at: TeardownAt
     notebooks: Mapping[str, Notebook]
+    local_steps: Mapping[str, LocalStep]
     extra_dependencies: Sequence[str]
     pipelines: Pipelines
     schema: str | None
@@ -231,6 +234,10 @@ class Lakeflow:
             string, an empty list, a statement with a stray `$`, a path that is not a `.py` file and a function the
             plugin cannot ship raise `ValueError`.
         teardown: The default of `teardown` on `job()` and `task()`, checked here as `setup` is.
+        run_as_task: The default of `run_as_task` on `job()`, `task()` and `once()`. `False`, the default, runs
+            `setup` and `teardown` functions and SQL statements from the test process over Databricks Connect, in a
+            few seconds, when databricks-connect can be imported; `True` runs them as notebook tasks of the job, about
+            30 seconds each.
         environments: The default of `environments` on `job()` and `task()`, such as
             `{"default": {"environment_version": "5"}}`. Each copy takes the overrides of the environments its job
             has, and an environment key the job does not have is skipped, whereas `environments` on the call adds
@@ -286,6 +293,7 @@ class Lakeflow:
     children: Children = "warn"
     setup: LifecycleStep | None = field(default=None, repr=False)
     teardown: LifecycleStep | None = field(default=None, repr=False)
+    run_as_task: bool = False
     environments: Mapping[str, Mapping[str, Any]] | None = None
     saved_queries: SavedQueries = "deployed"
     modify_settings: Callable[[jobs.JobSettings, pytest.Item], None] | None = field(default=None, repr=False)
@@ -295,6 +303,8 @@ class Lakeflow:
     _ws: WorkspaceClient | None = field(default=None, init=False, repr=False)
     _state_cache: tuple[session.SessionState, dict[str, Any]] | None = field(default=None, init=False, repr=False)
     _warned_performance_override: bool = field(default=False, init=False, repr=False)
+    # The Databricks Connect session that steps run over, made on first use.
+    _connect: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         _choice("sync", self.sync, SYNC_STRATEGIES)
@@ -314,9 +324,9 @@ class Lakeflow:
         _check_deploy_flags(self.deploy_flags)
         _check_permissions(self.access_control_list())
         if self.setup is not None:
-            helpers.check_lifecycle_step(self.setup, "setup")
+            steps.check_step(self.setup, "setup", self.run_as_task)
         if self.teardown is not None:
-            helpers.check_lifecycle_step(self.teardown, "teardown")
+            steps.check_step(self.teardown, "teardown", self.run_as_task)
         if self.environments is not None:
             check_environments(self.environments)
 
@@ -427,6 +437,7 @@ class Lakeflow:
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
         teardown_at: TeardownAt = "run",
+        run_as_task: bool | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -439,23 +450,27 @@ class Lakeflow:
     ) -> EphemeralJob:
         """Make a throwaway copy of a bundle job.
 
-        `setup` and `teardown` run on the job's compute, as notebook tasks of the copy. The setup task runs before
-        every other task on every run, and the teardown task after every other task, whether they passed or failed,
-        or with `teardown_at="close"` alone when the job closes.
-        Each is one of three forms:
+        `setup` and `teardown` run before and after the job's tasks on every run, or with `teardown_at="close"` the
+        teardown once when the job closes. By default a function or a list of SQL statements runs from the test
+        process over Databricks Connect, on serverless compute or on `existing_cluster_id`, in a few seconds and
+        without a task in the copy; a failed setup then raises before the run starts. With `run_as_task=True`, for a
+        `.py` file, and when databricks-connect cannot be imported, each runs as a notebook task of the copy instead,
+        on the helper compute, about 30 seconds each: the setup task before every other task, the teardown task after
+        every other task, whether they passed or failed. Each is one of three forms:
 
         - A plain function taking any of `spark`, `dbutils` and `params`, a dict of the job's parameters with their
           values for the run, as strings: those it declares, those `modify_settings` declares and those passed
-          under `allow_undeclared_params=True`. It must be self-contained: it is shipped as source, so imports go
-          inside it and it cannot use variables of an enclosing function. A value it returns becomes the task's
-          `output` as JSON.
+          under `allow_undeclared_params=True`. A value it returns becomes the step's `output` as JSON. Over Connect,
+          `spark` is a Databricks Connect session and `dbutils` the workspace client's, which reads and writes files,
+          `/Volumes` included, and secrets. As a task it must be self-contained: it is shipped as source, so imports
+          go inside it and it cannot use variables of an enclosing function.
         - A list of SQL statements, each rendered with `string.Template` from the same parameters (`${name}`, and
           `$$` for a literal dollar) and run in order through `spark.sql`. The output is `{"statements": <count>}`.
           The list must not be empty. Each `${name}` is checked here, when `job()` is called, so it must be a
           parameter the bundle job declares or a key of `params`; one that only `run(params=...)` or
           `modify_settings` would supply is refused.
-        - A `pathlib.Path` to a `.py` file, relative to the pytest rootdir, uploaded as the notebook. It reads the
-          parameters from its widgets and calls `dbutils.notebook.exit` itself for an output.
+        - A `pathlib.Path` to a `.py` file, relative to the pytest rootdir, uploaded as the notebook of a task. It
+          reads the parameters from its widgets and calls `dbutils.notebook.exit` itself for an output.
 
         Args:
             key: The bundle resource key of the job, as `databricks bundle run` takes it.
@@ -486,18 +501,21 @@ class Lakeflow:
                 child job and not a copy. `"warn"` emits a `UserWarning` for each one that is not disabled,
                 downstream of a disabled task nor inside a disabled `for_each_task`. `"refuse"` raises
                 `LakeflowError` instead, before anything is created. `None` takes `Lakeflow`'s `children`.
-            setup: A function, a list of SQL statements or a `.py` file to run first, as the task `__pytest_setup`,
-                which every task without `depends_on` comes to depend on. Its outcome is `JobRun.setup`. `None` takes
-                `Lakeflow`'s `setup`.
-            teardown: A function, a list of SQL statements or a `.py` file to run last, as the task
-                `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no other task depends on. Its
-                outcome is `JobRun.teardown`, and a failure is logged as a warning. `None` takes `Lakeflow`'s
-                `teardown`.
-            teardown_at: When the teardown task runs. `"run"` runs it at the end of every run, before the test's
-                assertions. `"close"` leaves it out of every run, whose `teardown` is then `None`, and runs it alone
+            setup: A function, a list of SQL statements or a `.py` file to run first: over Connect before each run
+                starts, or as the task `__pytest_setup`, which every task without `depends_on` comes to depend on. Its
+                outcome is `JobRun.setup`. `None` takes `Lakeflow`'s `setup`.
+            teardown: A function, a list of SQL statements or a `.py` file to run last: over Connect after each run
+                ends, or as the task `__pytest_teardown` with `run_if` `ALL_DONE`, after every task that no other
+                task depends on. Its outcome is `JobRun.teardown`, and a failure is logged as a warning. `None` takes
+                `Lakeflow`'s `teardown`.
+            teardown_at: When the teardown runs. `"run"` runs it at the end of every run, before the test's
+                assertions. `"close"` leaves it out of every run, whose `teardown` is then `None`, and runs it once
                 when the job closes, before it is deleted, with the job's `params`, so the assertions still see what
-                it removes. Its run is `EphemeralJob.teardown_run`. That costs a second run start per job. `keep` and
-                `--lakeflow-keep` skip it, `keep_failed` does not.
+                it removes. Its outcome is `EphemeralJob.teardown`. As a task that costs a second run start per job.
+                `keep` and `--lakeflow-keep` skip it, `keep_failed` does not.
+            run_as_task: Whether `setup` and `teardown` run as notebook tasks of the copy rather than over
+                Databricks Connect. `None` takes `Lakeflow`'s `run_as_task`. Without databricks-connect they run as
+                tasks whatever this says, with one warning per session.
             extra_dependencies: Test-only dependencies for the copy, as PyPI requirements, workspace or Volumes
                 paths of wheels, or local wheels as paths relative to the bundle root that start with `./` or `../`,
                 such as `./dist/*.whl[test]`. A local path is pointed at the copy of each matching file that the last
@@ -609,6 +627,7 @@ class Lakeflow:
             setup=setup,
             teardown=teardown,
             teardown_at=teardown_at,
+            run_as_task=run_as_task,
             extra_dependencies=extra_dependencies,
             pipelines=pipelines,
             schema=schema,
@@ -617,7 +636,7 @@ class Lakeflow:
         item = session.current_item()
         settings = self.template(key)
         check_params(key, settings, params or {}, allow_undeclared=True)
-        _check_lifecycle_params(key, settings, params or {}, options.notebooks)
+        _check_lifecycle_params(key, settings, params or {}, options)
         # Applied first, so a task key or value it rejects gives no collision warning before the error.
         apply_task_params(key, settings, task_params or {})
         check_task_params(key, settings, task_params or {}, params or {})
@@ -658,6 +677,7 @@ class Lakeflow:
         setup: LifecycleStep | None = None,
         teardown: LifecycleStep | None = None,
         teardown_at: TeardownAt = "run",
+        run_as_task: bool | None = None,
         extra_dependencies: Sequence[str] | None = None,
         environments: Mapping[str, Mapping[str, Any]] | None = None,
         task_overrides: Mapping[str, Mapping[str, object]] | None = None,
@@ -702,7 +722,8 @@ class Lakeflow:
             children: What to do when the task is a Run Job task, as for `job()`.
             setup: Runs first, before the stubs, as for `job()`.
             teardown: Runs last, after the task and its probe, as for `job()`.
-            teardown_at: When the teardown task runs, at the end of every run or when the job closes, as for `job()`.
+            teardown_at: When the teardown runs, at the end of every run or when the job closes, as for `job()`.
+            run_as_task: Whether `setup` and `teardown` run as tasks rather than over Connect, as for `job()`.
             extra_dependencies: Test-only dependencies for the job, as for `job()`.
             environments: Fields of the job's serverless environment specs, by `environment_key`, as for `job()`.
             task_overrides: Timeout and retry fields of the task, as for `job()`. Only the task under test can be
@@ -748,6 +769,7 @@ class Lakeflow:
             setup=setup,
             teardown=teardown,
             teardown_at=teardown_at,
+            run_as_task=run_as_task,
             extra_dependencies=extra_dependencies,
             pipelines=pipelines,
             schema=schema,
@@ -779,7 +801,7 @@ class Lakeflow:
         # Before task_params, so a mistyped ref lists the job's tasks and warns about no parameter collisions.
         require_task(settings, task_key)
         check_params(job_key, settings, params or {}, allow_undeclared=True)
-        _check_lifecycle_params(job_key, settings, params or {}, options.notebooks)
+        _check_lifecycle_params(job_key, settings, params or {}, options)
         # Applied first, as in job().
         apply_task_params(job_key, settings, task_params or {}, allowed=[task_key])
         check_task_params(job_key, settings, task_params or {}, params or {})
@@ -837,6 +859,7 @@ class Lakeflow:
         setup: LifecycleStep | None,
         teardown: LifecycleStep | None,
         teardown_at: TeardownAt,
+        run_as_task: bool | None,
         extra_dependencies: Sequence[str] | None,
         pipelines: Pipelines,
         schema: str | None,
@@ -858,11 +881,13 @@ class Lakeflow:
         if teardown_at == "close" and teardown is None:
             raise ValueError('teardown_at="close" runs the teardown task when the job closes, so it needs teardown=')
         dependencies = self._option("extra_dependencies", extra_dependencies) or []
+        notebooks, local_steps = _plan_steps(setup, teardown, self._option("run_as_task", run_as_task))
         return _CopyOptions(
             run_as=self._option("run_as", run_as),
             children=children,
             teardown_at=teardown_at,
-            notebooks=_lifecycle_notebooks(setup, teardown),
+            notebooks=notebooks,
+            local_steps=local_steps,
             extra_dependencies=self._resolve_local_wheels(dependencies),
             pipelines=pipelines,
             schema=schema,
@@ -901,47 +926,62 @@ class Lakeflow:
         teardown: LifecycleStep | None = None,
         params: Mapping[str, str] | None = None,
         timeout: timedelta | None = None,
-    ) -> JobRun | None:
+        run_as_task: bool | None = None,
+    ) -> StepResult | None:
         """Run a setup step once for the whole session, and its teardown when the session ends.
 
         For test data that every test reads and none changes: the fixture tables behind a job's config, a schema the
-        jobs write into, a volume of landing files. `setup=` on `job()` recreates them inside every copy, which costs
-        a task start plus the statements per test and stops the tests from running in parallel; `once()` does it one
-        time, in one job named after the step, for every test and every xdist worker:
+        jobs write into, a volume of landing files. `setup=` on `job()` recreates them for every copy and stops the
+        tests from running in parallel; `once()` does it one time, for every test and every xdist worker:
 
             @pytest.fixture(scope="session")
             def fixtures(lakeflow: Lakeflow) -> None:
                 lakeflow.once("orders", setup=SEED_ORDERS, teardown=DROP_ORDERS, params={"schema": "dev.orders"})
 
-        The first test to ask for the step creates the job and runs the setup task; the other xdist workers wait for
-        that run and read its outcome, and a second call with the same name, steps and parameters anywhere in the
-        session returns the same outcome without running anything. A step whose setup failed fails every test that
-        asks for it. When the session ends, the teardown task runs alone, on the xdist controller when there is one,
-        and the job is deleted; `keep` and `--lakeflow-keep` keep it and skip the teardown, and `keep_failed` keeps
-        it after a failed setup or teardown, as for a copy. The sweep removes leftovers.
+        By default a function or a list of SQL statements runs from the test process over Databricks Connect, as
+        `setup=` on `job()` does, and no job is made. With `run_as_task=True`, for a `.py` file, and when
+        databricks-connect cannot be imported, the step is one job named `[pytest] once: <name>` and tagged
+        `pytest_once`, whose setup task runs alone. Either way the first test to ask runs the setup; the other xdist
+        workers wait for it and read its outcome, and a second call with the same name, steps and parameters
+        anywhere in the session returns the same outcome without running anything. A step whose setup failed fails
+        every test that asks for it. When the session ends, the teardown runs, on the xdist controller when there is
+        one, and the job, if any, is deleted; `keep` and `--lakeflow-keep` skip the teardown and keep the job, and
+        `keep_failed` keeps the job after a failed setup or teardown, as for a copy. The sweep removes leftovers.
 
         Args:
-            name: What the step sets up, which names the job `[pytest] once: <name>` and its `pytest_once` tag.
-            setup: A plain function taking any of `spark`, `dbutils` and `params`, a list of SQL statements rendered
-                from `params`, or a `Path` to a `.py` notebook file, as `setup=` on `job()` takes it.
-            teardown: The same forms, run alone when the session ends.
+            name: What the step sets up, which names its job and the job's `pytest_once` tag.
+            setup: A function taking any of `spark`, `dbutils` and `params`, a list of SQL statements rendered from
+                `params`, or a `Path` to a `.py` notebook file, as `setup=` on `job()` takes it.
+            teardown: The same forms, run when the session ends. Over Connect a function teardown may run in the
+                xdist controller rather than the process that called `once()`, so it must be self-contained, as a
+                function that runs as a task must be.
             params: The step's job parameters, which the statements' `${name}` placeholders and the function's
-                `params` read. They are declared on the step's job with these values as defaults.
-            timeout: How long to wait for the setup task, and later for the teardown task. Defaults to `Lakeflow`'s
-                `timeout`.
+                `params` read. As a task, they are declared on the step's job with these values as defaults.
+            timeout: How long to wait for the setup task, and later for the teardown task, when they run as tasks.
+                Defaults to `Lakeflow`'s `timeout`.
+            run_as_task: Whether the steps run as tasks of a job rather than over Databricks Connect. `None` takes
+                `Lakeflow`'s `run_as_task`.
 
         Returns:
-            The setup run's outcome, whose `setup` is the task's `TaskRun`, or `None` when the step has no setup.
-            Its `succeeded` is false, because a step has no task under test; assert on `run.setup`.
+            The setup step's outcome, or `None` when the step has no setup.
 
         Raises:
-            ValueError: If `name` is blank, neither step is given, a step has a form `setup=` refuses, a parameter name
-                starts with `__pytest_`, or `helpers_compute` names a job cluster, which a step's job does not have.
+            ValueError: If `name` is blank, neither step is given, a step has a form `setup=` refuses, a teardown
+                function to run over Connect is not self-contained, a parameter name starts with `__pytest_`, or the
+                steps run as tasks and `helpers_compute` names a job cluster, which a step's job does not have.
             LakeflowError: If called outside a test or a fixture, a statement reads a `${name}` that `params` does
-                not hold, the setup task failed or the step failed earlier in this session.
-            LakeflowTimeout: If the setup run did not finish within `timeout`. It is cancelled first.
+                not hold, the setup failed or the step failed earlier in this session.
+            LakeflowTimeout: If a setup task did not finish within `timeout`. It is cancelled first.
         """
-        return run_once(self, name, setup=setup, teardown=teardown, params=params, timeout=timeout)
+        return run_once(
+            self,
+            name,
+            setup=setup,
+            teardown=teardown,
+            params=params,
+            timeout=timeout,
+            run_as_task=self._option("run_as_task", run_as_task),
+        )
 
     def attach(self, run_id: int) -> JobRun:
         """Rebuild the outcome of a finished run of a kept ephemeral job, without running anything.
@@ -1327,6 +1367,7 @@ class Lakeflow:
             pipeline_copies=copies,
             teardown_at=options.teardown_at,
             query_files=query_files,
+            local_steps=options.local_steps,
         )
         if options.pipelines == "copy":
             assert options.schema is not None
@@ -1478,17 +1519,27 @@ def _flag_name(flag: str) -> str:
     return name[:2]
 
 
-def _lifecycle_notebooks(setup: LifecycleStep | None, teardown: LifecycleStep | None) -> dict[str, Notebook]:
-    """Build the setup and teardown notebooks that were asked for, by role, checking both before anything else."""
+def _plan_steps(
+    setup: LifecycleStep | None, teardown: LifecycleStep | None, run_as_task: bool
+) -> tuple[dict[str, Notebook], dict[str, LocalStep]]:
+    """Decide how each step that was asked for runs, and check both before anything else.
+
+    Returns:
+        The notebooks of the steps that run as tasks, and the steps that run over Databricks Connect, by role.
+    """
     notebooks: dict[str, Notebook] = {}
+    local_steps: dict[str, LocalStep] = {}
     if setup is None and teardown is None:
-        return notebooks
+        return notebooks, local_steps
     rootpath = session.current().rootpath
-    if setup is not None:
-        notebooks["setup"] = helpers.lifecycle_source(setup, rootpath, "setup")
-    if teardown is not None:
-        notebooks["teardown"] = helpers.lifecycle_source(teardown, rootpath, "teardown")
-    return notebooks
+    for role, step in (("setup", setup), ("teardown", teardown)):
+        if step is None:
+            continue
+        if steps.runs_as_task(step, run_as_task):
+            notebooks[role] = helpers.lifecycle_source(step, rootpath, role)
+        else:
+            local_steps[role] = steps.local_step(step, role)
+    return notebooks, local_steps
 
 
 def _stale_message(stale: Sequence[str], target: str) -> str:
@@ -1499,10 +1550,12 @@ def _stale_message(stale: Sequence[str], target: str) -> str:
 
 
 def _check_lifecycle_params(
-    job_key: str, settings: jobs.JobSettings, params: Mapping[str, str], notebooks: Mapping[str, Notebook]
+    job_key: str, settings: jobs.JobSettings, params: Mapping[str, str], options: _CopyOptions
 ) -> None:
-    for role, (_, names) in notebooks.items():
+    for role, (_, names) in options.notebooks.items():
         check_lifecycle_params(job_key, settings, params, role, names)
+    for role, step in options.local_steps.items():
+        check_lifecycle_params(job_key, settings, params, role, step.names)
 
 
 def _choice(name: str, value: object, choices: Sequence[str]) -> None:

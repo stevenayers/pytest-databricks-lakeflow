@@ -275,10 +275,11 @@ class TestLifecycleTasks:
         built = build_from(ws, run)
         assert built.succeeded
         assert sorted(built.tasks) == ["a"]
-        assert built.setup is built.injected_tasks["__pytest_setup"]
-        assert built.setup.output_json == {"rows": 1}
-        assert built.teardown is built.injected_tasks["__pytest_teardown"]
-        assert built.teardown.result_state == "FAILED"
+        assert built.setup is not None and built.teardown is not None
+        assert built.setup.task is built.injected_tasks["__pytest_setup"]
+        assert (built.setup.ran_as, built.setup.output_json) == ("task", {"rows": 1})
+        assert built.teardown.task is built.injected_tasks["__pytest_teardown"]
+        assert not built.teardown.succeeded
         assert repr(built) == f"JobRun('my_job', SUCCESS, {built.run_url}, failing=[])"
         without = build_from(FakeWorkspaceClient(), make_run(2, {"a": "SUCCESS"}))
         assert (without.setup, without.teardown) == (None, None)

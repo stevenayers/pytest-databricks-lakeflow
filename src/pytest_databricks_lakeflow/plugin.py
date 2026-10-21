@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from pytest_databricks_lakeflow import bundle, once
+from pytest_databricks_lakeflow import bundle, once, steps
 from pytest_databricks_lakeflow.client import PERFORMANCE_TARGETS, Lakeflow
 from pytest_databricks_lakeflow.collection import BundleFile
 from pytest_databricks_lakeflow.ephemeral.outcome import NOTEBOOKS, PROGRESS, REPORTS
@@ -308,9 +308,11 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     _cancel_active_runs(state)
     if hasattr(config, "workerinput"):
         _report_to_controller(cast(Any, config).workeroutput, state)
+        steps.stop_sessions(state)
         return
     if state.once_jobs:
         once.finish(state, partial(_write_line, session))
+    steps.stop_sessions(state)
     if state.destroy:
         _destroy_deployments(session, state)
 
