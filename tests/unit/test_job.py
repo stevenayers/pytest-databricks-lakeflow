@@ -548,23 +548,43 @@ class TestCreateSettings:
         assert (alert.alert_id, alert.warehouse_id) == ("a2", "w1")
         assert alert.subscribers == [jobs.AlertTaskSubscriber(user_name="someone@example.com")]
 
-    def test_standard_performance_target_warns(
+    def test_template_standard_target_warns_only_when_kept(
         self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
     ) -> None:
         fake_ws.jobs.settings[fake_cli.deployed["my_job"]].performance_target = jobs.PerformanceTarget.STANDARD
-        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job")\n')
-        result.assert_outcomes(passed=1, warnings=1)
-        result.stdout.fnmatch_lines(["*Job 'my_job' has performance_target STANDARD*Pass performance_optimized=True*"])
-
-    def test_performance_optimized(
-        self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient, fake_cli: FakeCli
-    ) -> None:
-        fake_ws.jobs.settings[fake_cli.deployed["my_job"]].performance_target = jobs.PerformanceTarget.STANDARD
-        configure_lakeflow(pytester, "performance_optimized=True, disable_auto_optimization=False")
+        configure_lakeflow(pytester, "performance_target=None")
         result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
-        result.assert_outcomes(passed=1)
+        result.assert_outcomes(passed=1, warnings=1)
+        result.stdout.fnmatch_lines(
+            ["*Job 'my_job' has performance_target STANDARD*Leave Lakeflow's performance_target at its default*"]
+        )
         [created] = fake_ws.jobs.created
-        assert created["performance_target"] == jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        assert created["performance_target"] == jobs.PerformanceTarget.STANDARD
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            pytest.param("", jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED, id="default"),
+            pytest.param('performance_target="STANDARD"', jobs.PerformanceTarget.STANDARD, id="standard"),
+        ],
+    )
+    def test_performance_target_overrides_the_template(
+        self,
+        pytester: pytest.Pytester,
+        fake_ws: FakeWorkspaceClient,
+        fake_cli: FakeCli,
+        arguments: str,
+        expected: jobs.PerformanceTarget,
+    ) -> None:
+        template = fake_ws.jobs.settings[fake_cli.deployed["my_job"]]
+        template.performance_target = jobs.PerformanceTarget.STANDARD
+        if expected == jobs.PerformanceTarget.STANDARD:
+            template.performance_target = jobs.PerformanceTarget.PERFORMANCE_OPTIMIZED
+        configure_lakeflow(pytester, f"{arguments}, disable_auto_optimization=False".lstrip(", "))
+        result = run_tests(pytester, 'def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        result.assert_outcomes(passed=1, warnings=0)
+        [created] = fake_ws.jobs.created
+        assert created["performance_target"] == expected
         assert not any(task.disable_auto_optimization for task in created["tasks"])
 
     def test_extra_dependencies_reach_the_created_job(

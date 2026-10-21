@@ -6,13 +6,14 @@ import shutil
 import tempfile
 from collections.abc import Generator
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from pytest_databricks_lakeflow import bundle
-from pytest_databricks_lakeflow.client import Lakeflow
+from pytest_databricks_lakeflow import bundle, once
+from pytest_databricks_lakeflow.client import PERFORMANCE_TARGETS, Lakeflow
 from pytest_databricks_lakeflow.collection import BundleFile
 from pytest_databricks_lakeflow.ephemeral.outcome import NOTEBOOKS, PROGRESS, REPORTS
 from pytest_databricks_lakeflow.errors import LakeflowBundleError
@@ -131,6 +132,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "otherwise. The cap is per xdist worker. Overrides Lakeflow(max_concurrent_runs=...).",
     )
     group.addoption(
+        "--lakeflow-performance-target",
+        dest="lakeflow_performance_target",
+        choices=PERFORMANCE_TARGETS,
+        default=None,
+        metavar="MODE",
+        help="Run every ephemeral job in this serverless performance mode: PERFORMANCE_OPTIMIZED, the default, or "
+        "STANDARD, which uses fewer DBUs and adds 4 to 6 minutes of start-up to every task, for runs that can wait. "
+        "Overrides Lakeflow(performance_target=...).",
+    )
+    group.addoption(
         "--lakeflow-check",
         action="store_true",
         dest="lakeflow_check",
@@ -167,6 +178,7 @@ def pytest_configure(config: pytest.Config) -> None:
         debug_notebook=config.getoption("lakeflow_debug_notebook"),
         live=config.getoption("lakeflow_live"),
         max_concurrent_runs=_max_concurrent_runs(config),
+        performance_target=config.getoption("lakeflow_performance_target"),
     )
     config.stash[STATE] = state
     activate(state)
@@ -296,8 +308,17 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     _cancel_active_runs(state)
     if hasattr(config, "workerinput"):
         _report_to_controller(cast(Any, config).workeroutput, state)
-    elif state.destroy:
+        return
+    if state.once_jobs:
+        once.finish(state, partial(_write_line, session))
+    if state.destroy:
         _destroy_deployments(session, state)
+
+
+def _write_line(session: pytest.Session, line: str) -> None:
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(line)
 
 
 def _cancel_active_runs(state: SessionState) -> None:
@@ -319,6 +340,7 @@ def _report_to_controller(workeroutput: dict[str, Any], state: SessionState) -> 
     workeroutput["lakeflow_debug_notebooks"] = state.debug_notebooks
     workeroutput["lakeflow_cancelled_runs"] = state.cancelled_runs
     workeroutput["lakeflow_sweep_dry_run"] = state.sweep_dry_run
+    workeroutput["lakeflow_once_jobs"] = state.once_jobs
 
 
 def _destroy_deployments(session: pytest.Session, state: SessionState) -> None:
@@ -346,6 +368,7 @@ def pytest_testnodedown(node: Any, error: object) -> None:
     state.kept_schemas.extend(output.get("lakeflow_kept_schemas", []))
     state.debug_notebooks.extend(output.get("lakeflow_debug_notebooks", []))
     state.cancelled_runs += output.get("lakeflow_cancelled_runs", 0)
+    state.once_jobs.extend(output.get("lakeflow_once_jobs", []))
     if output.get("lakeflow_sweep_dry_run") is not None:
         state.sweep_dry_run = output["lakeflow_sweep_dry_run"]
 

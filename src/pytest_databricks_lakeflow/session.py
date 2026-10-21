@@ -28,6 +28,7 @@ from pytest_databricks_lakeflow.sweep import sweep as run_sweep
 if TYPE_CHECKING:
     from pytest_databricks_lakeflow.client import Lakeflow
     from pytest_databricks_lakeflow.ephemeral.job import EphemeralJob
+    from pytest_databricks_lakeflow.results.models import JobRun
 
 log = logging.getLogger("pytest_databricks_lakeflow")
 RUN_ID_VARIABLES = ("LAKEFLOW_RUN_ID", "GITHUB_RUN_ID", "BUILD_BUILDID")
@@ -137,6 +138,13 @@ class SessionState:
             `check_sp_user_role` found it, by workspace host, identity and application id.
         live: Whether `--lakeflow-live` is set.
         max_concurrent_runs: The value of `--lakeflow-max-concurrent-runs`, or `None`.
+        performance_target: The value of `--lakeflow-performance-target`, or `None`.
+        once_records: The outcome of each `Lakeflow.once()` step this process has asked for, by the step's digest:
+            the record of its job, or the error it failed with.
+        once_results: The setup run of each `once()` step read in this process, by run id.
+        once_jobs: The records of the `once()` jobs this process set up, torn down at session end. Under xdist the
+            workers report theirs to the controller, which tears them all down.
+        once_clients: The workspace client that made each `once()` job in this process, by job id.
         slots: The cap on the runs this process has active, made by the first run under a cap, or `None`.
         slots_lock: Held while `run_slots` makes or reads `slots`, so threads starting their first capped runs at
             once share one cap.
@@ -172,6 +180,11 @@ class SessionState:
     sp_user_roles: dict[tuple[str, str, str], bool | None] = field(default_factory=dict)
     live: bool = False
     max_concurrent_runs: int | None = None
+    performance_target: str | None = None
+    once_records: dict[str, dict[str, Any] | Exception] = field(default_factory=dict)
+    once_results: dict[int, JobRun] = field(default_factory=dict)
+    once_jobs: list[dict[str, Any]] = field(default_factory=list)
+    once_clients: dict[int, WorkspaceClient] = field(default_factory=dict)
     slots: RunSlots | None = None
     slots_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 

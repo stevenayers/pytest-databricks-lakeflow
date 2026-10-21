@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -38,8 +39,11 @@ if TYPE_CHECKING:
 log = logging.getLogger("pytest_databricks_lakeflow")
 T = TypeVar("T")
 R = TypeVar("R")
-# How many task runs are read from the Jobs API at once.
+# How many task runs one process reads from the Jobs API at once, at most. The workspace allows 20 `runs/get-output`
+# requests per second in all, so the budget below is shared between the xdist workers, which finish runs at the same
+# time, and each gets `FETCH_BUDGET // workers` threads, at least one.
 FETCH_THREADS = 8
+FETCH_BUDGET = 16
 NotebookExport = Literal["never", "failed", "always"]
 NOTEBOOK_EXPORTS: tuple[str, ...] = get_args(NotebookExport)
 RUN_OUTPUT_PATH = "/api/2.2/jobs/runs/get-output"
@@ -351,13 +355,25 @@ def fetch_each(items: Sequence[T], fetch: Callable[[T], R | None]) -> list[tuple
     """
     if not items:
         return []
-    with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
+    with ThreadPoolExecutor(max_workers=fetch_threads()) as pool:
         results = list(pool.map(fetch, items))
     found: list[tuple[T, R]] = []
     for item, result in zip(items, results, strict=True):
         if result is not None:
             found.append((item, result))
     return found
+
+
+def fetch_threads() -> int:
+    """How many task runs this process reads at once: `FETCH_THREADS`, or its share of `FETCH_BUDGET` under xdist.
+
+    pytest-xdist sets `PYTEST_XDIST_WORKER_COUNT` in every worker; a value that is not a number counts as one worker.
+    """
+    try:
+        workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
+    except ValueError:
+        workers = 1
+    return max(1, min(FETCH_THREADS, FETCH_BUDGET // max(1, workers)))
 
 
 def fetch_outputs(ws: WorkspaceClient, tasks: Sequence[jobs.RunTask]) -> dict[int, jobs.RunOutput]:

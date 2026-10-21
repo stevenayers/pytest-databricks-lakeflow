@@ -78,6 +78,7 @@ class TestCommandLine:
                 "*--lakeflow-debug-notebook*",
                 "*--lakeflow-live*",
                 "*--lakeflow-max-concurrent-runs=N*",
+                "*--lakeflow-performance-target=*",
                 "*--lakeflow-check*",
             ]
         )
@@ -123,6 +124,24 @@ class TestRunCapFlag:
         )
         pytester.runpytest("--lakeflow-max-concurrent-runs=2").assert_outcomes(passed=1)
         assert len(fake_ws.jobs.run_now_calls) == 2
+
+
+class TestPerformanceTargetFlag:
+    """`--lakeflow-performance-target` sets every copy's performance mode, over `Lakeflow(performance_target=...)`."""
+
+    @pytest.mark.usefixtures("fake_cli", "bundle_dir")
+    def test_flag_wins_over_the_argument(self, pytester: pytest.Pytester, fake_ws: FakeWorkspaceClient) -> None:
+        configure_lakeflow(pytester, 'performance_target="PERFORMANCE_OPTIMIZED"')
+        pytester.makepyfile('def test_job(lakeflow):\n    lakeflow.job("my_job").run()\n')
+        pytester.runpytest("--lakeflow-performance-target=STANDARD").assert_outcomes(passed=1, warnings=0)
+        [created] = fake_ws.jobs.created
+        assert created["performance_target"] == jobs.PerformanceTarget.STANDARD
+
+    def test_flag_takes_only_the_platform_values(self, pytester: pytest.Pytester) -> None:
+        pytester.makepyfile(TESTS)
+        result = pytester.runpytest("--lakeflow-performance-target=fast")
+        assert result.ret == pytest.ExitCode.USAGE_ERROR
+        result.stderr.fnmatch_lines(["*--lakeflow-performance-target: invalid choice: 'fast'*"])
 
 
 DESTROY = ["bundle", "destroy", "-t", "test", "--auto-approve"]

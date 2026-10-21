@@ -40,7 +40,7 @@ Everything after `params` is keyword-only. Each option has a recipe:
 | `upstream_task_values` | Replaces tasks with stubs that set task values | [Run the downstream half of a job](recipes/runs.md#run-the-downstream-half-of-a-job) |
 | `for_each_inputs` | The list a for-each task iterates over | [For-each tasks](recipes/task-types.md#for-each-tasks) |
 | `trigger` | The values of `{{job.trigger.*}}` references | [Simulate a trigger](recipes/task-types.md#simulate-a-trigger) |
-| `setup`, `teardown`, `teardown_at` | Tasks that seed and clean up data | [Seed data with a setup task](recipes/data.md#seed-data-with-a-setup-task) |
+| `setup`, `teardown`, `teardown_at` | Tasks that seed and clean up data one test owns; fixtures every test reads go in `lakeflow.once()` | [Seed data with a setup task](recipes/data.md#seed-data-with-a-setup-task), [Seed once for the whole session](recipes/data.md#seed-once-for-the-whole-session) |
 | `extra_dependencies` | Test-only packages | [Add test-only dependencies](recipes/job-settings.md#add-test-only-dependencies) |
 | `environments` | The copy's serverless environments | [Change a serverless environment](recipes/job-settings.md#change-a-serverless-environment) |
 | `pipelines`, `schema` | Copies the pipelines that its pipeline tasks update | [Copy the pipelines of a job](recipes/task-types.md#copy-the-pipelines-of-a-job) |
@@ -72,7 +72,7 @@ The keyword-only options each have a recipe:
 | Option | Changes | Recipe |
 | --- | --- | --- |
 | `stop_after` | Cancels the run after a fixed time and returns it | [Stop a run that does not end](recipes/runs.md#stop-a-run-that-does-not-end) |
-| `performance_target`, `queue` | The serverless performance mode and queueing of this run | [Speed up a run](recipes/compute.md#speed-up-a-run) |
+| `performance_target`, `queue` | The serverless performance mode and queueing of this run | [Choose the performance mode](recipes/compute.md#choose-the-performance-mode) |
 | `full_refresh` and the refresh selections | How the run's pipeline tasks refresh | [Choose how a pipeline task refreshes](recipes/task-types.md#choose-how-a-pipeline-task-refreshes) |
 | `replay` | Stubs the tasks that `only` leaves out with a previous run's task values | [Replay a run's task values](recipes/runs.md#replay-a-runs-task-values) |
 | `dbt_commands` | The commands of every dbt task in this run | [dbt tasks](recipes/task-types.md#dbt-tasks) |
