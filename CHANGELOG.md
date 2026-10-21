@@ -3,6 +3,23 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.15.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.14.0...v0.15.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* Steps over Databricks Connect run as you, in your local Python, not as the copy's `run_as`. A failed setup raises `LakeflowError` before the run starts. Pass `run_as_task=True` to `Lakeflow`, `job()`, `task()` or `once()` to keep the tasks. The `xdist` and `pytester` extras are removed: install `pytest-xdist` and `databricks-labs-pytester` yourself.
+* `JobRun.setup` and `JobRun.teardown` are `StepResult` rather than `TaskRun`; read a task's details from `.task`.
+* `Lakeflow.once()` returns a `StepResult` rather than the setup run's `JobRun`.
+* `EphemeralJob.teardown_run` is removed; `EphemeralJob.teardown` is the `StepResult` of the close-time teardown.
+
+### Features
+
+* replace `EphemeralJob.teardown_run` with `EphemeralJob.teardown` ([6d7e227](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6d7e227fc6e0d82faf631860b681ec119eff490b))
+* report setup and teardown steps as `StepResult` ([6d7e227](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6d7e227fc6e0d82faf631860b681ec119eff490b))
+* return a `StepResult` from `Lakeflow.once()` ([6d7e227](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6d7e227fc6e0d82faf631860b681ec119eff490b))
+* run `setup=`, `teardown=` and `once()` steps over Databricks Connect by default ([6d7e227](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/6d7e227fc6e0d82faf631860b681ec119eff490b))
+
 ## [0.14.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.13.1...v0.14.0) (2026-10-21)
 
 
