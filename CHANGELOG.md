@@ -3,6 +3,24 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.14.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.13.1...v0.14.0) (2026-10-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* `Lakeflow(performance_optimized=...)` is removed. Every copy now runs `PERFORMANCE_OPTIMIZED` whatever its template says; pass `performance_target=None` to keep the template's setting, or `performance_target="STANDARD"` for fewer DBUs and 4 to 6 minutes more start-up per task.
+
+### Features
+
+* add Lakeflow.once() to set up shared test data once per session ([fdcda0e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/fdcda0e4db8ff39ffafda9f02c744b9c2d57b911))
+* document speed and cost, and parallel runs with your own Azure login ([fdcda0e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/fdcda0e4db8ff39ffafda9f02c744b9c2d57b911))
+* replace performance_optimized with performance_target and run every copy PERFORMANCE_OPTIMIZED by default ([fdcda0e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/fdcda0e4db8ff39ffafda9f02c744b9c2d57b911))
+
+
+### Performance Improvements
+
+* share the task output reads at the end of a run between xdist workers ([fdcda0e](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/fdcda0e4db8ff39ffafda9f02c744b9c2d57b911))
+
 ## [0.13.1](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.13.0...v0.13.1) (2026-10-20)
 
 
