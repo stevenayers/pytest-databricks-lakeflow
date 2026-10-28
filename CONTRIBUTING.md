@@ -2,6 +2,19 @@
 
 Thanks for helping with pytest-databricks-lakeflow. This page covers the development setup, the two test suites, the commit and pull request conventions, and how releases happen.
 
+## Agent skill
+
+The canonical skill is `skills/pytest-databricks-lakeflow/SKILL.md`. Keep its frontmatter to single-line `name` and `description` strings; `name` must match the directory. Hatch bundles it into the wheel, and `lakeflow-skill install` copies it into agent discovery directories.
+
+Run `uv run python scripts/check_skill.py` to validate the skill, marketplace paths, and versions. Unit tests also run this check. Release-please updates both `.claude-plugin` JSON versions alongside the Python package using JSON `extra-files`; do not bump those separately.
+
+The repository layout supports skills.sh discovery and GitHub crawlers without a publish step; external listing is not guaranteed. Curated lists need a one-time, human-written submission PR. Targets worth checking:
+
+- [anthropics/skills](https://github.com/anthropics/skills): check its current community contribution policy.
+- [awesome-claude-skills](https://github.com/ComposioHQ/awesome-claude-skills) and similar community lists.
+
+Do not automate submissions to curated lists.
+
 ## Development setup
 
 You need Python 3.11 or later, [uv](https://docs.astral.sh/uv/), and, for the integration tests, the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install) v1.7.0 or later.

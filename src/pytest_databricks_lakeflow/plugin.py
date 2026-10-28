@@ -38,7 +38,11 @@ SWEEP_FLAGS = {
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("lakeflow", "Lakeflow Jobs from a Databricks Asset Bundle")
+    group = parser.getgroup(
+        "lakeflow",
+        "Lakeflow Jobs from a Databricks Asset Bundle. "
+        "Docs: https://stevenayers.github.io/pytest-databricks-lakeflow/ — agent skill: lakeflow-skill install",
+    )
     group.addoption(
         "--lakeflow-keep", action="store_true", help="Keep every ephemeral job, pipeline copy and temporary schema."
     )
