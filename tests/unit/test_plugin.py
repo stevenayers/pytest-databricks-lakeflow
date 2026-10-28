@@ -61,7 +61,7 @@ class TestCommandLine:
         result = pytester.runpytest("--help")
         result.stdout.fnmatch_lines(
             [
-                "Lakeflow Jobs from a Databricks Asset Bundle:",
+                "Lakeflow Jobs from a Databricks Asset Bundle.*",
                 "*--lakeflow-keep *",
                 "*--lakeflow-keep-failed*",
                 "*--no-lakeflow-keep-failed*",
@@ -83,6 +83,8 @@ class TestCommandLine:
             ]
         )
         assert "The cap is per xdist worker." in " ".join(result.stdout.str().split())
+        assert "https://stevenayers.github.io/pytest-databricks-lakeflow/" in result.stdout.str()
+        assert "lakeflow-skill install" in result.stdout.str()
         assert "--lakeflow-target" not in result.stdout.str()
         assert "lakeflow_target" not in result.stdout.str()
 
