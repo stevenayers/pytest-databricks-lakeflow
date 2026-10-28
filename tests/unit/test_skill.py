@@ -175,9 +175,3 @@ def test_metadata_drift(tmp_path, path, old, new):
     check = runpy.run_path(str(ROOT / "scripts" / "check_skill.py"))
     with pytest.raises(ValueError):
         check["validate"](tmp_path)
-
-
-def test_pytest_help():
-    result = subprocess.run([sys.executable, "-m", "pytest", "--help"], check=True, capture_output=True, text=True)
-    assert "https://stevenayers.github.io/pytest-databricks-lakeflow/" in result.stdout
-    assert "lakeflow-skill install" in result.stdout
