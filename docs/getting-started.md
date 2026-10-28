@@ -23,6 +23,8 @@ Or `pip install pytest-databricks-lakeflow databricks-connect pytest-xdist`. The
 
 The plugin registers itself through the `pytest11` entry point. There is nothing to add to `conftest.py` or `pytest.ini`.
 
+Using Claude Code, Codex, Copilot or Cursor? [Install the Agent Skill](agents.md) so your agent has the plugin's testing instructions.
+
 ## Add a test target to the bundle
 
 ```yaml

@@ -6,6 +6,8 @@ Install with `uv add --dev pytest-databricks-lakeflow` or `pip install pytest-da
 
 ## Documentation
 
+Agent Skill install routes: `npx skills add stevenayers/pytest-databricks-lakeflow`, offline `lakeflow-skill install` (use `lakeflow-skill show` to read it), or Claude Code `/plugin marketplace add stevenayers/pytest-databricks-lakeflow` then `/plugin install pytest-databricks-lakeflow`. Reload your agent after installing; pip install alone does not activate a skill.
+
 - [Home](https://stevenayers.github.io/pytest-databricks-lakeflow/): the README, with the pitch, a job test, a task test and the fixture override
 - [Getting started](https://stevenayers.github.io/pytest-databricks-lakeflow/getting-started/): prerequisites, install, the bundle test target, reading catalog and schema from job parameters, configuring the fixture, the first test, running it
 - [Job tests](https://stevenayers.github.io/pytest-databricks-lakeflow/job-tests/): lakeflow.job() and its options, run() and its options, checking the outcome (succeeded, task(), raise_for_failure(), repr), the TaskRun fields, asserting on a failure (raised(), error.root_cause, error.code, output_json), reading task values with capture_task_values, temporary schemas with lakeflow.schema(), run(only=...) and what it refuses, what happens when a test fails
@@ -35,7 +37,7 @@ Install with `uv add --dev pytest-databricks-lakeflow` or `pip install pytest-da
 - [Repository](https://github.com/stevenayers/pytest-databricks-lakeflow)
 - [PyPI](https://pypi.org/project/pytest-databricks-lakeflow/)
 - [Example bundle](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/tests/integration/bundles/example): the bundle the integration tests and the docs examples run against
-- [SKILL.md](https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/SKILL.md): instructions for coding agents writing tests with the plugin
+- [SKILL.md](https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/skills/pytest-databricks-lakeflow/SKILL.md): instructions for coding agents writing tests with the plugin
 
 ## Optional
 

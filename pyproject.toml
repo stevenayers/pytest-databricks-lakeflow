@@ -34,6 +34,11 @@ Documentation = "https://stevenayers.github.io/pytest-databricks-lakeflow/"
 Changelog = "https://github.com/stevenayers/pytest-databricks-lakeflow/blob/main/CHANGELOG.md"
 Source = "https://github.com/stevenayers/pytest-databricks-lakeflow"
 Issues = "https://github.com/stevenayers/pytest-databricks-lakeflow/issues"
+"Agent skill" = "https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/skills/pytest-databricks-lakeflow"
+"llms.txt" = "https://stevenayers.github.io/pytest-databricks-lakeflow/llms.txt"
+
+[project.scripts]
+lakeflow-skill = "pytest_databricks_lakeflow.skill:main"
 
 [project.entry-points.pytest11]
 databricks_lakeflow = "pytest_databricks_lakeflow.plugin"
@@ -63,8 +68,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pytest_databricks_lakeflow"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills/pytest-databricks-lakeflow" = "pytest_databricks_lakeflow/skills/pytest-databricks-lakeflow"
+
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+include = ["src", "tests", "skills", "scripts/check_skill.py", ".claude-plugin", "llms.txt", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 120

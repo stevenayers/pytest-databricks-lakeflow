@@ -109,6 +109,33 @@ def test_job_reads_orders(lakeflow: Lakeflow, orders: None) -> None:
 
 With the fixtures made once, the tests are independent, so run them in parallel with `pytest -n 4` (install `pytest-xdist`).
 
+## Using an AI coding agent
+
+The repo ships an [Agent Skill](https://github.com/stevenayers/pytest-databricks-lakeflow/tree/main/skills/pytest-databricks-lakeflow) for writing and debugging Lakeflow job and task tests. Installing the Python package does not activate it automatically. Install it with:
+
+```bash
+npx skills add stevenayers/pytest-databricks-lakeflow
+```
+
+Or, with the Python package installed, use the offline installer:
+
+```bash
+lakeflow-skill install
+```
+
+This writes to `.agents/skills/` and `.claude/skills/` in the current project. Use `--agent claude|codex|copilot|cursor|all` to choose an agent, or `--user` to install for all your projects.
+
+In Claude Code, you can instead install it as a plugin:
+
+```text
+/plugin marketplace add stevenayers/pytest-databricks-lakeflow
+/plugin install pytest-databricks-lakeflow
+```
+
+Reload your agent after installing. Claude Code, Codex, Copilot and Cursor can then load the skill when you ask them to write or debug a Lakeflow job test.
+
+For agents that fetch URLs: [llms.txt](https://stevenayers.github.io/pytest-databricks-lakeflow/llms.txt) indexes the docs and [SKILL.md](https://stevenayers.github.io/pytest-databricks-lakeflow/SKILL.md) contains the instructions. `lakeflow-skill show` prints them locally. See [AI coding agents](https://stevenayers.github.io/pytest-databricks-lakeflow/agents/) for the command reference.
+
 ## Where next
 
 The docs site is at <https://stevenayers.github.io/pytest-databricks-lakeflow/>.
