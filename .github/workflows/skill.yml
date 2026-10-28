@@ -1,0 +1,95 @@
+name: Skill
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  validate:
+    name: Validate skill and marketplace
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+      - run: uv run --no-project python scripts/check_skill.py
+
+  package:
+    name: Build and install bundled skill
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.11"
+      - run: uv build
+      - name: Check distribution contents
+        run: |
+          uv run --no-project python - <<'PY'
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          relative = "skills/pytest-databricks-lakeflow/SKILL.md"
+          canonical = Path(relative).read_bytes()
+          with zipfile.ZipFile(next(Path("dist").glob("*.whl"))) as wheel:
+              assert wheel.read(f"pytest_databricks_lakeflow/{relative}") == canonical
+          with tarfile.open(next(Path("dist").glob("*.tar.gz"))) as sdist:
+              member = next(name for name in sdist.getnames() if name.endswith(f"/{relative}"))
+              assert sdist.extractfile(member).read() == canonical
+          PY
+      - name: Install wheel and exercise CLI offline
+        run: |
+          set -euo pipefail
+          env_dir="$RUNNER_TEMP/skill-venv"
+          uv venv "$env_dir"
+          uv pip install --python "$env_dir/bin/python" dist/*.whl
+          export PATH="$env_dir/bin:$PATH"
+          cd "$(mktemp -d)"
+          lakeflow-skill install --agent all
+          for agent in .agents .claude .github .cursor; do
+            test -f "$agent/skills/pytest-databricks-lakeflow/SKILL.md"
+          done
+          lakeflow-skill show > skill.txt
+          test "$(head -1 skill.txt)" = "---"
+          test -d "$(python -m pytest_databricks_lakeflow.skill path)"
+
+  skills-cli:
+    name: Check skills CLI discovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install from local repository
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          npx --yes skills add "$GITHUB_WORKSPACE" --agent claude-code --copy --yes
+          test -f .claude/skills/pytest-databricks-lakeflow/SKILL.md

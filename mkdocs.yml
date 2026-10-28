@@ -46,6 +46,7 @@ theme:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - AI coding agents: agents.md
   - Job tests: job-tests.md
   - Task tests: task-tests.md
   - Recipes:

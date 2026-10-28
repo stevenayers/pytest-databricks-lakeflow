@@ -1,0 +1,14 @@
+{
+  "name": "pytest-databricks-lakeflow",
+  "description": "Write and debug pytest tests for Databricks Asset Bundle Lakeflow jobs and individual tasks.",
+  "version": "0.15.0",
+  "author": {
+    "name": "Steven Ayers",
+    "url": "https://github.com/stevenayers"
+  },
+  "homepage": "https://stevenayers.github.io/pytest-databricks-lakeflow/",
+  "repository": "https://github.com/stevenayers/pytest-databricks-lakeflow",
+  "license": "Apache-2.0",
+  "keywords": ["pytest", "databricks", "lakeflow", "asset-bundles", "testing"],
+  "skills": ["./skills"]
+}
