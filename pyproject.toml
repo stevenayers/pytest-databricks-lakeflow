@@ -49,7 +49,7 @@ dev = [
     "pytest-cov>=6",
     "pytest-xdist>=3",
     "ruff>=0.5",
-    "ty==0.0.89",
+    "ty==0.0.92",
 ]
 docs = [
     "mkdocs-material>=9.6",
