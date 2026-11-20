@@ -88,8 +88,8 @@ def _fixture_function(collector: pytest.Collector) -> Callable[..., Any]:
         return function
     # Only the default is visible here. An override elsewhere, such as in tests/conftest.py beside a bundle at the
     # repository root, configures another deployment than the one this would check.
-    for definition in _registered(manager):
-        conftest = _override_for(definition.func, collector)
+    for candidate in _registered(manager) + _pending(manager):
+        conftest = _override_for(candidate, collector)
         if conftest is not None:
             raise LakeflowError(
                 f"--lakeflow-check cannot see the lakeflow fixture that {_relative(conftest, collector)} overrides, "
@@ -99,17 +99,36 @@ def _fixture_function(collector: pytest.Collector) -> Callable[..., Any]:
     return function
 
 
-def _registered(manager: Any) -> list[Any]:
-    # Every `lakeflow` fixture pytest has registered so far, whether this file can see it or not. Private pytest API
-    # again: pytest 9.2 replaced the flat `_arg2fixturedefs` with `_arg2node2fixturedefs`, which keys the definitions
-    # of each name by the node they are registered under.
+def _registered(manager: Any) -> list[Callable[..., Any]]:
+    # The function of every `lakeflow` fixture pytest has registered so far, whether this file can see it or not.
+    # Private pytest API again: pytest 9.2 replaced the flat `_arg2fixturedefs` with `_arg2node2fixturedefs`, which
+    # keys the definitions of each name by the node they are registered under.
     by_node = getattr(manager, "_arg2node2fixturedefs", None)
     if by_node is None:
-        return list(manager._arg2fixturedefs.get("lakeflow", []))
-    definitions = []
-    for registered in by_node.get("lakeflow", {}).values():
-        definitions.extend(registered)
-    return definitions
+        return [definition.func for definition in manager._arg2fixturedefs.get("lakeflow", [])]
+    functions = []
+    for definitions in by_node.get("lakeflow", {}).values():
+        for definition in definitions:
+            functions.append(definition.func)
+    return functions
+
+
+def _pending(manager: Any) -> list[Callable[..., Any]]:
+    # Since pytest 9.1 a conftest.py that is already loaded registers its fixtures only when its directory is
+    # collected, which for tests/conftest.py is after the databricks.yml beside tests/. Until then the module waits in
+    # `_pending_conftests`, so find its `lakeflow` fixture as pytest's own parser will: an object of the type that
+    # `@pytest.fixture` returns, under the name given to the decorator or else the name of the attribute.
+    functions = []
+    for module in getattr(manager, "_pending_conftests", {}).values():
+        for attribute, value in vars(module).items():
+            # By the type's name, because pytest before 8.4 has no such type to import, and without reading an
+            # attribute of a value that may be any object a conftest.py imports.
+            if type(value).__name__ != "FixtureFunctionDefinition":
+                continue
+            name = value._fixture_function_marker.name or attribute
+            if name == "lakeflow":
+                functions.append(value._get_wrapped_function())
+    return functions
 
 
 def _override_for(function: Callable[..., Any], collector: pytest.Collector) -> Path | None:
