@@ -3,6 +3,14 @@
 All notable changes to this project are recorded here. The file is maintained by
 [release-please](https://github.com/googleapis/release-please) from conventional commit messages.
 
+## [0.15.1](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.15.0...v0.15.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* collect `--lakeflow-check` bundles on pytest 9.2 ([80e203d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/80e203d35e13a6ac654c283fcbb62b81fb3f3c59))
+* refuse a `lakeflow` override that `--lakeflow-check` cannot see on pytest 9.1 and later, whatever order pytest collects it in ([80e203d](https://github.com/stevenayers/pytest-databricks-lakeflow/commit/80e203d35e13a6ac654c283fcbb62b81fb3f3c59))
+
 ## [0.15.0](https://github.com/stevenayers/pytest-databricks-lakeflow/compare/v0.14.0...v0.15.0) (2026-10-21)
 
 
