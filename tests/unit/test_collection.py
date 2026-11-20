@@ -141,11 +141,31 @@ class TestConfiguredLakeflow:
         assert (pytester.path / "teardowns.txt").read_text() == "xx"
 
     @pytest.mark.parametrize(
-        ("conftest", "bundle", "arguments"),
+        ("conftest", "bundle", "arguments", "paths"),
         [
-            ("tests/conftest.py", "databricks.yml", 'target="staging"'),
-            ("tests/conftest.py", "bundle/databricks.yml", 'bundle_root="bundle", target="staging"'),
-            ("bundles/a/tests/conftest.py", "bundles/a/databricks.yml", 'target="staging"'),
+            ("tests/conftest.py", "databricks.yml", 'target="staging"', ["tests", "databricks.yml"]),
+            (
+                "tests/conftest.py",
+                "bundle/databricks.yml",
+                'bundle_root="bundle", target="staging"',
+                ["tests", "bundle/databricks.yml"],
+            ),
+            (
+                "bundles/a/tests/conftest.py",
+                "bundles/a/databricks.yml",
+                'target="staging"',
+                ["bundles/a/tests", "bundles/a/databricks.yml"],
+            ),
+            # pytest 9.1 and later register the fixtures of a loaded conftest.py only when its directory is collected,
+            # which in these two is after the bundle.
+            pytest.param("tests/conftest.py", "databricks.yml", 'target="staging"', [], id="no-paths"),
+            pytest.param(
+                "tests/conftest.py",
+                "databricks.yml",
+                'target="staging"',
+                ["databricks.yml", "tests"],
+                id="bundle-first",
+            ),
         ],
     )
     def test_an_override_for_the_bundle_it_cannot_see_is_refused(
@@ -156,10 +176,11 @@ class TestConfiguredLakeflow:
         conftest: str,
         bundle: str,
         arguments: str,
+        paths: list[str],
     ) -> None:
         write(pytester, bundle, "bundle:\n  name: a\n")
         write(pytester, conftest, LAKEFLOW_CONFTEST.format(arguments=arguments))
-        result = pytester.runpytest(str(Path(conftest).parent), bundle, "--lakeflow-check")
+        result = pytester.runpytest(*paths, "--lakeflow-check")
         result.stdout.fnmatch_lines(
             [
                 f"*--lakeflow-check cannot see the lakeflow fixture that {conftest} overrides, so it would "
