@@ -88,7 +88,7 @@ def _fixture_function(collector: pytest.Collector) -> Callable[..., Any]:
         return function
     # Only the default is visible here. An override elsewhere, such as in tests/conftest.py beside a bundle at the
     # repository root, configures another deployment than the one this would check.
-    for definition in manager._arg2fixturedefs.get("lakeflow", []):
+    for definition in _registered(manager):
         conftest = _override_for(definition.func, collector)
         if conftest is not None:
             raise LakeflowError(
@@ -97,6 +97,19 @@ def _fixture_function(collector: pytest.Collector) -> Callable[..., Any]:
                 "the bundle's directory or above it"
             )
     return function
+
+
+def _registered(manager: Any) -> list[Any]:
+    # Every `lakeflow` fixture pytest has registered so far, whether this file can see it or not. Private pytest API
+    # again: pytest 9.2 replaced the flat `_arg2fixturedefs` with `_arg2node2fixturedefs`, which keys the definitions
+    # of each name by the node they are registered under.
+    by_node = getattr(manager, "_arg2node2fixturedefs", None)
+    if by_node is None:
+        return list(manager._arg2fixturedefs.get("lakeflow", []))
+    definitions = []
+    for registered in by_node.get("lakeflow", {}).values():
+        definitions.extend(registered)
+    return definitions
 
 
 def _override_for(function: Callable[..., Any], collector: pytest.Collector) -> Path | None:
